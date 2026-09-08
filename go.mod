@@ -5,7 +5,7 @@ go 1.26.0
 godebug default=go1.26
 
 require (
-	github.com/Azure/azure-sdk-for-go-extensions v0.6.0
+	github.com/Azure/azure-sdk-for-go-extensions v0.7.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.22.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.14.0
 	github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7 v7.3.0
