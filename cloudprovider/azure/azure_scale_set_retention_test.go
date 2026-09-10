@@ -205,9 +205,7 @@ func (f *retentionFixture) snapshot(t *testing.T) *retentionSnapshot {
 
 func (f *retentionFixture) mark(t *testing.T, id int) *apiv1.Node {
 	t.Helper()
-	node := newApiNode(armcompute.OrchestrationModeUniform, int64(id))
-	node.Name = fmt.Sprintf("retention-%d", id)
-	node.UID = types.UID(node.Name)
+	node := f.node(t, id)
 	updated, handled, err := f.group.MarkToBeDeleted(context.Background(), node, false)
 	require.NoError(t, err)
 	require.True(t, handled)

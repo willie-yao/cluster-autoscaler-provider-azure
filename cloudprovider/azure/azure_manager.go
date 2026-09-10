@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kretry "k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	providerazureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
@@ -316,11 +317,22 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 		return fmt.Errorf("cannot autodiscover NodeGroups: %s", err)
 	}
 
-	changed := false
 	exists := make(map[string]bool)
 	for _, group := range groups {
+		exists[strings.ToLower(group.Id())] = true
+	}
+	for _, group := range m.getNodeGroups() {
+		if exists[strings.ToLower(group.Id())] || m.isExplicitlyConfigured(group.Id()) {
+			continue
+		}
+		if scaleSet, ok := group.(*ScaleSet); ok && scaleSet.retention != nil {
+			return fmt.Errorf("cannot stop discovering live Deallocate node group %q", group.Id())
+		}
+	}
+
+	changed := false
+	for _, group := range groups {
 		id := group.Id()
-		exists[strings.ToLower(id)] = true
 		if m.isExplicitlyConfigured(id) {
 			// This NodeGroup was explicitly configured, but would also be
 			// autodiscovered. We want the explicitly configured min and max
@@ -439,38 +451,60 @@ func (m *AzureManager) getFilteredScaleSets(filter []labelAutoDiscoveryConfig) (
 			MaxSize:            -1,
 			SupportScaleToZero: scaleToZeroSupportedVMSS,
 		}
+		m.retentionMutex.Lock()
+		retention := m.retentionGroups[strings.ToLower(spec.Name)] != nil
+		m.retentionMutex.Unlock()
+		retention = retention || m.config.deallocates(spec.Name)
 
 		if val, ok := scaleSet.Tags["min"]; ok {
-			if minSize, err := strconv.Atoi(*val); err == nil {
+			if minSize, err := strconv.Atoi(ptr.Deref(val, "")); err == nil {
 				spec.MinSize = minSize
 			} else {
+				if retention {
+					return nil, fmt.Errorf("invalid minimum size for Deallocate vmss %q: %w", spec.Name, err)
+				}
 				klog.Warningf("ignoring vmss %q because of invalid minimum size specified for vmss: %s", *scaleSet.Name, err)
 				continue
 			}
 		} else if cfgSizes.Min >= 0 {
 			spec.MinSize = cfgSizes.Min
 		} else {
+			if retention {
+				return nil, fmt.Errorf("no minimum size specified for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of no minimum size specified for vmss", *scaleSet.Name)
 			continue
 		}
 		if spec.MinSize < 0 {
+			if retention {
+				return nil, fmt.Errorf("minimum size must be non-negative for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of minimum size must be a non-negative number of nodes", *scaleSet.Name)
 			continue
 		}
 		if val, ok := scaleSet.Tags["max"]; ok {
-			if maxSize, err := strconv.Atoi(*val); err == nil {
+			if maxSize, err := strconv.Atoi(ptr.Deref(val, "")); err == nil {
 				spec.MaxSize = maxSize
 			} else {
+				if retention {
+					return nil, fmt.Errorf("invalid maximum size for Deallocate vmss %q: %w", spec.Name, err)
+				}
 				klog.Warningf("ignoring vmss %q because of invalid maximum size specified for vmss: %s", *scaleSet.Name, err)
 				continue
 			}
 		} else if cfgSizes.Max >= 0 {
 			spec.MaxSize = cfgSizes.Max
 		} else {
+			if retention {
+				return nil, fmt.Errorf("no maximum size specified for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of no maximum size specified for vmss", *scaleSet.Name)
 			continue
 		}
 		if spec.MaxSize < spec.MinSize {
+			if retention {
+				return nil, fmt.Errorf("maximum size must be at least minimum size for Deallocate vmss %q: max=%d < min=%d", spec.Name, spec.MaxSize, spec.MinSize)
+			}
 			klog.Warningf("ignoring vmss %q because of maximum size must be greater than or equal to minimum size: max=%d < min=%d", *scaleSet.Name, spec.MaxSize, spec.MinSize)
 			continue
 		}
@@ -484,7 +518,7 @@ func (m *AzureManager) getFilteredScaleSets(filter []labelAutoDiscoveryConfig) (
 
 		vmss, err := NewScaleSet(spec, m, curSize, dedicatedHost)
 		if err != nil {
-			if m.config.deallocates(spec.Name) {
+			if retention {
 				return nil, err
 			}
 			klog.Warningf("ignoring vmss %q %s", *scaleSet.Name, err)

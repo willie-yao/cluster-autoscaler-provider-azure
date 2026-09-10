@@ -19,6 +19,7 @@ package azure
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	providerazureconfig "sigs.k8s.io/cloud-provider-azure/pkg/provider/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config/dynamic"
@@ -407,6 +409,85 @@ func TestExplicitGroupConfigurationIsCaseInsensitive(t *testing.T) {
 	}
 	assert.False(t, manager.isExplicitlyConfigured("discovered"))
 	assert.False(t, manager.isExplicitlyConfigured("other"))
+}
+
+func TestRetentionInvalidDiscoveryPreservesGroup(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(map[string]*string)
+	}{
+		{"invalid min", func(tags map[string]*string) { tags["min"] = ptr.To("invalid") }},
+		{"nil min", func(tags map[string]*string) { tags["min"] = nil }},
+		{"missing min", func(tags map[string]*string) { delete(tags, "min") }},
+		{"negative min", func(tags map[string]*string) { tags["min"] = ptr.To("-1") }},
+		{"invalid max", func(tags map[string]*string) { tags["max"] = ptr.To("invalid") }},
+		{"nil max", func(tags map[string]*string) { tags["max"] = nil }},
+		{"missing max", func(tags map[string]*string) { delete(tags, "max") }},
+		{"max below min", func(tags map[string]*string) { tags["max"] = ptr.To("-1") }},
+		{"missing tags", func(tags map[string]*string) { clear(tags) }},
+		{"missing selector", func(tags map[string]*string) { delete(tags, "cluster-autoscaler-name") }},
+		{"changed selector", func(tags map[string]*string) { tags["cluster-autoscaler-name"] = ptr.To("another-cluster") }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRetentionFixture(t, 3)
+			f.vmss.Tags = retentionConfigVMSS("agents").Tags
+			f.group.manager.explicitlyConfigured = nil
+			f.group.manager.autoDiscoverySpecs = []labelAutoDiscoveryConfig{{Selector: map[string]string{"cluster-autoscaler-name": "test-cluster"}}}
+			f.park(t, 0)
+			f.resume(t, nil)
+			require.NoError(t, f.kube.CoreV1().Nodes().Delete(t.Context(), "retention-0", metav1.DeleteOptions{}))
+			require.NoError(t, f.group.manager.forceRefresh())
+			before := f.group.manager.getNodeGroups()
+			require.Len(t, before, 1)
+			view, err := f.group.GetNodeGroupAccounting(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 3, view.TargetSize)
+			require.Equal(t, 1, view.UpcomingInactiveNodes)
+			test.mutate(f.vmss.Tags)
+			require.Error(t, f.group.manager.forceRefresh())
+			after := f.group.manager.getNodeGroups()
+			require.Len(t, after, 1)
+			require.Same(t, before[0], after[0])
+			_, err = f.group.GetNodeGroupAccounting(t.Context())
+			require.Error(t, err, "invalid discovery must invalidate the old observation")
+			f.vmss.Tags = retentionConfigVMSS("agents").Tags
+			require.NoError(t, f.group.manager.forceRefresh())
+			view, err = f.group.GetNodeGroupAccounting(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 3, view.TargetSize)
+			require.Equal(t, 1, view.UpcomingInactiveNodes)
+		})
+		t.Run(test.name+"/Delete", func(t *testing.T) {
+			manager := newRetentionConfigManager(t)
+			manager.config.NodeGroupScaleDownPolicies = nil
+			manager.autoDiscoverySpecs = []labelAutoDiscoveryConfig{{Selector: map[string]string{"cluster-autoscaler-name": "test-cluster"}}}
+			require.NoError(t, manager.fetchAutoNodeGroups())
+			require.Len(t, manager.getNodeGroups(), 1)
+			test.mutate(manager.azureCache.scaleSets["agents"].Tags)
+			require.NoError(t, manager.fetchAutoNodeGroups())
+			require.Empty(t, manager.getNodeGroups(), "Delete retains legacy discovery filtering")
+		})
+	}
+}
+
+func TestRetentionDiscoveryPolicyLossPreservesGroup(t *testing.T) {
+	for _, invalidSize := range []bool{false, true} {
+		t.Run(fmt.Sprint(invalidSize), func(t *testing.T) {
+			manager := newRetentionConfigManager(t)
+			manager.autoDiscoverySpecs = []labelAutoDiscoveryConfig{{Selector: map[string]string{"cluster-autoscaler-name": "test-cluster"}}}
+			require.NoError(t, manager.fetchAutoNodeGroups())
+			before := manager.getNodeGroups()
+			require.Len(t, before, 1)
+			manager.config.NodeGroupScaleDownPolicies = nil
+			if invalidSize {
+				manager.azureCache.scaleSets["agents"].Tags["min"] = ptr.To("invalid")
+			}
+			require.Error(t, manager.fetchAutoNodeGroups())
+			after := manager.getNodeGroups()
+			require.Len(t, after, 1)
+			require.Same(t, before[0], after[0])
+		})
+	}
 }
 
 func newRetentionConfigManager(t *testing.T) *AzureManager {

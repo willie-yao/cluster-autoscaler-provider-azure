@@ -282,6 +282,95 @@ func TestDeallocateResumeStatusForbiddenPreservesProtection(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDeallocateResumeConditionChangePreservesProtection(t *testing.T) {
+	for _, changeAt := range []string{"before cleanup", "conflict retry", "cleanup response"} {
+		t.Run(changeAt, func(t *testing.T) {
+			f := newRetentionFixture(t, 2)
+			f.park(t, 0)
+			handler := f.resume(t, nil)
+			handler.complete()
+			f.awaitStart(t, 0)
+			f.ready(t, 0, time.Now())
+			marked := f.node(t, 0)
+			changed := false
+			f.kube.PrependReactor("*", "nodes", func(action kubetesting.Action) (bool, runtime.Object, error) {
+				if changed {
+					return false, nil, nil
+				}
+				var node *apiv1.Node
+				switch action := action.(type) {
+				case kubetesting.GetAction:
+					if changeAt != "before cleanup" || action.GetName() != marked.Name {
+						return false, nil, nil
+					}
+					object, err := f.kube.Tracker().Get(apiv1.SchemeGroupVersion.WithResource("nodes"), "", marked.Name)
+					require.NoError(t, err)
+					node = object.(*apiv1.Node)
+				case kubetesting.UpdateAction:
+					if changeAt == "before cleanup" || action.GetSubresource() != "" {
+						return false, nil, nil
+					}
+					node = action.GetObject().(*apiv1.Node).DeepCopy()
+					if taints.HasToBeDeletedTaint(node) {
+						return false, nil, nil
+					}
+				default:
+					return false, nil, nil
+				}
+				condition := conditionSuspended(node)
+				if condition == nil || condition.Status != apiv1.ConditionFalse {
+					return false, nil, nil
+				}
+				condition.Status, condition.Reason = apiv1.ConditionTrue, "another-writer"
+				if changeAt == "conflict retry" {
+					node.Spec.Taints = marked.Spec.Taints
+				}
+				require.NoError(t, f.kube.Tracker().Update(apiv1.SchemeGroupVersion.WithResource("nodes"), node, ""))
+				changed = true
+				if changeAt == "conflict retry" {
+					return true, nil, apierrors.NewConflict(schema.GroupResource{Resource: "nodes"}, node.Name, errors.New("status changed"))
+				}
+				return true, node, nil
+			})
+			require.Error(t, f.group.reconcileRetention(t.Context()))
+			require.True(t, changed)
+			live := f.node(t, 0)
+			require.Equal(t, marked.Spec.Taints, live.Spec.Taints)
+			require.Equal(t, "another-writer", conditionSuspended(live).Reason)
+			require.True(t, cloudprovider.IsNodeSuspended(live))
+			_, err := f.group.GetNodeGroupAccounting(t.Context())
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestDeallocateMissingNodeKeepsPublishedIdentity(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	node := f.node(t, 0)
+	node.Spec.ProviderID = strings.Replace(node.Spec.ProviderID, "test-asg", "TEST-ASG", 1)
+	_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.ready(t, 0, time.Now().Add(-time.Hour))
+	stale := f.node(t, 0)
+	f.park(t, 0)
+	before, err := cloudprovider.GetNodeGroupAccounting(t.Context(), f.group)
+	require.NoError(t, err)
+	require.Equal(t, []string{stale.Spec.ProviderID}, before.InactiveInstanceIDs)
+	require.NoError(t, f.kube.CoreV1().Nodes().Delete(t.Context(), node.Name, metav1.DeleteOptions{}))
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	after, err := cloudprovider.GetNodeGroupAccounting(t.Context(), f.group)
+	require.NoError(t, err)
+	require.Equal(t, before.InactiveInstanceIDs, after.InactiveInstanceIDs)
+	for _, observed := range after.NodeObservations {
+		require.NotEqual(t, stale.Name, observed.Name, "deleted Nodes must not be republished")
+	}
+	normalized, err := cloudprovider.NormalizeNodeGroupObservations([]*apiv1.Node{stale},
+		map[string]*cloudprovider.NodeGroupAccountingSnapshot{f.group.Id(): after})
+	require.NoError(t, err)
+	require.True(t, cloudprovider.IsNodeSuspended(normalized[0]))
+	require.False(t, cloudprovider.IsNodeSuspended(stale))
+}
+
 func TestDeallocatePureSnapshotAndMissingNodeMembership(t *testing.T) {
 	f := newRetentionFixture(t, 2)
 	f.park(t, 0)

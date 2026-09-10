@@ -117,7 +117,9 @@ entry is not recovery and does not purge retained instances.
 Before disabling Deallocate or migrating a group to Delete, resolve all retained,
 in-flight and uncertain work and restore ordinary active infrastructure through
 an operator-controlled procedure. A live group with retention history cannot
-silently be replaced by a Delete group.
+silently be replaced by a Delete group or unregistered through discovery-selector
+loss. Invalid discovery sizing or selector removal fails refresh and preserves
+the existing registration; correct the metadata before expecting scaling to resume.
 
 Local tests and rendering are not live Azure validation, AKS parity, an accepted
 upstream API, or a deployable release claim.

@@ -191,6 +191,8 @@ func (scaleSet *ScaleSet) publishRetention() {
 		member := state.instances[strings.ToLower(instance.Id)]
 		if member.node != nil {
 			instance.Id = member.node.Spec.ProviderID
+		} else if member.receipt != nil {
+			instance.Id = member.receipt.providerID
 		}
 		view.Instances = append(view.Instances, instance.Instance)
 		if instance.Phase != retentionActive {
@@ -454,6 +456,11 @@ func (scaleSet *ScaleSet) removeOwnedTaint(ctx context.Context, member *retentio
 		if resume && !freshResumeReady(live, member) {
 			return fmt.Errorf("Node %q stopped being Ready during activation", live.Name)
 		}
+		if resume {
+			if condition := conditionSuspended(live); condition == nil || condition.Status != apiv1.ConditionFalse || condition.Reason != suspendedReason {
+				return fmt.Errorf("Node %q changed Suspended before cleanup", live.Name)
+			}
+		}
 		if err := receipt.checkTaint(live); err != nil {
 			return err
 		}
@@ -582,7 +589,8 @@ func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
 				return errors.Join(err, scaleSet.restoreOwnedProtection(ctx, member))
 			}
 			if condition := conditionSuspended(updated); condition == nil || condition.Status != apiv1.ConditionFalse || condition.Reason != suspendedReason {
-				return scaleSet.quarantineRetention("resume cleanup", fmt.Errorf("Node %q changed Suspended during cleanup", updated.Name))
+				protectionErr := scaleSet.restoreOwnedProtection(ctx, member)
+				return errors.Join(scaleSet.quarantineRetention("resume cleanup", fmt.Errorf("Node %q changed Suspended during cleanup", updated.Name)), protectionErr)
 			}
 			member.node = updated.DeepCopy()
 			member.completed = true
