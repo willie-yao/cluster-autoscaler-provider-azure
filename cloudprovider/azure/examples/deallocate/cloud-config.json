@@ -1,0 +1,8 @@
+{
+  "vmType": "vmss",
+  "strictCacheUpdates": false,
+  "nodeGroupScaleDownPolicies": {
+    "k8s-nodepool-1-vmss": "Deallocate",
+    "k8s-nodepool-2-vmss": "Delete"
+  }
+}

@@ -196,6 +196,10 @@ func (m *azureCache) regenerate() error {
 		return err
 	}
 
+	return m.regenerateInstanceMappings()
+}
+
+func (m *azureCache) regenerateInstanceMappings() error {
 	// Regenerate instance to node groups mapping.
 	newInstanceToNodeGroupCache := make(map[azureRef]cloudprovider.NodeGroup)
 	newInstanceStates := make(map[azureRef]cloudprovider.InstanceState)

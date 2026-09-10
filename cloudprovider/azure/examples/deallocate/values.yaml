@@ -1,0 +1,24 @@
+# Keep existing authentication and image values, and adjust group selection.
+autoscalingGroups:
+  - name: k8s-nodepool-1-vmss
+    minSize: 0
+    maxSize: 10
+
+extraArgs:
+  cordon-node-before-terminating: "false"
+  cloud-config: /etc/azure/azure.json
+
+extraVolumes:
+  - name: azure-cloud-config
+    secret:
+      secretName: cluster-autoscaler-azure-config
+extraVolumeMounts:
+  - name: azure-cloud-config
+    mountPath: /etc/azure
+    readOnly: true
+
+rbac:
+  additionalRules:
+    - apiGroups: [""]
+      resources: ["nodes/status"]
+      verbs: ["update"]

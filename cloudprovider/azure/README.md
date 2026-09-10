@@ -153,6 +153,23 @@ To run a cluster autoscaler pod on a control plane (previously referred to as ma
 
 To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-vmss-msi.yaml](examples/cluster-autoscaler-vmss-msi.yaml) instead.
 
+#### Retaining Uniform VMSS instances
+
+The opt-in `nodeGroupScaleDownPolicies` cloud-config map selects `Deallocate`
+instead of the default `Delete` behavior by node group name. It applies to both
+explicit and autodiscovered groups, with case-insensitive name matching.
+
+Deallocate requires `--cordon-node-before-terminating=false`, regular-priority
+Uniform VMSS with managed non-ephemeral OS disks, and `strictCacheUpdates: false`.
+Azure CA writes the `Suspended` Node condition and owns deletion-taint cleanup.
+The opt-in service account needs `update` on `nodes/status`; ordinary Delete
+installations do not need this additional permission.
+
+See [Deallocate configuration and limitations](examples/deallocate/README.md)
+and the dedicated [Helm values overlay](examples/deallocate/values.yaml).
+This first delivery requires the matching, unpublished shared-core accounting
+changes. It is not available in the default chart image or validated on live Azure.
+
 #### Azure API Throttling
 Azure has hard limits on the number of read and write requests against Azure APIs *per subscription, per region*. Running lots of clusters in a single subscription, or running a single large, dynamic cluster in a subscription can produce side effects that exceed the number of calls permitted within a given time window for a particular category of requests. See the following documents for more detail on Azure API throttling in general:
 

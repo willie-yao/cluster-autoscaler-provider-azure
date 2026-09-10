@@ -31,8 +31,20 @@ import (
 // This interface wraps the azclient's VMSS client to access BeginDeleteInstances and BeginCreateOrUpdate
 // via the embedded SDK client for async polling.
 type VMSSDeleteClient interface {
+	BeginStart(ctx context.Context, resourceGroupName string, vmScaleSetName string, options *armcompute.VirtualMachineScaleSetsClientBeginStartOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientStartResponse], error)
+	BeginDeallocate(ctx context.Context, resourceGroupName string, vmScaleSetName string, options *armcompute.VirtualMachineScaleSetsClientBeginDeallocateOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientDeallocateResponse], error)
 	BeginDeleteInstances(ctx context.Context, resourceGroupName string, vmScaleSetName string, vmInstanceIDs armcompute.VirtualMachineScaleSetVMInstanceRequiredIDs, options *armcompute.VirtualMachineScaleSetsClientBeginDeleteInstancesOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientDeleteInstancesResponse], error)
 	BeginCreateOrUpdate(ctx context.Context, resourceGroupName string, vmScaleSetName string, parameters armcompute.VirtualMachineScaleSet, options *armcompute.VirtualMachineScaleSetsClientBeginCreateOrUpdateOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientCreateOrUpdateResponse], error)
+}
+
+// BeginStart implements the VMSSDeleteClient interface.
+func (w *vmssDeleteClientWrapper) BeginStart(ctx context.Context, resourceGroupName string, vmScaleSetName string, options *armcompute.VirtualMachineScaleSetsClientBeginStartOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientStartResponse], error) {
+	return w.client.VirtualMachineScaleSetsClient.BeginStart(ctx, resourceGroupName, vmScaleSetName, options)
+}
+
+// BeginDeallocate implements the VMSSDeleteClient interface.
+func (w *vmssDeleteClientWrapper) BeginDeallocate(ctx context.Context, resourceGroupName string, vmScaleSetName string, options *armcompute.VirtualMachineScaleSetsClientBeginDeallocateOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetsClientDeallocateResponse], error) {
+	return w.client.VirtualMachineScaleSetsClient.BeginDeallocate(ctx, resourceGroupName, vmScaleSetName, options)
 }
 
 // vmssDeleteClientWrapper wraps the azclient's VMSS client.
