@@ -195,6 +195,7 @@ type azClient struct {
 	agentPoolClient                 AgentPoolsClient
 	// Wrapper for delete operations
 	vmssClientForDelete VMSSDeleteClient
+	vmssPowerClient     vmssPowerClient
 }
 
 func newARMClientConfig(cfg *Config, env *azure.Environment) *azclient.ARMClientConfig {
@@ -311,6 +312,14 @@ func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
 	if deploymentClient == nil {
 		return nil, fmt.Errorf("failed to create deployment client wrapper: unexpected client type")
 	}
+	var powerClient vmssPowerClient
+	if cfg.ProviderOnlyDeallocate {
+		client, ok := clientFactory.GetVirtualMachineScaleSetVMClient().(*virtualmachinescalesetvmclient.Client)
+		if !ok {
+			return nil, fmt.Errorf("failed to access VMSS power client")
+		}
+		powerClient = client.VirtualMachineScaleSetVMsClient
+	}
 
 	return &azClient{
 		clientFactory:                   clientFactory,
@@ -324,5 +333,6 @@ func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
 		skuClient:                       skuClient,
 		agentPoolClient:                 agentPoolClient,
 		vmssClientForDelete:             vmssClientForDelete,
+		vmssPowerClient:                 powerClient,
 	}, nil
 }

@@ -153,6 +153,25 @@ func (azure *AzureCloudProvider) HasInstance(ctx context.Context, node *apiv1.No
 	if !strings.HasPrefix(node.Spec.ProviderID, "azure://") {
 		return false, fmt.Errorf("invalid azure ProviderID prefix for node: %s, skipped", node.Name)
 	}
+	if azure.azureManager.config.ProviderOnlyDeallocate {
+		group, err := azure.azureManager.providerOnlyGroup(node.Spec.ProviderID)
+		if err != nil {
+			return false, err
+		}
+		if group == nil {
+			return false, nil
+		}
+		instances, err := group.Nodes(ctx)
+		if err != nil {
+			return false, err
+		}
+		for _, instance := range instances {
+			if strings.EqualFold(instance.Id, node.Spec.ProviderID) {
+				return instance.Status == nil || instance.Status.State != cloudprovider.InstanceDeleting, nil
+			}
+		}
+		return false, nil
+	}
 	return azure.azureManager.azureCache.HasInstance(node.Spec.ProviderID)
 }
 
@@ -217,6 +236,7 @@ func BuildAzure(opts *coreoptions.AutoscalerOptions, do cloudprovider.NodeGroupD
 	if err != nil {
 		klog.Fatalf("Failed to create Azure Manager: %v", err)
 	}
+	manager.kubeClient = opts.KubeClient
 	provider, err := BuildAzureCloudProvider(manager, rl)
 	if err != nil {
 		klog.Fatalf("Failed to create Azure cloud provider: %v", err)

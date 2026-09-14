@@ -8,6 +8,56 @@ This README will help you get cluster autoscaler running on your Azure Kubernete
 
 Build the root-level source tree with `make build`, then publish the resulting image to a registry you control before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that published image reference. This bootstrap does not define an official image registry or release channel.
 
+## Local provider-only deallocate prototype
+
+`"providerOnlyDeallocate": true` in cloud-config opts into a local experimental
+alternative. The default remains physical Delete. This mode supports only
+non-hosted, non-AKS-managed Uniform VMSS pools with regular-priority VMs and
+managed non-ephemeral OS disks. It is not an AKS compatibility release.
+It requires Kubernetes `delete` permission on Nodes, which the existing Helm
+ClusterRole does not grant. No RBAC changes are included in this local spike.
+
+Normal core scale-down still chooses and drains Nodes. The provider waits for
+Azure deallocation, then deletes the old Node with a UID precondition. Parked
+VMs do not appear as expected Nodes to core, and active target is physical VMSS
+capacity minus parked instances. An ordinary scale-up starts parked VMs before
+requesting additional physical capacity. A rejected Start is an error, not
+permission to grow instead. An accepted Start whose completion fails remains
+counted through process-local bookkeeping until Azure reports running; its
+error is surfaced. General recovery of unfinished operations is not implemented.
+Stock cleanup of synthetic unregistered/failed Nodes still physically deletes
+VMs, including the default `DeleteNodes` path with its minimum-size constraints.
+Failed VM provisioning retains the existing configured error classification.
+Atomic scale-up is not implemented for this mode.
+
+A fresh manager can rediscover settled parked VMs from Azure without an old
+Node or a stored receipt. Reuse refuses a VM while its old Node still exists,
+including a Node whose deletion failed. In that case operator reconciliation
+may be needed. There is no Node metadata backup or persistent operation journal.
+
+The returning kubelet must restart and register a **new Node UID**. Its configured
+registration labels and taints, plus normal CCM initialization, must match the
+pool's scheduling template. VMSS node-template tags describe simulation; they do
+not themselves configure kubelet registration. Arbitrary labels, annotations,
+taints and administrator cordons applied only to the old Node are lost. Updating
+pool configuration does not prove a retained VM has received that update.
+
+Readiness follows ordinary new-Node initialization and Kubernetes taints, not a
+provider-owned Azure-Start-plus-fresh-heartbeat gate. The provider waits for Start
+completion before returning success, but cannot stop the independent scheduler
+from using a newly initialized Node sooner. A new Node's reported readiness is
+not proof of Azure operation success, and Azure completion is not proof of Node
+readiness.
+
+Local tests run the stock core builder, planner, cluster-state registry, actuator
+and scheduler predicates with the real Azure provider. Azure operations and Node
+registration are simulated. They do not establish live kubelet/CCM or scheduler
+acceptance, arbitrary Node-metadata preservation, or parity with a retained-Node
+design.
+Deleting a Node can also release Node-scoped network allocations. Compatibility
+with the retained VM's CNI/IPAM state is unverified; a successful local loop or a
+live result with a different network does not establish that compatibility.
+
 ## Permissions
 
 Get Azure credentials by running the following [Azure CLI][] command:
