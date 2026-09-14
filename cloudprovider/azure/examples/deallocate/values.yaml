@@ -5,7 +5,6 @@ autoscalingGroups:
     maxSize: 10
 
 extraArgs:
-  cordon-node-before-terminating: "false"
   cloud-config: /etc/azure/azure.json
 
 extraVolumes:

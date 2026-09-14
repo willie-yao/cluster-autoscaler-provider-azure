@@ -18,6 +18,7 @@ package azure
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -25,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	apiv1 "k8s.io/api/core/v1"
 	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -35,13 +37,34 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 )
 
-const suspendedReason = "AzureClusterAutoscalerDeallocate"
+const (
+	suspendedReason            = "AzureClusterAutoscalerDeallocate"
+	retentionReceiptAnnotation = "cluster-autoscaler.kubernetes.io/azure-retention"
+	retentionReceiptVersion    = 1
+	retentionReceiptPending    = "pending"
+	retentionReceiptParked     = "parked"
+)
+
+type persistedRetentionReceipt struct {
+	Version     int       `json:"version"`
+	CycleID     string    `json:"cycleID"`
+	NodeUID     types.UID `json:"nodeUID"`
+	ProviderID  string    `json:"providerID"`
+	TaintValue  string    `json:"taintValue"`
+	CordonOwned bool      `json:"cordonOwned"`
+	State       string    `json:"state"`
+}
 
 type retentionReceipt struct {
 	name           string
 	uid            types.UID
 	providerID     string
 	taint          apiv1.Taint
+	cycleID        string
+	state          string
+	cordonOwned    bool
+	transitionFrom string
+	transitionTo   string
 	cleanupStarted bool
 }
 
@@ -57,9 +80,6 @@ func (m *AzureManager) validateRetentionDependencies() error {
 	if opts == nil || opts.KubeClient == nil || opts.InformerFactory == nil ||
 		opts.Processors == nil || opts.Processors.NodeGroupConfigProcessor == nil || opts.Processors.ScaleStateNotifier == nil {
 		return fmt.Errorf("Deallocate requires the autoscaler Kubernetes client, informer factory, node group configuration processor and scale-state notifier")
-	}
-	if opts.CordonNodeBeforeTerminate {
-		return fmt.Errorf("Deallocate requires --cordon-node-before-terminating=false")
 	}
 	if opts.NodeGroupDefaults.ZeroOrMaxNodeScaling {
 		return fmt.Errorf("Deallocate does not support ZeroOrMaxNodeScaling")
@@ -227,21 +247,90 @@ func conditionSuspended(node *apiv1.Node) *apiv1.NodeCondition {
 	return nil
 }
 
+func readyHeartbeat(node *apiv1.Node) time.Time {
+	if node == nil {
+		return time.Time{}
+	}
+	for _, condition := range node.Status.Conditions {
+		if condition.Type == apiv1.NodeReady {
+			return condition.LastHeartbeatTime.Time
+		}
+	}
+	return time.Time{}
+}
+
 func freshResumeReady(node *apiv1.Node, member *retentionMember) bool {
 	if member.instance.Resume == nil || !member.instance.Resume.StartCompleted || member.instance.Resume.Error != nil {
 		return false
 	}
 	for _, condition := range node.Status.Conditions {
 		if condition.Type == apiv1.NodeReady {
-			return condition.Status == apiv1.ConditionTrue && condition.LastHeartbeatTime.Time.After(member.instance.Resume.AcceptedAt)
+			return condition.Status == apiv1.ConditionTrue &&
+				condition.LastHeartbeatTime.Time.After(member.instance.Resume.AcceptedAt) &&
+				condition.LastHeartbeatTime.Time.After(member.instance.Resume.ReadyBefore)
 		}
 	}
 	return false
 }
 
+func (receipt *retentionReceipt) persisted() persistedRetentionReceipt {
+	return persistedRetentionReceipt{
+		Version: retentionReceiptVersion, CycleID: receipt.cycleID, NodeUID: receipt.uid,
+		ProviderID: receipt.providerID, TaintValue: receipt.taint.Value,
+		CordonOwned: receipt.cordonOwned, State: receipt.state,
+	}
+}
+
+func parseRetentionReceipt(node *apiv1.Node) (*retentionReceipt, error) {
+	value, found := node.Annotations[retentionReceiptAnnotation]
+	if !found {
+		return nil, fmt.Errorf("Node %q has no persisted retention receipt", node.Name)
+	}
+	var persisted persistedRetentionReceipt
+	if err := json.Unmarshal([]byte(value), &persisted); err != nil {
+		return nil, fmt.Errorf("Node %q has an invalid persisted retention receipt: %w", node.Name, err)
+	}
+	if persisted.Version != retentionReceiptVersion || persisted.CycleID == "" ||
+		persisted.NodeUID == "" || persisted.ProviderID == "" || persisted.TaintValue == "" ||
+		(persisted.State != retentionReceiptPending && persisted.State != retentionReceiptParked) {
+		return nil, fmt.Errorf("Node %q has an unsupported persisted retention receipt", node.Name)
+	}
+	if _, err := strconv.ParseInt(persisted.TaintValue, 10, 64); err != nil {
+		return nil, fmt.Errorf("Node %q has an invalid persisted deletion taint value", node.Name)
+	}
+	return &retentionReceipt{
+		name: node.Name, uid: persisted.NodeUID, providerID: persisted.ProviderID,
+		taint:   apiv1.Taint{Key: taints.ToBeDeletedTaint, Value: persisted.TaintValue, Effect: apiv1.TaintEffectNoSchedule},
+		cycleID: persisted.CycleID, state: persisted.State, cordonOwned: persisted.CordonOwned,
+	}, nil
+}
+
+func setRetentionReceipt(node *apiv1.Node, receipt *retentionReceipt) error {
+	persisted, err := json.Marshal(receipt.persisted())
+	if err != nil {
+		return err
+	}
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[retentionReceiptAnnotation] = string(persisted)
+	return nil
+}
+
 func (receipt *retentionReceipt) checkIdentity(node *apiv1.Node) error {
 	if node == nil || node.Name != receipt.name || node.UID != receipt.uid || node.Spec.ProviderID != receipt.providerID {
 		return fmt.Errorf("retained Node identity changed for %q", receipt.name)
+	}
+	return nil
+}
+
+func (receipt *retentionReceipt) checkPersisted(node *apiv1.Node) error {
+	persisted, err := parseRetentionReceipt(node)
+	if err != nil {
+		return err
+	}
+	if persisted.persisted() != receipt.persisted() {
+		return fmt.Errorf("persisted retention ownership changed on Node %q", node.Name)
 	}
 	return nil
 }
@@ -262,7 +351,103 @@ func (receipt *retentionReceipt) checkTaint(node *apiv1.Node) error {
 	return nil
 }
 
-// MarkToBeDeleted records only a taint written by this provider process.
+func (scaleSet *ScaleSet) setRetentionReceiptState(ctx context.Context, member *retentionMember, state string) error {
+	receipt := member.receipt
+	if receipt == nil || (state != retentionReceiptPending && state != retentionReceiptParked) {
+		return fmt.Errorf("instance %q has no valid retention receipt transition", member.instance.Id)
+	}
+	if receipt.state == state {
+		return nil
+	}
+	if receipt.transitionTo != "" {
+		return fmt.Errorf("instance %q has an unresolved retention receipt transition", member.instance.Id)
+	}
+	previous := *receipt
+	desired := previous
+	desired.state = state
+	receipt.transitionFrom = previous.state
+	receipt.transitionTo = state
+	var updated *apiv1.Node
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Get(ctx, receipt.name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if err := receipt.checkIdentity(live); err != nil {
+			return err
+		}
+		if err := receipt.checkTaint(live); err != nil {
+			return err
+		}
+		persisted, err := parseRetentionReceipt(live)
+		if err != nil {
+			return err
+		}
+		if persisted.persisted() == desired.persisted() {
+			updated = live
+			return nil
+		}
+		if persisted.persisted() != previous.persisted() {
+			return fmt.Errorf("persisted retention ownership changed on Node %q", live.Name)
+		}
+		if err := setRetentionReceipt(live, &desired); err != nil {
+			return err
+		}
+		updated, err = scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Update(ctx, live, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	receipt.state = state
+	receipt.transitionFrom = ""
+	receipt.transitionTo = ""
+	member.node = updated.DeepCopy()
+	return nil
+}
+
+func (scaleSet *ScaleSet) settleRetentionReceiptTransition(ctx context.Context, member *retentionMember) error {
+	receipt := member.receipt
+	if receipt == nil || receipt.transitionTo == "" {
+		return nil
+	}
+	live, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Get(ctx, receipt.name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if err := receipt.checkIdentity(live); err != nil {
+		return err
+	}
+	if err := receipt.checkTaint(live); err != nil {
+		return err
+	}
+	persisted, err := parseRetentionReceipt(live)
+	if err != nil {
+		return err
+	}
+	from := *receipt
+	from.state = receipt.transitionFrom
+	to := from
+	to.state = receipt.transitionTo
+	if persisted.persisted() != from.persisted() && persisted.persisted() != to.persisted() {
+		return fmt.Errorf("persisted retention ownership changed on Node %q", live.Name)
+	}
+	target := receipt.transitionTo
+	if receipt.transitionFrom == retentionReceiptParked && receipt.transitionTo == retentionReceiptPending &&
+		member.instance.Phase == retentionRetained && member.instance.Resume == nil {
+		target = retentionReceiptParked
+	}
+	receipt.state = persisted.state
+	receipt.transitionFrom = ""
+	receipt.transitionTo = ""
+	member.node = live.DeepCopy()
+	if receipt.state == target {
+		return nil
+	}
+	return scaleSet.setRetentionReceiptState(ctx, member, target)
+}
+
+// MarkToBeDeleted records only restrictions written by this provider.
 func (scaleSet *ScaleSet) MarkToBeDeleted(ctx context.Context, node *apiv1.Node, cordon bool) (*apiv1.Node, bool, error) {
 	if scaleSet.retention == nil {
 		return node, false, nil
@@ -270,9 +455,6 @@ func (scaleSet *ScaleSet) MarkToBeDeleted(ctx context.Context, node *apiv1.Node,
 	state := scaleSet.retention
 	state.mutex.Lock()
 	defer state.mutex.Unlock()
-	if cordon {
-		return nil, true, fmt.Errorf("Deallocate requires --cordon-node-before-terminating=false")
-	}
 	if err := scaleSet.retentionViewError(); err != nil {
 		return nil, true, err
 	}
@@ -283,6 +465,7 @@ func (scaleSet *ScaleSet) MarkToBeDeleted(ctx context.Context, node *apiv1.Node,
 	if member == nil || member.instance.Phase != retentionActive {
 		return nil, true, fmt.Errorf("Node %q is not an active Deallocate member", node.Name)
 	}
+	cycleID := uuid.NewString()
 	var updated *apiv1.Node
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
 		live, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
@@ -296,6 +479,9 @@ func (scaleSet *ScaleSet) MarkToBeDeleted(ctx context.Context, node *apiv1.Node,
 			if err := member.receipt.checkIdentity(live); err != nil {
 				return err
 			}
+			if err := member.receipt.checkPersisted(live); err != nil {
+				return err
+			}
 			if err := member.receipt.checkTaint(live); err != nil {
 				return err
 			}
@@ -305,15 +491,28 @@ func (scaleSet *ScaleSet) MarkToBeDeleted(ctx context.Context, node *apiv1.Node,
 		if taints.HasToBeDeletedTaint(live) {
 			return fmt.Errorf("Node %q has an unowned deletion taint", live.Name)
 		}
+		if _, found := live.Annotations[retentionReceiptAnnotation]; found {
+			return fmt.Errorf("Node %q has an unowned persisted retention receipt", live.Name)
+		}
 		if condition := conditionSuspended(live); condition != nil &&
 			(condition.Status != apiv1.ConditionFalse || condition.Reason != suspendedReason) {
 			return fmt.Errorf("Node %q has an unowned Suspended condition", live.Name)
 		}
 		taint := apiv1.Taint{Key: taints.ToBeDeletedTaint, Value: strconv.FormatInt(time.Now().Unix(), 10), Effect: apiv1.TaintEffectNoSchedule}
+		receipt := &retentionReceipt{
+			name: live.Name, uid: live.UID, providerID: live.Spec.ProviderID, taint: taint,
+			cycleID: cycleID, state: retentionReceiptPending, cordonOwned: cordon && !live.Spec.Unschedulable,
+		}
 		live.Spec.Taints = append(live.Spec.Taints, taint)
+		if receipt.cordonOwned {
+			live.Spec.Unschedulable = true
+		}
+		if err := setRetentionReceipt(live, receipt); err != nil {
+			return err
+		}
 		updated, err = scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Update(ctx, live, metav1.UpdateOptions{})
 		if err == nil {
-			member.receipt = &retentionReceipt{name: live.Name, uid: live.UID, providerID: live.Spec.ProviderID, taint: taint}
+			member.receipt = receipt
 			member.completed = false
 			member.node = updated.DeepCopy()
 		}
@@ -347,7 +546,8 @@ func (scaleSet *ScaleSet) CleanToBeDeleted(ctx context.Context, node *apiv1.Node
 		return node.DeepCopy(), true, nil
 	}
 	if member.receipt == nil || member.completed {
-		if taints.HasToBeDeletedTaint(node) || cloudprovider.IsNodeSuspended(node) {
+		if taints.HasToBeDeletedTaint(node) || cloudprovider.IsNodeSuspended(node) ||
+			node.Annotations[retentionReceiptAnnotation] != "" {
 			return nil, true, fmt.Errorf("Node %q has restrictions without an ownership receipt", node.Name)
 		}
 		return node.DeepCopy(), true, nil
@@ -371,11 +571,17 @@ func (scaleSet *ScaleSet) validateRetirementNode(ctx context.Context, member *re
 	if err := member.receipt.checkIdentity(requested); err != nil {
 		return err
 	}
+	if err := member.receipt.checkPersisted(requested); err != nil {
+		return err
+	}
 	live, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Get(ctx, member.receipt.name, metav1.GetOptions{})
 	if err != nil {
 		return err
 	}
 	if err := member.receipt.checkIdentity(live); err != nil {
+		return err
+	}
+	if err := member.receipt.checkPersisted(live); err != nil {
 		return err
 	}
 	if cloudprovider.IsNodeSuspended(live) {
@@ -399,6 +605,9 @@ func (scaleSet *ScaleSet) writeSuspended(ctx context.Context, member *retentionM
 			return err
 		}
 		if err := receipt.checkIdentity(live); err != nil {
+			return err
+		}
+		if err := receipt.checkPersisted(live); err != nil {
 			return err
 		}
 		if err := receipt.checkTaint(live); err != nil {
@@ -432,6 +641,9 @@ func (scaleSet *ScaleSet) writeSuspended(ctx context.Context, member *retentionM
 		if err := receipt.checkIdentity(live); err != nil {
 			return err
 		}
+		if err := receipt.checkPersisted(live); err != nil {
+			return err
+		}
 		member.node = live.DeepCopy()
 		return nil
 	})
@@ -453,6 +665,9 @@ func (scaleSet *ScaleSet) removeOwnedTaint(ctx context.Context, member *retentio
 		if err := receipt.checkIdentity(live); err != nil {
 			return err
 		}
+		if err := receipt.checkPersisted(live); err != nil {
+			return err
+		}
 		if resume && !freshResumeReady(live, member) {
 			return fmt.Errorf("Node %q stopped being Ready during activation", live.Name)
 		}
@@ -467,6 +682,10 @@ func (scaleSet *ScaleSet) removeOwnedTaint(ctx context.Context, member *retentio
 		live.Spec.Taints = slices.DeleteFunc(live.Spec.Taints, func(taint apiv1.Taint) bool {
 			return apiequality.Semantic.DeepEqual(taint, receipt.taint)
 		})
+		if receipt.cordonOwned {
+			live.Spec.Unschedulable = false
+		}
+		delete(live.Annotations, retentionReceiptAnnotation)
 		updated, err = scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Update(ctx, live, metav1.UpdateOptions{})
 		return err
 	})
@@ -483,10 +702,32 @@ func (scaleSet *ScaleSet) restoreOwnedProtection(ctx context.Context, member *re
 		if err := receipt.checkIdentity(node); err != nil {
 			return err
 		}
-		if taints.HasToBeDeletedTaint(node) {
-			return receipt.checkTaint(node)
+		changed := false
+		if _, found := node.Annotations[retentionReceiptAnnotation]; found {
+			if err := receipt.checkPersisted(node); err != nil {
+				return err
+			}
+		} else {
+			if err := setRetentionReceipt(node, receipt); err != nil {
+				return err
+			}
+			changed = true
 		}
-		node.Spec.Taints = append(node.Spec.Taints, receipt.taint)
+		if taints.HasToBeDeletedTaint(node) {
+			if err := receipt.checkTaint(node); err != nil {
+				return err
+			}
+		} else {
+			node.Spec.Taints = append(node.Spec.Taints, receipt.taint)
+			changed = true
+		}
+		if receipt.cordonOwned && !node.Spec.Unschedulable {
+			node.Spec.Unschedulable = true
+			changed = true
+		}
+		if !changed {
+			return nil
+		}
 		_, err = scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Update(ctx, node, metav1.UpdateOptions{})
 		return err
 	})
@@ -495,6 +736,55 @@ func (scaleSet *ScaleSet) restoreOwnedProtection(ctx context.Context, member *re
 	}
 	receipt.cleanupStarted = false
 	return scaleSet.holdSuspended(ctx, member)
+}
+
+func (scaleSet *ScaleSet) recoverSettledRetentionMembers(ctx context.Context, members map[string]*retentionMember) error {
+	nodes, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	observed := make(map[string]*apiv1.Node)
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		key := strings.ToLower(node.Spec.ProviderID)
+		if members[key] == nil {
+			continue
+		}
+		if observed[key] != nil || node.UID == "" {
+			return fmt.Errorf("invalid or duplicate Node identity for %q", node.Spec.ProviderID)
+		}
+		observed[key] = node
+	}
+	for key, member := range members {
+		if member.instance.Phase != retentionRetained || member.receipt != nil {
+			continue
+		}
+		node := observed[key]
+		if node == nil {
+			return fmt.Errorf("settled parked instance %q has no retained Node", member.instance.Id)
+		}
+		receipt, err := parseRetentionReceipt(node)
+		if err != nil {
+			return err
+		}
+		if receipt.state != retentionReceiptParked {
+			return fmt.Errorf("Node %q has unsettled retention state %q", node.Name, receipt.state)
+		}
+		if err := receipt.checkIdentity(node); err != nil {
+			return err
+		}
+		if err := receipt.checkTaint(node); err != nil {
+			return err
+		}
+		condition := conditionSuspended(node)
+		if condition == nil || condition.Status != apiv1.ConditionTrue || condition.Reason != suspendedReason {
+			return fmt.Errorf("Node %q has no settled provider-owned Suspended condition", node.Name)
+		}
+		member.receipt = receipt
+		member.stopCompleted = true
+		member.node = node.DeepCopy()
+	}
+	return nil
 }
 
 func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
@@ -534,11 +824,14 @@ func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
 				if cloudprovider.IsNodeSuspended(node) {
 					return fmt.Errorf("Node %q is suspended without accepted retention intent", node.Name)
 				}
-				if member.receipt == nil && taints.HasToBeDeletedTaint(node) {
-					return fmt.Errorf("Node %q has a deletion taint without process-local ownership", node.Name)
+				if member.receipt == nil && (taints.HasToBeDeletedTaint(node) || node.Annotations[retentionReceiptAnnotation] != "") {
+					return fmt.Errorf("Node %q has retention restrictions without current ownership", node.Name)
 				}
 				if member.receipt != nil && !member.completed {
 					if err := member.receipt.checkIdentity(node); err != nil {
+						return err
+					}
+					if err := member.receipt.checkPersisted(node); err != nil {
 						return err
 					}
 				}
@@ -557,7 +850,7 @@ func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
 			continue
 		}
 		if member.receipt == nil {
-			return fmt.Errorf("inactive Node %q has no process-local ownership receipt", node.Name)
+			return fmt.Errorf("inactive Node %q has no retention ownership receipt", node.Name)
 		}
 		if err := member.receipt.checkIdentity(node); err != nil {
 			return err
@@ -567,6 +860,15 @@ func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
 				return err
 			}
 			node = member.node
+		}
+		if member.receipt.transitionTo != "" {
+			if err := scaleSet.settleRetentionReceiptTransition(ctx, member); err != nil {
+				return err
+			}
+			node = member.node
+		}
+		if err := member.receipt.checkPersisted(node); err != nil {
+			return err
 		}
 		if err := member.receipt.checkTaint(node); err != nil {
 			return err
@@ -596,11 +898,21 @@ func (scaleSet *ScaleSet) reconcileRetentionNodes(ctx context.Context) error {
 			member.completed = true
 			member.receipt.cleanupStarted = false
 			member.instance.Phase = retentionActive
-		} else if err := scaleSet.holdSuspended(ctx, member); err != nil {
-			if apierrors.IsNotFound(err) {
-				continue
+		} else {
+			if err := scaleSet.holdSuspended(ctx, member); err != nil {
+				if apierrors.IsNotFound(err) {
+					continue
+				}
+				return err
 			}
-			return err
+			if member.instance.Phase == retentionRetained && member.receipt.state == retentionReceiptPending {
+				if !member.stopCompleted {
+					return fmt.Errorf("instance %q reached retained state before Deallocate completion", member.instance.Id)
+				}
+				if err := scaleSet.setRetentionReceiptState(ctx, member, retentionReceiptParked); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	return nil

@@ -18,10 +18,10 @@ The same map controls explicit `--nodes` and tag-discovered VMSS groups. It
 does not select groups or replace their min/max configuration. Keep your
 existing explicit group flags or discovery selector.
 
-Set `--cordon-node-before-terminating=false`. The CLI default is true, which
-is rejected for Deallocate before mutation. This is deliberately taint-only:
-the provider does not cordon or uncordon Nodes, including Nodes already cordoned
-by an administrator.
+The standard `--cordon-node-before-terminating` setting is supported, including
+its default value of true. Azure CA records whether it changed a Node from
+schedulable to cordoned and only undoes that provider-owned cordon. Nodes already
+cordoned by an administrator remain cordoned.
 
 Supported groups are non-hosted Uniform VMSS with regular-priority VMs and
 managed, non-ephemeral OS disks. Set `strictCacheUpdates` to `false`.
@@ -75,10 +75,11 @@ after a timeout performs a read-only inventory reconciliation, never a physical
 shrink, compensating stop or invented cancellation.
 
 The normal core drain, eviction and PDB checks run before the provider accepts a
-stop. Azure records the exact Node UID and deletion taint it wrote. The
-NoSchedule taint remains during stopping, parking and restart. The provider
-reports `Suspended=True` and excludes inactive inventory from scheduling,
-health and unregistered-instance cleanup, including retained VMs with no Node.
+stop. Azure records a versioned Node receipt containing the exact Node UID,
+provider ID, deletion taint and provider-owned cordon state. The NoSchedule
+taint remains during stopping, parking and restart. The provider reports
+`Suspended=True` and excludes inactive inventory from scheduling, health and
+unregistered-instance cleanup.
 
 Reuse requires backend Start success and a Ready heartbeat newer than that
 specific Start's acceptance time. The provider publishes active availability
@@ -103,16 +104,29 @@ expecting scaling to continue.
 
 ## Restart and migration limitations
 
-Accepted-operation evidence and ownership receipts are process-local, not a
-durable recovery journal. A persisted condition, VM power state or Node age
-cannot reconstruct an acceptance time or prove ownership after a crash or
-leadership change. Ambiguous retained inventory or unfinished operations block
-safe accounting and mutations and may block an autoscaler iteration.
+Completed parks created by this provider are rediscovered after process
+recreation when the VM is exactly `deallocated` with successful provisioning and
+the same live Node still carries the provider's `parked` receipt, exact deletion
+taint and `Suspended=True` condition. Scale-up reuses that capacity before
+growing the VMSS. A recovered Node remains inactive until the new Start
+completes and its Ready heartbeat advances beyond both the pre-Start heartbeat
+and the new acceptance time.
 
-There is no autonomous adoption or crash recovery in this delivery. Preserve
-diagnostics, inspect the cloud operation and Kubernetes state, and explicitly
-reconcile uncertain work before restarting normal scaling. Removing a policy
-entry is not recovery and does not purge retained instances.
+This is settled-state adoption, not a durable cloud-operation journal. A
+`pending` receipt, deallocating or otherwise ambiguous VM state, missing Node,
+changed UID or ownership metadata blocks accounting and mutation. A crash before
+the provider publishes `parked` can therefore strand an otherwise deallocated
+VM for operator reconciliation.
+
+Legacy parked inventory without this receipt, including inventory produced by
+other AKS autoscaler implementations, is not adopted automatically. Resolve it
+through an operator-controlled migration before enabling this implementation.
+Removing a policy entry is not recovery and does not purge retained instances.
+
+A later operator request to keep a Node cordoned while it is already under a
+provider-owned cordon cannot be distinguished from no change. Preexisting
+operator cordons and cordons applied when provider cordoning is disabled are
+preserved.
 
 Before disabling Deallocate or migrating a group to Delete, resolve all retained,
 in-flight and uncertain work and restore ordinary active infrastructure through

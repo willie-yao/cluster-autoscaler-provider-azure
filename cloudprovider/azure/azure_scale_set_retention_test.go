@@ -49,6 +49,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/observers/nodegroupchange"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors"
 	"sigs.k8s.io/cluster-autoscaler/pkg/processors/nodegroupconfig"
+	"sigs.k8s.io/cluster-autoscaler/pkg/utils/taints"
 )
 
 type retentionPoller[T any] struct {
@@ -109,7 +110,8 @@ type retentionFixture struct {
 func retentionTestOptions() *coreoptions.AutoscalerOptions {
 	client := kubefake.NewClientset()
 	return &coreoptions.AutoscalerOptions{
-		KubeClient: client, InformerFactory: informers.NewSharedInformerFactory(client, 0),
+		AutoscalingOptions: config.AutoscalingOptions{CordonNodeBeforeTerminate: true},
+		KubeClient:         client, InformerFactory: informers.NewSharedInformerFactory(client, 0),
 		Processors: &processors.AutoscalingProcessors{
 			NodeGroupConfigProcessor: nodegroupconfig.NewDefaultNodeGroupConfigProcessor(config.NodeGroupAutoscalingOptions{MaxNodeProvisionTime: 15 * time.Minute}),
 			ScaleStateNotifier:       nodegroupchange.NewNodeGroupChangeObserversList(),
@@ -204,12 +206,45 @@ func (f *retentionFixture) snapshot(t *testing.T) *retentionSnapshot {
 }
 
 func (f *retentionFixture) mark(t *testing.T, id int) *apiv1.Node {
+	return f.markWithCordon(t, id, false)
+}
+
+func (f *retentionFixture) markWithCordon(t *testing.T, id int, cordon bool) *apiv1.Node {
 	t.Helper()
 	node := f.node(t, id)
-	updated, handled, err := f.group.MarkToBeDeleted(context.Background(), node, false)
+	updated, handled, err := f.group.MarkToBeDeleted(context.Background(), node, cordon)
 	require.NoError(t, err)
 	require.True(t, handled)
 	return updated
+}
+
+func (f *retentionFixture) recreateManager(t *testing.T) error {
+	t.Helper()
+	old := f.group.manager
+	opts := retentionTestOptions()
+	opts.KubeClient = f.kube
+	opts.InformerFactory = informers.NewSharedInformerFactory(f.kube, 0)
+	manager := &AzureManager{
+		autoscalerOptions:    opts,
+		explicitlyConfigured: map[string]bool{"agents": true},
+		config:               old.config,
+		azClient:             old.azClient,
+	}
+	cache, err := newAzureCache(manager.azClient, time.Minute, *manager.config)
+	if err != nil {
+		return err
+	}
+	manager.azureCache = cache
+	group, err := NewScaleSet(&dynamic.NodeGroupSpec{Name: "agents", MinSize: f.group.minSize, MaxSize: f.group.maxSize}, manager, int64(len(f.vms)), false)
+	if err != nil {
+		return err
+	}
+	manager.RegisterNodeGroup(group)
+	f.group = group
+	if err := f.group.reconcileRetention(context.Background()); err != nil {
+		return err
+	}
+	return manager.azureCache.regenerate()
 }
 
 func (f *retentionFixture) stop(t *testing.T, ids ...int) *retentionPoller[armcompute.VirtualMachineScaleSetsClientDeallocateResponse] {
@@ -241,6 +276,12 @@ func (f *retentionFixture) park(t *testing.T, ids ...int) {
 		f.setVM(id, vmPowerStateDeallocated, provisioningStateSucceeded)
 	}
 	handler.complete()
+	f.awaitStop(t, ids...)
+	require.NoError(t, f.group.reconcileRetention(context.Background()))
+}
+
+func (f *retentionFixture) awaitStop(t *testing.T, ids ...int) {
+	t.Helper()
 	require.Eventually(t, func() bool {
 		f.group.retention.mutex.Lock()
 		defer f.group.retention.mutex.Unlock()
@@ -251,7 +292,6 @@ func (f *retentionFixture) park(t *testing.T, ids ...int) {
 		}
 		return true
 	}, 5*time.Second, time.Millisecond)
-	require.NoError(t, f.group.reconcileRetention(context.Background()))
 }
 
 func (f *retentionFixture) expectCapacity(t *testing.T, capacity int64, rejection error) {
@@ -430,13 +470,133 @@ func TestRetentionFreshFailureUsesDeleteNotStop(t *testing.T) {
 	require.Equal(t, 2, f.snapshot(t).TargetSize)
 }
 
-func TestRetentionColdStartAndRefreshFailures(t *testing.T) {
+func TestRetentionFreshManagerRecoversSettledParkedInstance(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	f.ready(t, 0, time.Now().Add(-time.Hour))
+	f.park(t, 0)
+	parked := f.node(t, 0)
+	receipt, err := parseRetentionReceipt(parked)
+	require.NoError(t, err)
+	require.Equal(t, retentionReceiptParked, receipt.state)
+
+	require.NoError(t, f.recreateManager(t))
+	view, err := f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, view.TargetSize)
+	require.Equal(t, []string{parked.Spec.ProviderID}, view.InactiveInstanceIDs)
+
+	poller, handler := newRetentionPoller[armcompute.VirtualMachineScaleSetsClientStartResponse](t, nil)
+	f.client.EXPECT().BeginStart(gomock.Any(), "rg", "agents", gomock.Any()).Return(poller, nil)
+	require.NoError(t, f.group.IncreaseSize(t.Context(), 1))
+	awaitRetentionPoll(t, handler.entered)
+	require.Equal(t, 2, f.snapshot(t).TargetSize)
+	require.Equal(t, retentionResuming, f.snapshot(t).Instances[0].Phase)
+
+	handler.complete()
+	f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+	f.awaitStart(t, 0)
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	view, err = f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, view.UpcomingInactiveNodes)
+	f.ready(t, 0, time.Now())
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	view, err = f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, view.InactiveInstanceIDs)
+	require.False(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+}
+
+func TestRetentionFreshManagerRejectsUnsettledOrChangedOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*retentionFixture, *apiv1.Node)
+	}{
+		{
+			name: "pending receipt",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				receipt, err := parseRetentionReceipt(node)
+				require.NoError(t, err)
+				receipt.state = retentionReceiptPending
+				require.NoError(t, setRetentionReceipt(node, receipt))
+				_, err = f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "missing receipt",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				delete(node.Annotations, retentionReceiptAnnotation)
+				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "replacement UID",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				node.UID = "replacement"
+				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "running VM",
+			mutate: func(f *retentionFixture, _ *apiv1.Node) {
+				f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRetentionFixture(t, 2)
+			f.park(t, 0)
+			test.mutate(f, f.node(t, 0))
+			require.Error(t, f.recreateManager(t))
+			_, err := f.group.GetNodeGroupAccounting(t.Context())
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestRetentionFreshManagerDoesNotUseOldFutureReadyHeartbeat(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	oldHeartbeat := time.Now().Add(time.Hour)
+	f.ready(t, 0, oldHeartbeat)
+	f.park(t, 0)
+	require.NoError(t, f.recreateManager(t))
+
+	poller, handler := newRetentionPoller[armcompute.VirtualMachineScaleSetsClientStartResponse](t, nil)
+	f.client.EXPECT().BeginStart(gomock.Any(), "rg", "agents", gomock.Any()).Return(poller, nil)
+	require.NoError(t, f.group.IncreaseSize(t.Context(), 1))
+	handler.complete()
+	f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+	f.awaitStart(t, 0)
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	view, err := f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 1, view.UpcomingInactiveNodes)
+	require.True(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+
+	f.ready(t, 0, oldHeartbeat.Add(time.Second))
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	view, err = f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, view.InactiveInstanceIDs)
+}
+
+func TestRetentionColdStartRejectsUnpublishedPark(t *testing.T) {
 	f := newRetentionFixture(t, 4)
 	f.park(t, 0)
+	node := f.node(t, 0)
+	receipt, err := parseRetentionReceipt(node)
+	require.NoError(t, err)
+	receipt.state = retentionReceiptPending
+	require.NoError(t, setRetentionReceipt(node, receipt))
+	_, err = f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+	require.NoError(t, err)
 	f.group.retention = &scaleSetRetention{instances: make(map[string]*retentionMember), capacity: make(map[string]retentionCapacity)}
-	require.ErrorContains(t, f.group.reconcileRetention(context.Background()), "no accepted retention intent")
-	_, err := f.group.TargetSize(context.Background())
-	require.ErrorContains(t, err, "no accepted retention intent")
+	require.ErrorContains(t, f.group.reconcileRetention(context.Background()), "unsettled retention state")
+	_, err = f.group.TargetSize(context.Background())
+	require.ErrorContains(t, err, "unsettled retention state")
 	require.Error(t, f.group.IncreaseSize(context.Background(), 1))
 	require.Error(t, f.group.DecreaseTargetSize(context.Background(), -1))
 	require.Error(t, f.group.DeleteNodes(context.Background(), []*apiv1.Node{newApiNode(armcompute.OrchestrationModeUniform, 1)}))

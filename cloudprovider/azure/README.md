@@ -159,11 +159,13 @@ The opt-in `nodeGroupScaleDownPolicies` cloud-config map selects `Deallocate`
 instead of the default `Delete` behavior by node group name. It applies to both
 explicit and autodiscovered groups, with case-insensitive name matching.
 
-Deallocate requires `--cordon-node-before-terminating=false`, regular-priority
-Uniform VMSS with managed non-ephemeral OS disks, and `strictCacheUpdates: false`.
-Azure CA writes the `Suspended` Node condition and owns deletion-taint cleanup.
-The opt-in service account needs `update` on `nodes/status`; ordinary Delete
-installations do not need this additional permission.
+Deallocate supports the standard `--cordon-node-before-terminating` setting and
+preserves cordons that predate scale-down. It requires regular-priority Uniform
+VMSS with managed non-ephemeral OS disks and `strictCacheUpdates: false`. Azure CA
+writes the `Suspended` Node condition and owns its retention receipt, cordon and
+deletion-taint cleanup. The opt-in service account needs `update` on
+`nodes/status`; ordinary Delete installations do not need this additional
+permission.
 
 See [Deallocate configuration and limitations](examples/deallocate/README.md)
 and the dedicated [Helm values overlay](examples/deallocate/values.yaml).

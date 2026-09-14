@@ -153,6 +153,7 @@ type resumeAttempt struct {
 	ID             string
 	AcceptedAt     time.Time
 	Deadline       time.Time
+	ReadyBefore    time.Time
 	StartCompleted bool
 	Error          *cloudprovider.InstanceErrorInfo
 }
@@ -377,6 +378,10 @@ func (scaleSet *ScaleSet) refreshRetention(ctx context.Context, force bool) (err
 				Instance: cloudprovider.Instance{Id: id},
 				Phase:    retentionActive,
 			}
+			if !state.initialized && power == vmPowerStateDeallocated && provisioning == provisioningStateSucceeded {
+				member.instance.Phase = retentionRetained
+				member.instance.Status = &cloudprovider.InstanceStatus{State: cloudprovider.InstanceRunning}
+			}
 			member.fresh = provisioning == VMProvisioningStateCreating
 			if state.initialized {
 				for operation, accepted := range capacity {
@@ -418,6 +423,9 @@ func (scaleSet *ScaleSet) refreshRetention(ctx context.Context, force bool) (err
 	if !state.initialized {
 		if int64(len(members)) != physical {
 			return fmt.Errorf("Deallocate group %q has unresolved capacity without accepted operation history", scaleSet.Name)
+		}
+		if err := scaleSet.recoverSettledRetentionMembers(ctx, members); err != nil {
+			return fmt.Errorf("recover settled Deallocate inventory for %q: %w", scaleSet.Name, err)
 		}
 		state.physical = physical
 		state.initialized = true
@@ -484,6 +492,11 @@ func (scaleSet *ScaleSet) increaseRetainedSize(ctx context.Context, delta int) e
 			state.viewErr = err
 			return err
 		}
+		readyBefore := readyHeartbeat(member.node)
+		if err := scaleSet.setRetentionReceiptState(ctx, member, retentionReceiptPending); err != nil {
+			state.viewErr = err
+			return err
+		}
 		requestCtx, cancel := context.WithTimeout(ctx, vmssContextTimeout)
 		poller, err := scaleSet.manager.azClient.vmssClientForDelete.BeginStart(requestCtx, scaleSet.manager.config.ResourceGroup, scaleSet.Name,
 			&armcompute.VirtualMachineScaleSetsClientBeginStartOptions{VMInstanceIDs: &armcompute.VirtualMachineScaleSetVMInstanceIDs{InstanceIDs: []*string{ptr.To(member.instanceID)}}})
@@ -491,6 +504,10 @@ func (scaleSet *ScaleSet) increaseRetainedSize(ctx context.Context, delta int) e
 		if err != nil {
 			if !definiteRetentionRejection(err) {
 				return scaleSet.quarantineRetention("Start", err)
+			}
+			if restoreErr := scaleSet.setRetentionReceiptState(ctx, member, retentionReceiptParked); restoreErr != nil {
+				state.viewErr = restoreErr
+				return errors.Join(err, restoreErr)
 			}
 			klog.Warningf("Start rejected for instance %q in Deallocate group %q: %v", instance.Id, scaleSet.Name, err)
 			continue
@@ -502,7 +519,9 @@ func (scaleSet *ScaleSet) increaseRetainedSize(ctx context.Context, delta int) e
 		member.operation = operation
 		member.acceptedAt = time.Now()
 		member.instance.Phase = retentionResuming
-		member.instance.Resume = &resumeAttempt{ID: operation, AcceptedAt: member.acceptedAt, Deadline: member.acceptedAt.Add(timeout)}
+		member.instance.Resume = &resumeAttempt{
+			ID: operation, AcceptedAt: member.acceptedAt, Deadline: member.acceptedAt.Add(timeout), ReadyBefore: readyBefore,
+		}
 		member.completed = false
 		remaining--
 		go scaleSet.waitForRetentionStart(poller, strings.ToLower(instance.Id), operation)

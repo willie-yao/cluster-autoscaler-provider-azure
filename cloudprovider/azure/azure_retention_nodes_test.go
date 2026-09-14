@@ -87,12 +87,11 @@ func (f *retentionFixture) awaitStart(t *testing.T, id int) {
 	}, 5*time.Second, time.Millisecond)
 }
 
-func TestDeallocateRequiresBuilderDependenciesAndFalseCordon(t *testing.T) {
+func TestDeallocateRequiresBuilderDependencies(t *testing.T) {
 	for _, test := range []struct {
 		name   string
 		mutate func(*coreoptions.AutoscalerOptions)
 	}{
-		{"cordon", func(opts *coreoptions.AutoscalerOptions) { opts.CordonNodeBeforeTerminate = true }},
 		{"client", func(opts *coreoptions.AutoscalerOptions) { opts.KubeClient = nil }},
 		{"informer", func(opts *coreoptions.AutoscalerOptions) { opts.InformerFactory = nil }},
 		{"processors", func(opts *coreoptions.AutoscalerOptions) { opts.Processors = nil }},
@@ -110,6 +109,57 @@ func TestDeallocateRequiresBuilderDependenciesAndFalseCordon(t *testing.T) {
 			require.NoError(t, f.group.manager.validateRetentionDependencies())
 		})
 	}
+}
+
+func TestDeallocateCordonOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		initiallyCordoned   bool
+		requestCordon       bool
+		wantMarkedCordoned  bool
+		wantCleanedCordoned bool
+	}{
+		{name: "provider cordon", requestCordon: true, wantMarkedCordoned: true},
+		{name: "preexisting operator cordon", initiallyCordoned: true, requestCordon: true, wantMarkedCordoned: true, wantCleanedCordoned: true},
+		{name: "operator cordon without request", initiallyCordoned: true, wantMarkedCordoned: true, wantCleanedCordoned: true},
+		{name: "taint only"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRetentionFixture(t, 2)
+			node := f.node(t, 0)
+			node.Spec.Unschedulable = test.initiallyCordoned
+			node.Spec.Taints = append(node.Spec.Taints, apiv1.Taint{Key: "admin", Effect: apiv1.TaintEffectNoSchedule})
+			node.Annotations = map[string]string{"admin": "keep"}
+			_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+			require.NoError(t, err)
+
+			marked := f.markWithCordon(t, 0, test.requestCordon)
+			require.Equal(t, test.wantMarkedCordoned, marked.Spec.Unschedulable)
+			require.Contains(t, marked.Spec.Taints, node.Spec.Taints[0])
+			require.Equal(t, "keep", marked.Annotations["admin"])
+			require.NotEmpty(t, marked.Annotations[retentionReceiptAnnotation])
+
+			updated, handled, err := f.group.CleanToBeDeleted(t.Context(), marked, test.requestCordon)
+			require.NoError(t, err)
+			require.True(t, handled)
+			require.Equal(t, test.wantCleanedCordoned, updated.Spec.Unschedulable)
+			require.Contains(t, updated.Spec.Taints, node.Spec.Taints[0])
+			require.Equal(t, "keep", updated.Annotations["admin"])
+			require.NotContains(t, updated.Annotations, retentionReceiptAnnotation)
+			require.False(t, taints.HasToBeDeletedTaint(updated))
+		})
+	}
+}
+
+func TestDeleteModeDoesNotOwnCordon(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	f.group.retention = nil
+	node := f.node(t, 0)
+	updated, handled, err := f.group.MarkToBeDeleted(t.Context(), node, true)
+	require.NoError(t, err)
+	require.False(t, handled)
+	require.Equal(t, node, updated)
+	require.False(t, f.node(t, 0).Spec.Unschedulable)
 }
 
 func TestDeallocateStatusConflictPreservesNodeFields(t *testing.T) {
@@ -138,7 +188,8 @@ func TestDeallocateStatusConflictPreservesNodeFields(t *testing.T) {
 	live := f.node(t, 0)
 	require.Equal(t, node.UID, live.UID)
 	require.True(t, live.Spec.Unschedulable)
-	require.Equal(t, node.Annotations, live.Annotations)
+	require.Equal(t, node.Annotations["admin"], live.Annotations["admin"])
+	require.NotEmpty(t, live.Annotations[retentionReceiptAnnotation])
 	require.Contains(t, live.Spec.Taints, node.Spec.Taints[0])
 	require.Equal(t, node.Status.Conditions[0], live.Status.Conditions[0])
 	require.True(t, cloudprovider.IsNodeSuspended(live))
@@ -178,18 +229,129 @@ func TestDeallocateAcceptedStopStatusForbiddenStaysOwned(t *testing.T) {
 func TestDeallocateRejectedDrainCleansOnlyOwnedTaint(t *testing.T) {
 	f := newRetentionFixture(t, 2)
 	node := f.node(t, 0)
+	original := node.DeepCopy()
 	node.Spec.Unschedulable = true
 	node.Spec.Taints = append(node.Spec.Taints, apiv1.Taint{Key: "admin", Effect: apiv1.TaintEffectNoSchedule})
 	_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
 	require.NoError(t, err)
-	marked := f.mark(t, 0)
-	updated, handled, err := f.group.CleanToBeDeleted(t.Context(), marked, true)
+	f.mark(t, 0)
+	original.Spec.Unschedulable = true
+	original.Spec.Taints = node.Spec.Taints
+	updated, handled, err := f.group.CleanToBeDeleted(t.Context(), original, true)
 	require.NoError(t, err)
 	require.True(t, handled)
 	require.True(t, updated.Spec.Unschedulable)
 	require.Equal(t, node.Spec.Taints, updated.Spec.Taints)
 	require.Equal(t, node.UID, updated.UID)
 	require.Equal(t, 2, f.snapshot(t).TargetSize)
+}
+
+func TestDeallocateActivationCleanupLostResponseRetriesProtection(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	f.park(t, 0)
+	handler := f.resume(t, nil)
+	handler.complete()
+	f.awaitStart(t, 0)
+	f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+	f.ready(t, 0, time.Now())
+
+	cleanupCommitted := false
+	failImmediateRestore := true
+	f.kube.PrependReactor("*", "nodes", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		switch action := action.(type) {
+		case kubetesting.UpdateAction:
+			if action.GetSubresource() != "" {
+				return false, nil, nil
+			}
+			node := action.GetObject().(*apiv1.Node)
+			if cleanupCommitted || taints.HasToBeDeletedTaint(node) || node.Annotations[retentionReceiptAnnotation] != "" {
+				return false, nil, nil
+			}
+			require.NoError(t, f.kube.Tracker().Update(apiv1.SchemeGroupVersion.WithResource("nodes"), node, ""))
+			cleanupCommitted = true
+			return true, nil, apierrors.NewServiceUnavailable("cleanup response lost")
+		case kubetesting.GetAction:
+			if cleanupCommitted && failImmediateRestore {
+				failImmediateRestore = false
+				return true, nil, apierrors.NewServiceUnavailable("restore unavailable")
+			}
+		}
+		return false, nil, nil
+	})
+
+	require.Error(t, f.group.reconcileRetention(t.Context()))
+	require.True(t, cleanupCommitted)
+	require.False(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	view, err := f.group.GetNodeGroupAccounting(t.Context())
+	require.NoError(t, err)
+	require.Empty(t, view.InactiveInstanceIDs)
+	require.False(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+}
+
+func TestDeallocateLostParkedPublicationResponseConverges(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	handler := f.stop(t, 0)
+	f.setVM(0, vmPowerStateDeallocated, provisioningStateSucceeded)
+	handler.complete()
+	f.awaitStop(t, 0)
+
+	responseLost := false
+	f.kube.PrependReactor("update", "nodes", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		update := action.(kubetesting.UpdateAction)
+		if update.GetSubresource() != "" || responseLost {
+			return false, nil, nil
+		}
+		node := update.GetObject().(*apiv1.Node)
+		receipt, err := parseRetentionReceipt(node)
+		if err != nil || receipt.state != retentionReceiptParked {
+			return false, nil, nil
+		}
+		require.NoError(t, f.kube.Tracker().Update(apiv1.SchemeGroupVersion.WithResource("nodes"), node, ""))
+		responseLost = true
+		return true, nil, apierrors.NewServiceUnavailable("parked publication response lost")
+	})
+
+	require.Error(t, f.group.reconcileRetention(t.Context()))
+	require.True(t, responseLost)
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	receipt, err := parseRetentionReceipt(f.node(t, 0))
+	require.NoError(t, err)
+	require.Equal(t, retentionReceiptParked, receipt.state)
+	require.NoError(t, f.recreateManager(t))
+}
+
+func TestDeallocateLostStartFenceResponseRollsBackWithoutStart(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	f.park(t, 0)
+
+	responseLost := false
+	f.kube.PrependReactor("update", "nodes", func(action kubetesting.Action) (bool, runtime.Object, error) {
+		update := action.(kubetesting.UpdateAction)
+		if update.GetSubresource() != "" || responseLost {
+			return false, nil, nil
+		}
+		node := update.GetObject().(*apiv1.Node)
+		receipt, err := parseRetentionReceipt(node)
+		if err != nil || receipt.state != retentionReceiptPending {
+			return false, nil, nil
+		}
+		require.NoError(t, f.kube.Tracker().Update(apiv1.SchemeGroupVersion.WithResource("nodes"), node, ""))
+		responseLost = true
+		return true, nil, apierrors.NewServiceUnavailable("Start fence response lost")
+	})
+
+	require.Error(t, f.group.IncreaseSize(t.Context(), 1))
+	require.True(t, responseLost)
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	receipt, err := parseRetentionReceipt(f.node(t, 0))
+	require.NoError(t, err)
+	require.Equal(t, retentionReceiptParked, receipt.state)
+
+	poller, handler := newRetentionPoller[armcompute.VirtualMachineScaleSetsClientStartResponse](t, nil)
+	f.client.EXPECT().BeginStart(gomock.Any(), "rg", "agents", gomock.Any()).Return(poller, nil)
+	require.NoError(t, f.group.IncreaseSize(t.Context(), 1))
+	awaitRetentionPoll(t, handler.entered)
 }
 
 func TestDeallocateFinalGuardRejectsChangedOwnership(t *testing.T) {
