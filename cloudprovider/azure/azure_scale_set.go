@@ -98,6 +98,8 @@ type ScaleSet struct {
 	enableFastDeleteOnFailedProvisioning bool
 
 	enableLabelPredictionsOnTemplate bool
+
+	retention *scaleSetRetention
 }
 
 // NewScaleSet creates a new NewScaleSet.
@@ -142,6 +144,23 @@ func NewScaleSet(spec *dynamic.NodeGroupSpec, az *AzureManager, curSize int64, d
 
 	scaleSet.enableFastDeleteOnFailedProvisioning = az.config.EnableFastDeleteOnFailedProvisioning
 
+	if err := az.config.validateScaleDownPolicies(); err != nil {
+		return nil, err
+	}
+	if az.config.deallocates(spec.Name) {
+		if err := scaleSet.validateRetentionMode(); err != nil {
+			return nil, err
+		}
+		scaleSet.retention = az.retentionForGroup(spec.Name)
+	} else {
+		az.retentionMutex.Lock()
+		previous := az.retentionGroups[strings.ToLower(spec.Name)]
+		az.retentionMutex.Unlock()
+		if previous != nil {
+			return nil, fmt.Errorf("cannot replace live Deallocate group %q with Delete", spec.Name)
+		}
+	}
+
 	return scaleSet, nil
 }
 
@@ -175,6 +194,17 @@ func (scaleSet *ScaleSet) Autoprovisioned(ctx context.Context) bool {
 // GetOptions returns NodeGroupAutoscalingOptions that should be used for this particular
 // NodeGroup. Returning a nil will result in using default options.
 func (scaleSet *ScaleSet) GetOptions(ctx context.Context, defaults config.NodeGroupAutoscalingOptions) (*config.NodeGroupAutoscalingOptions, error) {
+	if scaleSet.retention != nil {
+		if defaults.ZeroOrMaxNodeScaling {
+			scaleSet.retention.mutex.Lock()
+			err := scaleSet.quarantineRetention("configuration", fmt.Errorf("ZeroOrMax scaling is unsupported"))
+			scaleSet.retention.mutex.Unlock()
+			return nil, err
+		}
+		if err := scaleSet.validateRetentionMode(); err != nil {
+			return nil, err
+		}
+	}
 	template, err := scaleSet.getVMSSFromCache()
 	if err != nil {
 		klog.Errorf("failed to get information for VMSS: %s", scaleSet.Name)
@@ -199,6 +229,11 @@ func (scaleSet *ScaleSet) getVMSSFromCache() (*armcompute.VirtualMachineScaleSet
 	allVMSS := scaleSet.manager.azureCache.getScaleSets()
 
 	if _, exists := allVMSS[scaleSet.Name]; !exists {
+		for name, vmss := range allVMSS {
+			if strings.EqualFold(name, scaleSet.Name) {
+				return vmss, nil
+			}
+		}
 		return nil, fmt.Errorf("could not find vmss: %s", scaleSet.Name)
 	}
 
@@ -315,6 +350,13 @@ func (scaleSet *ScaleSet) setScaleSetSize(size int64, delta int) error {
 // TargetSize returns the current TARGET size of the node group. It is possible that the
 // number is different from the number of nodes registered in Kubernetes.
 func (scaleSet *ScaleSet) TargetSize(ctx context.Context) (int, error) {
+	if scaleSet.retention != nil {
+		snapshot, err := scaleSet.GetNodeGroupAccounting(ctx)
+		if err != nil {
+			return 0, err
+		}
+		return snapshot.TargetSize, nil
+	}
 	size, err := scaleSet.getScaleSetSize()
 	return int(size), err
 }
@@ -345,6 +387,9 @@ func (scaleSet *ScaleSet) canIncreaseSize(delta int) (int64, error) {
 
 // IncreaseSize increases Scale Set size
 func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
+	if scaleSet.retention != nil {
+		return scaleSet.increaseRetainedSize(ctx, delta)
+	}
 	size, err := scaleSet.canIncreaseSize(delta)
 	if err != nil {
 		return err
@@ -366,6 +411,9 @@ func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
 // for atomic-scale-up ProvisioningRequest support to provide a capacity guarantee
 // before workloads are admitted.
 func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) error {
+	if scaleSet.retention != nil {
+		return fmt.Errorf("Deallocate does not support atomic scale-up for %q", scaleSet.Name)
+	}
 	size, err := scaleSet.canIncreaseSize(delta)
 	if err != nil {
 		return err
@@ -481,6 +529,12 @@ func (scaleSet *ScaleSet) GetFlexibleScaleSetVms() ([]*armcompute.VirtualMachine
 // It is assumed that cloud provider will not delete the existing nodes if the size
 // when there is an option to just decrease the target.
 func (scaleSet *ScaleSet) DecreaseTargetSize(ctx context.Context, delta int) error {
+	if scaleSet.retention != nil {
+		if delta >= 0 {
+			return fmt.Errorf("target decrease must be negative")
+		}
+		return scaleSet.refreshRetentionReadOnly(ctx)
+	}
 	// VMSS size should be changed automatically after the Node deletion, hence this operation is not required.
 	// To prevent some unreproducible bugs, an extra refresh of cache is needed.
 	scaleSet.invalidateInstanceCache()
@@ -739,6 +793,9 @@ func (scaleSet *ScaleSet) waitForCreateOrUpdateInstances(poller *runtime.Poller[
 
 // DeleteInstances deletes the given instances. All instances must be controlled by the same nodegroup.
 func (scaleSet *ScaleSet) DeleteInstances(instances []*azureRef, hasUnregisteredNodes bool) error {
+	if scaleSet.retention != nil {
+		return fmt.Errorf("direct instance deletion is not supported for Deallocate group %q", scaleSet.Name)
+	}
 	if len(instances) == 0 {
 		return nil
 	}
@@ -884,6 +941,9 @@ func (scaleSet *ScaleSet) waitForDeleteInstances(poller *runtime.Poller[armcompu
 
 // DeleteNodes deletes the nodes from the group.
 func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	if scaleSet.retention != nil {
+		return scaleSet.deallocateNodes(ctx, nodes, false)
+	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	size, err := scaleSet.getScaleSetSize()
 	if err != nil {
@@ -901,6 +961,9 @@ func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) 
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
 func (scaleSet *ScaleSet) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	if scaleSet.retention != nil {
+		return scaleSet.deallocateNodes(ctx, nodes, true)
+	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	refs := make([]*azureRef, 0, len(nodes))
 	hasUnregisteredNodes := false
@@ -960,6 +1023,17 @@ func (scaleSet *ScaleSet) TemplateNodeInfo(ctx context.Context) (*framework.Node
 
 // Nodes returns a list of all nodes that belong to this node group.
 func (scaleSet *ScaleSet) Nodes(ctx context.Context) ([]cloudprovider.Instance, error) {
+	if scaleSet.retention != nil {
+		snapshot, err := scaleSet.GetNodeGroupAccounting(ctx)
+		if err != nil {
+			return nil, err
+		}
+		instances := make([]cloudprovider.Instance, 0, len(snapshot.Instances))
+		for _, instance := range snapshot.Instances {
+			instances = append(instances, instance)
+		}
+		return instances, nil
+	}
 	curSize, getVMSSError := scaleSet.getCurSize()
 	if getVMSSError != nil {
 		klog.Errorf("Failed to get current size for vmss %q: %v", scaleSet.Name, getVMSSError.error)

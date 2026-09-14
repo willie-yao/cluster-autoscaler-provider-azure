@@ -117,6 +117,9 @@ type Config struct {
 	// VMSS PUTs so concurrent modifications are rejected with 412 instead of overwritten.
 	// Disabled by default; set to true to opt in.
 	EnableVMSSEtag bool `json:"enableVMSSEtag,omitempty" yaml:"enableVMSSEtag,omitempty"`
+
+	// NodeGroupScaleDownPolicies selects Delete (default) or Deallocate by node group ID.
+	NodeGroupScaleDownPolicies ScaleDownPolicies `json:"nodeGroupScaleDownPolicies,omitempty" yaml:"nodeGroupScaleDownPolicies,omitempty"`
 }
 
 // These are only here for backward compabitility. Their equivalent exists in providerazure.Config with a different name.
@@ -342,6 +345,9 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 
 	// Nonstatic defaults
 	cfg.VMType = strings.ToLower(cfg.VMType)
+	if err := cfg.validateScaleDownPolicies(); err != nil {
+		return nil, err
+	}
 	if cfg.MaxDeploymentsCount == 0 {
 		// 0 means "use default" in this case.
 		// This means, if it is valued by the config file, but explicitly set to 0 in the env, it will retreat to default.

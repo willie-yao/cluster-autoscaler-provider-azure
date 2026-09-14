@@ -19,12 +19,14 @@ limitations under the License.
 package azure
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
@@ -32,10 +34,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	kretry "k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	providerazureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config/dynamic"
+	coreoptions "sigs.k8s.io/cluster-autoscaler/pkg/core/options"
 )
 
 const (
@@ -85,10 +89,18 @@ type AzureManager struct {
 
 	autoDiscoverySpecs   []labelAutoDiscoveryConfig
 	explicitlyConfigured map[string]bool
+
+	retentionMutex    sync.Mutex
+	retentionGroups   map[string]*scaleSetRetention
+	autoscalerOptions *coreoptions.AutoscalerOptions
 }
 
 // createAzureManagerInternal allows for a custom azClient to be passed in by tests.
 func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovider.NodeGroupDiscoveryOptions, azClient *azClient) (*AzureManager, error) {
+	return createAzureManagerWithOptions(configReader, discoveryOpts, azClient, nil)
+}
+
+func createAzureManagerWithOptions(configReader io.Reader, discoveryOpts cloudprovider.NodeGroupDiscoveryOptions, azClient *azClient, opts *coreoptions.AutoscalerOptions) (*AzureManager, error) {
 	cfg, err := BuildAzureConfig(configReader)
 	if err != nil {
 		return nil, err
@@ -118,6 +130,13 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 		env:                  env,
 		azClient:             azClient,
 		explicitlyConfigured: make(map[string]bool),
+		autoscalerOptions:    opts,
+	}
+	if err := manager.validateRetentionDependencies(); err != nil {
+		return nil, err
+	}
+	if opts != nil && opts.InformerFactory != nil {
+		opts.InformerFactory.Core().V1().Nodes().Informer()
 	}
 
 	cacheTTL := refreshInterval
@@ -220,11 +239,17 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMsPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
 	if isVMsPool {
+		if m.config.deallocates(s.Name) {
+			return nil, fmt.Errorf("Deallocate is not supported for VMs pool %q", s.Name)
+		}
 		return NewVMPool(s, m, agentPoolName, sku)
 	}
 
 	switch m.config.VMType {
 	case providerazureconsts.VMTypeStandard:
+		if m.config.deallocates(s.Name) {
+			return nil, fmt.Errorf("Deallocate is not supported for standard pool %q", s.Name)
+		}
 		return NewAgentPool(s, m)
 	case providerazureconsts.VMTypeVMSS:
 		return NewScaleSet(s, m, -1, false)
@@ -237,16 +262,38 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 // In particular the list of node groups returned by NodeGroups can change as a result of CloudProvider.Refresh().
 func (m *AzureManager) Refresh() error {
 	if m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
-		return nil
+		return m.reconcileRetentionGroups(context.Background())
 	}
 	return m.forceRefresh()
 }
 
-func (m *AzureManager) forceRefresh() error {
+func (m *AzureManager) forceRefresh() (err error) {
+	defer func() {
+		if err != nil {
+			m.invalidateRetentionViews(err)
+		}
+	}()
+	retention := false
+	for _, policy := range m.config.NodeGroupScaleDownPolicies {
+		retention = retention || policy == scaleDownDeallocate
+	}
+	if retention {
+		if err := m.azureCache.fetchAzureResources(); err != nil {
+			return err
+		}
+	}
 	if err := m.fetchAutoNodeGroups(); err != nil {
 		klog.Errorf("Failed to fetch autodiscovered nodegroups: %v", err)
+		return err
 	}
-	if err := m.azureCache.regenerate(); err != nil {
+	refreshMappings := m.azureCache.regenerate
+	if retention {
+		refreshMappings = m.azureCache.regenerateInstanceMappings
+		if err := m.reconcileRetentionGroups(context.Background()); err != nil {
+			return err
+		}
+	}
+	if err := refreshMappings(); err != nil {
 		klog.Errorf("Failed to regenerate Azure cache: %v", err)
 		return err
 	}
@@ -270,12 +317,23 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 		return fmt.Errorf("cannot autodiscover NodeGroups: %s", err)
 	}
 
-	changed := false
 	exists := make(map[string]bool)
 	for _, group := range groups {
+		exists[strings.ToLower(group.Id())] = true
+	}
+	for _, group := range m.getNodeGroups() {
+		if exists[strings.ToLower(group.Id())] || m.isExplicitlyConfigured(group.Id()) {
+			continue
+		}
+		if scaleSet, ok := group.(*ScaleSet); ok && scaleSet.retention != nil {
+			return fmt.Errorf("cannot stop discovering live Deallocate node group %q", group.Id())
+		}
+	}
+
+	changed := false
+	for _, group := range groups {
 		id := group.Id()
-		exists[id] = true
-		if m.explicitlyConfigured[id] {
+		if m.isExplicitlyConfigured(id) {
 			// This NodeGroup was explicitly configured, but would also be
 			// autodiscovered. We want the explicitly configured min and max
 			// nodes to take precedence.
@@ -290,7 +348,7 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 
 	for _, nodeGroup := range m.getNodeGroups() {
 		nodeGroupID := nodeGroup.Id()
-		if !exists[nodeGroupID] && !m.explicitlyConfigured[nodeGroupID] {
+		if !exists[strings.ToLower(nodeGroupID)] && !m.isExplicitlyConfigured(nodeGroupID) {
 			m.UnregisterNodeGroup(nodeGroup)
 			changed = true
 		}
@@ -301,6 +359,15 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 	}
 
 	return nil
+}
+
+func (m *AzureManager) isExplicitlyConfigured(id string) bool {
+	for name, configured := range m.explicitlyConfigured {
+		if configured && strings.EqualFold(name, id) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m *AzureManager) getNodeGroups() []cloudprovider.NodeGroup {
@@ -384,38 +451,60 @@ func (m *AzureManager) getFilteredScaleSets(filter []labelAutoDiscoveryConfig) (
 			MaxSize:            -1,
 			SupportScaleToZero: scaleToZeroSupportedVMSS,
 		}
+		m.retentionMutex.Lock()
+		retention := m.retentionGroups[strings.ToLower(spec.Name)] != nil
+		m.retentionMutex.Unlock()
+		retention = retention || m.config.deallocates(spec.Name)
 
 		if val, ok := scaleSet.Tags["min"]; ok {
-			if minSize, err := strconv.Atoi(*val); err == nil {
+			if minSize, err := strconv.Atoi(ptr.Deref(val, "")); err == nil {
 				spec.MinSize = minSize
 			} else {
+				if retention {
+					return nil, fmt.Errorf("invalid minimum size for Deallocate vmss %q: %w", spec.Name, err)
+				}
 				klog.Warningf("ignoring vmss %q because of invalid minimum size specified for vmss: %s", *scaleSet.Name, err)
 				continue
 			}
 		} else if cfgSizes.Min >= 0 {
 			spec.MinSize = cfgSizes.Min
 		} else {
+			if retention {
+				return nil, fmt.Errorf("no minimum size specified for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of no minimum size specified for vmss", *scaleSet.Name)
 			continue
 		}
 		if spec.MinSize < 0 {
+			if retention {
+				return nil, fmt.Errorf("minimum size must be non-negative for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of minimum size must be a non-negative number of nodes", *scaleSet.Name)
 			continue
 		}
 		if val, ok := scaleSet.Tags["max"]; ok {
-			if maxSize, err := strconv.Atoi(*val); err == nil {
+			if maxSize, err := strconv.Atoi(ptr.Deref(val, "")); err == nil {
 				spec.MaxSize = maxSize
 			} else {
+				if retention {
+					return nil, fmt.Errorf("invalid maximum size for Deallocate vmss %q: %w", spec.Name, err)
+				}
 				klog.Warningf("ignoring vmss %q because of invalid maximum size specified for vmss: %s", *scaleSet.Name, err)
 				continue
 			}
 		} else if cfgSizes.Max >= 0 {
 			spec.MaxSize = cfgSizes.Max
 		} else {
+			if retention {
+				return nil, fmt.Errorf("no maximum size specified for Deallocate vmss %q", spec.Name)
+			}
 			klog.Warningf("ignoring vmss %q because of no maximum size specified for vmss", *scaleSet.Name)
 			continue
 		}
 		if spec.MaxSize < spec.MinSize {
+			if retention {
+				return nil, fmt.Errorf("maximum size must be at least minimum size for Deallocate vmss %q: max=%d < min=%d", spec.Name, spec.MaxSize, spec.MinSize)
+			}
 			klog.Warningf("ignoring vmss %q because of maximum size must be greater than or equal to minimum size: max=%d < min=%d", *scaleSet.Name, spec.MaxSize, spec.MinSize)
 			continue
 		}
@@ -429,6 +518,9 @@ func (m *AzureManager) getFilteredScaleSets(filter []labelAutoDiscoveryConfig) (
 
 		vmss, err := NewScaleSet(spec, m, curSize, dedicatedHost)
 		if err != nil {
+			if retention {
+				return nil, err
+			}
 			klog.Warningf("ignoring vmss %q %s", *scaleSet.Name, err)
 			continue
 		}
