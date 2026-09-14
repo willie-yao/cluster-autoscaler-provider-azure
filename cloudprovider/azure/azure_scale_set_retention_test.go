@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -33,10 +34,13 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	apiv1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/informers"
 	kubefake "k8s.io/client-go/kubernetes/fake"
+	kubetesting "k8s.io/client-go/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient/mock_virtualmachineclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetclient/mock_virtualmachinescalesetclient"
@@ -280,6 +284,32 @@ func (f *retentionFixture) park(t *testing.T, ids ...int) {
 	require.NoError(t, f.group.reconcileRetention(context.Background()))
 }
 
+func (f *retentionFixture) legacyPark(t *testing.T, id int, retainTaint, cordoned, retainSuspended bool) {
+	t.Helper()
+	f.park(t, id)
+	node := f.node(t, id)
+	delete(node.Annotations, retentionReceiptAnnotation)
+	node.Annotations["admin"] = "keep"
+	node.Spec.Unschedulable = cordoned
+	if !retainTaint {
+		node.Spec.Taints = slices.DeleteFunc(node.Spec.Taints, func(taint apiv1.Taint) bool {
+			return taint.Key == taints.ToBeDeletedTaint
+		})
+	}
+	node.Spec.Taints = append(node.Spec.Taints, apiv1.Taint{Key: "admin", Value: "keep", Effect: apiv1.TaintEffectNoSchedule})
+	_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+	require.NoError(t, err)
+
+	if !retainSuspended {
+		node = f.node(t, id)
+		node.Status.Conditions = slices.DeleteFunc(node.Status.Conditions, func(condition apiv1.NodeCondition) bool {
+			return condition.Type == "Suspended"
+		})
+		_, err = f.kube.CoreV1().Nodes().UpdateStatus(t.Context(), node, metav1.UpdateOptions{})
+		require.NoError(t, err)
+	}
+}
+
 func (f *retentionFixture) awaitStop(t *testing.T, ids ...int) {
 	t.Helper()
 	require.Eventually(t, func() bool {
@@ -507,6 +537,197 @@ func TestRetentionFreshManagerRecoversSettledParkedInstance(t *testing.T) {
 	require.False(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
 }
 
+func TestRetentionFreshManagerAdoptsLegacySettledInstance(t *testing.T) {
+	for _, test := range []struct {
+		name            string
+		retainTaint     bool
+		initiallyCordon bool
+		retainSuspended bool
+		protectedCordon bool
+		activatedCordon bool
+	}{
+		{name: "A cleaned schedulable", protectedCordon: true},
+		{name: "B cleaned administrator cordon", initiallyCordon: true, protectedCordon: true, activatedCordon: true},
+		{name: "C legacy taint only", retainTaint: true},
+		{name: "D legacy taint and cordon", retainTaint: true, initiallyCordon: true, protectedCordon: true},
+		{name: "earlier prototype protection", retainTaint: true, retainSuspended: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRetentionFixture(t, 2)
+			f.ready(t, 0, time.Now().Add(-time.Hour))
+			f.legacyPark(t, 0, test.retainTaint, test.initiallyCordon, test.retainSuspended)
+			parkedID := f.node(t, 0).Spec.ProviderID
+
+			require.NoError(t, f.recreateManager(t))
+			view, err := f.group.GetNodeGroupAccounting(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 1, view.TargetSize)
+			require.Equal(t, []string{parkedID}, view.InactiveInstanceIDs)
+			protected := f.node(t, 0)
+			require.Equal(t, test.protectedCordon, protected.Spec.Unschedulable)
+			require.True(t, taints.HasToBeDeletedTaint(protected))
+			require.NotEmpty(t, protected.Annotations[retentionReceiptAnnotation])
+			require.Equal(t, "keep", protected.Annotations["admin"])
+			require.Contains(t, protected.Spec.Taints, apiv1.Taint{Key: "admin", Value: "keep", Effect: apiv1.TaintEffectNoSchedule})
+			condition := conditionSuspended(protected)
+			require.NotNil(t, condition)
+			require.Equal(t, apiv1.ConditionTrue, condition.Status)
+			require.Equal(t, suspendedReason, condition.Reason)
+
+			poller, handler := newRetentionPoller[armcompute.VirtualMachineScaleSetsClientStartResponse](t, nil)
+			f.client.EXPECT().BeginStart(gomock.Any(), "rg", "agents", gomock.Any()).Return(poller, nil)
+			require.NoError(t, f.group.IncreaseSize(t.Context(), 1))
+			awaitRetentionPoll(t, handler.entered)
+			require.Equal(t, test.protectedCordon, f.node(t, 0).Spec.Unschedulable)
+			require.True(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+
+			handler.complete()
+			f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+			f.awaitStart(t, 0)
+			require.NoError(t, f.group.reconcileRetention(t.Context()))
+			view, err = f.group.GetNodeGroupAccounting(t.Context())
+			require.NoError(t, err)
+			require.Equal(t, 1, view.UpcomingInactiveNodes)
+			require.True(t, taints.HasToBeDeletedTaint(f.node(t, 0)))
+
+			f.ready(t, 0, time.Now().Add(time.Second))
+			require.NoError(t, f.group.reconcileRetention(t.Context()))
+			view, err = f.group.GetNodeGroupAccounting(t.Context())
+			require.NoError(t, err)
+			require.Empty(t, view.InactiveInstanceIDs)
+			activated := f.node(t, 0)
+			require.Equal(t, test.activatedCordon, activated.Spec.Unschedulable)
+			require.False(t, taints.HasToBeDeletedTaint(activated))
+			require.NotContains(t, activated.Annotations, retentionReceiptAnnotation)
+			require.Equal(t, "keep", activated.Annotations["admin"])
+			require.Contains(t, activated.Spec.Taints, apiv1.Taint{Key: "admin", Value: "keep", Effect: apiv1.TaintEffectNoSchedule})
+		})
+	}
+}
+
+func TestRetentionFreshManagerRejectsInvalidLegacyOwnership(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*retentionFixture, *apiv1.Node)
+	}{
+		{
+			name: "wrong group",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				node.Spec.ProviderID = strings.Replace(node.Spec.ProviderID, "/virtualMachineScaleSets/agents/", "/virtualMachineScaleSets/other/", 1)
+				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "invalid legacy taint",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				for i := range node.Spec.Taints {
+					if node.Spec.Taints[i].Key == taints.ToBeDeletedTaint {
+						node.Spec.Taints[i].Value = "not-a-timestamp"
+					}
+				}
+				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "conflicting metadata",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				node.Annotations[retentionReceiptAnnotation] = "{}"
+				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "conflicting Suspended writer",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				node.Status.Conditions = append(node.Status.Conditions, apiv1.NodeCondition{
+					Type: "Suspended", Status: apiv1.ConditionTrue, Reason: "another-writer",
+				})
+				_, err := f.kube.CoreV1().Nodes().UpdateStatus(t.Context(), node, metav1.UpdateOptions{})
+				require.NoError(t, err)
+			},
+		},
+		{
+			name: "replacement during adoption",
+			mutate: func(f *retentionFixture, node *apiv1.Node) {
+				replacement := node.DeepCopy()
+				replacement.UID = "replacement"
+				f.kube.PrependReactor("get", "nodes", func(action kubetesting.Action) (bool, k8sruntime.Object, error) {
+					if action.(kubetesting.GetAction).GetName() != node.Name {
+						return false, nil, nil
+					}
+					return true, replacement, nil
+				})
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			f := newRetentionFixture(t, 2)
+			f.legacyPark(t, 0, true, false, false)
+			test.mutate(f, f.node(t, 0))
+			require.Error(t, f.recreateManager(t))
+		})
+	}
+}
+
+func TestRetentionFreshManagerCompletesInterruptedLegacyAdoption(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	f.legacyPark(t, 0, false, false, false)
+	responseLost := true
+	f.kube.PrependReactor("update", "nodes", func(action kubetesting.Action) (bool, k8sruntime.Object, error) {
+		update := action.(kubetesting.UpdateAction)
+		if update.GetSubresource() != "" || !responseLost {
+			return false, nil, nil
+		}
+		node := update.GetObject().(*apiv1.Node)
+		if node.Annotations[retentionReceiptAnnotation] == "" {
+			return false, nil, nil
+		}
+		require.NoError(t, f.kube.Tracker().Update(apiv1.SchemeGroupVersion.WithResource("nodes"), node, ""))
+		responseLost = false
+		return true, nil, apierrors.NewServiceUnavailable("adoption response lost")
+	})
+
+	require.Error(t, f.recreateManager(t))
+	interrupted := f.node(t, 0)
+	require.NotEmpty(t, interrupted.Annotations[retentionReceiptAnnotation])
+	require.Nil(t, conditionSuspended(interrupted))
+
+	require.NoError(t, f.recreateManager(t))
+	recovered := f.node(t, 0)
+	require.True(t, taints.HasToBeDeletedTaint(recovered))
+	require.NotNil(t, conditionSuspended(recovered))
+	require.Equal(t, apiv1.ConditionTrue, conditionSuspended(recovered).Status)
+}
+
+func TestRetentionFreshManagerPreservesRecordedOperatorCordon(t *testing.T) {
+	f := newRetentionFixture(t, 2)
+	node := f.node(t, 0)
+	node.Spec.Unschedulable = true
+	node.Spec.Taints = append(node.Spec.Taints, apiv1.Taint{Key: "admin", Effect: apiv1.TaintEffectNoSchedule})
+	_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
+	require.NoError(t, err)
+	f.ready(t, 0, time.Now().Add(-time.Hour))
+	f.park(t, 0)
+	require.NoError(t, f.recreateManager(t))
+
+	poller, handler := newRetentionPoller[armcompute.VirtualMachineScaleSetsClientStartResponse](t, nil)
+	f.client.EXPECT().BeginStart(gomock.Any(), "rg", "agents", gomock.Any()).Return(poller, nil)
+	require.NoError(t, f.group.IncreaseSize(t.Context(), 1))
+	handler.complete()
+	f.setVM(0, vmPowerStateRunning, provisioningStateSucceeded)
+	f.awaitStart(t, 0)
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+	f.ready(t, 0, time.Now().Add(time.Second))
+	require.NoError(t, f.group.reconcileRetention(t.Context()))
+
+	activated := f.node(t, 0)
+	require.True(t, activated.Spec.Unschedulable)
+	require.Contains(t, activated.Spec.Taints, apiv1.Taint{Key: "admin", Effect: apiv1.TaintEffectNoSchedule})
+	require.False(t, taints.HasToBeDeletedTaint(activated))
+}
+
 func TestRetentionFreshManagerRejectsUnsettledOrChangedOwnership(t *testing.T) {
 	for _, test := range []struct {
 		name   string
@@ -520,14 +741,6 @@ func TestRetentionFreshManagerRejectsUnsettledOrChangedOwnership(t *testing.T) {
 				receipt.state = retentionReceiptPending
 				require.NoError(t, setRetentionReceipt(node, receipt))
 				_, err = f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
-				require.NoError(t, err)
-			},
-		},
-		{
-			name: "missing receipt",
-			mutate: func(f *retentionFixture, node *apiv1.Node) {
-				delete(node.Annotations, retentionReceiptAnnotation)
-				_, err := f.kube.CoreV1().Nodes().Update(t.Context(), node, metav1.UpdateOptions{})
 				require.NoError(t, err)
 			},
 		},

@@ -159,10 +159,16 @@ The opt-in `nodeGroupScaleDownPolicies` cloud-config map selects `Deallocate`
 instead of the default `Delete` behavior by node group name. It applies to both
 explicit and autodiscovered groups, with case-insensitive name matching.
 
-Deallocate supports the standard `--cordon-node-before-terminating` setting and
-preserves cordons that predate scale-down. It requires regular-priority Uniform
-VMSS with managed non-ephemeral OS disks and `strictCacheUpdates: false`. Azure CA
-writes the `Suspended` Node condition and owns its retention receipt, cordon and
+Deallocate supports the standard `--cordon-node-before-terminating` setting.
+Receipt-based cycles preserve cordons that predate scale-down. Restart recovery
+also adopts settled receiptless parks from the legacy Azure implementation when
+the matching Kubernetes Node still exists. If that Node has both the exact legacy
+`ToBeDeletedByClusterAutoscaler` taint and a cordon, compatibility recovery may
+remove a cordon that an administrator set before the legacy scale-down because
+the legacy format did not record its origin. Legacy cordons without that taint
+remain untouched. Deallocate requires regular-priority Uniform VMSS with managed
+non-ephemeral OS disks and `strictCacheUpdates: false`. Azure CA writes the
+`Suspended` Node condition and owns its retention receipt, cordon and
 deletion-taint cleanup. The opt-in service account needs `update` on
 `nodes/status`; ordinary Delete installations do not need this additional
 permission.

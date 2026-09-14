@@ -46,13 +46,14 @@ const (
 )
 
 type persistedRetentionReceipt struct {
-	Version     int       `json:"version"`
-	CycleID     string    `json:"cycleID"`
-	NodeUID     types.UID `json:"nodeUID"`
-	ProviderID  string    `json:"providerID"`
-	TaintValue  string    `json:"taintValue"`
-	CordonOwned bool      `json:"cordonOwned"`
-	State       string    `json:"state"`
+	Version       int       `json:"version"`
+	CycleID       string    `json:"cycleID"`
+	NodeUID       types.UID `json:"nodeUID"`
+	ProviderID    string    `json:"providerID"`
+	TaintValue    string    `json:"taintValue"`
+	CordonOwned   bool      `json:"cordonOwned"`
+	State         string    `json:"state"`
+	LegacyAdopted bool      `json:"legacyAdopted,omitempty"`
 }
 
 type retentionReceipt struct {
@@ -63,6 +64,7 @@ type retentionReceipt struct {
 	cycleID        string
 	state          string
 	cordonOwned    bool
+	legacyAdopted  bool
 	transitionFrom string
 	transitionTo   string
 	cleanupStarted bool
@@ -277,7 +279,7 @@ func (receipt *retentionReceipt) persisted() persistedRetentionReceipt {
 	return persistedRetentionReceipt{
 		Version: retentionReceiptVersion, CycleID: receipt.cycleID, NodeUID: receipt.uid,
 		ProviderID: receipt.providerID, TaintValue: receipt.taint.Value,
-		CordonOwned: receipt.cordonOwned, State: receipt.state,
+		CordonOwned: receipt.cordonOwned, State: receipt.state, LegacyAdopted: receipt.legacyAdopted,
 	}
 }
 
@@ -301,7 +303,7 @@ func parseRetentionReceipt(node *apiv1.Node) (*retentionReceipt, error) {
 	return &retentionReceipt{
 		name: node.Name, uid: persisted.NodeUID, providerID: persisted.ProviderID,
 		taint:   apiv1.Taint{Key: taints.ToBeDeletedTaint, Value: persisted.TaintValue, Effect: apiv1.TaintEffectNoSchedule},
-		cycleID: persisted.CycleID, state: persisted.State, cordonOwned: persisted.CordonOwned,
+		cycleID: persisted.CycleID, state: persisted.State, cordonOwned: persisted.CordonOwned, legacyAdopted: persisted.LegacyAdopted,
 	}, nil
 }
 
@@ -738,6 +740,123 @@ func (scaleSet *ScaleSet) restoreOwnedProtection(ctx context.Context, member *re
 	return scaleSet.holdSuspended(ctx, member)
 }
 
+func validatedLegacyRetentionTaint(node *apiv1.Node) (*apiv1.Taint, error) {
+	var found *apiv1.Taint
+	for i := range node.Spec.Taints {
+		taint := &node.Spec.Taints[i]
+		if taint.Key != taints.ToBeDeletedTaint {
+			continue
+		}
+		if found != nil {
+			return nil, fmt.Errorf("Node %q has duplicate legacy deletion taints", node.Name)
+		}
+		if taint.Effect != apiv1.TaintEffectNoSchedule {
+			return nil, fmt.Errorf("Node %q has an unsupported legacy deletion taint effect", node.Name)
+		}
+		if _, err := strconv.ParseInt(taint.Value, 10, 64); err != nil {
+			return nil, fmt.Errorf("Node %q has an invalid legacy deletion taint value", node.Name)
+		}
+		copy := *taint
+		found = &copy
+	}
+	return found, nil
+}
+
+func (scaleSet *ScaleSet) adoptSettledLegacyRetentionMember(ctx context.Context, member *retentionMember, node *apiv1.Node) error {
+	if node == nil || node.UID == "" {
+		return fmt.Errorf("settled parked instance %q has no valid retained Node identity", member.instance.Id)
+	}
+	if _, found := node.Annotations[retentionReceiptAnnotation]; found {
+		return fmt.Errorf("Node %q has conflicting retention metadata", node.Name)
+	}
+	if condition := conditionSuspended(node); condition != nil &&
+		(condition.Status != apiv1.ConditionTrue || condition.Reason != suspendedReason) {
+		return fmt.Errorf("Node %q has an unowned Suspended condition", node.Name)
+	}
+	legacyTaint, err := validatedLegacyRetentionTaint(node)
+	if err != nil {
+		return err
+	}
+	initiallyCordoned := node.Spec.Unschedulable
+	hadLegacyTaint := legacyTaint != nil
+	ownedTaint := apiv1.Taint{
+		Key: taints.ToBeDeletedTaint, Value: strconv.FormatInt(time.Now().Unix(), 10), Effect: apiv1.TaintEffectNoSchedule,
+	}
+	if hadLegacyTaint {
+		ownedTaint = *legacyTaint
+	}
+	cordonOwned := hadLegacyTaint && initiallyCordoned
+	if !hadLegacyTaint {
+		cordonOwned = scaleSet.manager.autoscalerOptions.CordonNodeBeforeTerminate && !initiallyCordoned
+	}
+	receipt := &retentionReceipt{
+		name: node.Name, uid: node.UID, providerID: node.Spec.ProviderID, taint: ownedTaint,
+		cycleID: uuid.NewString(), state: retentionReceiptParked, cordonOwned: cordonOwned, legacyAdopted: true,
+	}
+	var updated *apiv1.Node
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		live, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Get(ctx, receipt.name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if err := receipt.checkIdentity(live); err != nil {
+			return err
+		}
+		if _, found := live.Annotations[retentionReceiptAnnotation]; found {
+			persisted, err := parseRetentionReceipt(live)
+			if err != nil {
+				return err
+			}
+			if persisted.persisted() != receipt.persisted() {
+				return fmt.Errorf("persisted retention ownership changed on Node %q", live.Name)
+			}
+			if err := receipt.checkTaint(live); err != nil {
+				return err
+			}
+			if receipt.cordonOwned && !live.Spec.Unschedulable {
+				return fmt.Errorf("owned cordon missing on Node %q", live.Name)
+			}
+			updated = live
+			return nil
+		}
+		currentTaint, err := validatedLegacyRetentionTaint(live)
+		if err != nil {
+			return err
+		}
+		if hadLegacyTaint {
+			if currentTaint == nil || !apiequality.Semantic.DeepEqual(*currentTaint, ownedTaint) {
+				return fmt.Errorf("legacy deletion taint changed on Node %q", live.Name)
+			}
+		} else if currentTaint != nil {
+			return fmt.Errorf("legacy deletion taint appeared on Node %q", live.Name)
+		}
+		if live.Spec.Unschedulable != initiallyCordoned {
+			return fmt.Errorf("cordon state changed during legacy adoption on Node %q", live.Name)
+		}
+		if !hadLegacyTaint {
+			live.Spec.Taints = append(live.Spec.Taints, ownedTaint)
+		}
+		if receipt.cordonOwned {
+			live.Spec.Unschedulable = true
+		}
+		if err := setRetentionReceipt(live, receipt); err != nil {
+			return err
+		}
+		updated, err = scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().Update(ctx, live, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return err
+	}
+	member.receipt = receipt
+	member.node = updated.DeepCopy()
+	if err := scaleSet.holdSuspended(ctx, member); err != nil {
+		return err
+	}
+	member.stopCompleted = true
+	return nil
+}
+
 func (scaleSet *ScaleSet) recoverSettledRetentionMembers(ctx context.Context, members map[string]*retentionMember) error {
 	nodes, err := scaleSet.manager.autoscalerOptions.KubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -763,6 +882,12 @@ func (scaleSet *ScaleSet) recoverSettledRetentionMembers(ctx context.Context, me
 		if node == nil {
 			return fmt.Errorf("settled parked instance %q has no retained Node", member.instance.Id)
 		}
+		if _, found := node.Annotations[retentionReceiptAnnotation]; !found {
+			if err := scaleSet.adoptSettledLegacyRetentionMember(ctx, member, node); err != nil {
+				return err
+			}
+			continue
+		}
 		receipt, err := parseRetentionReceipt(node)
 		if err != nil {
 			return err
@@ -777,12 +902,19 @@ func (scaleSet *ScaleSet) recoverSettledRetentionMembers(ctx context.Context, me
 			return err
 		}
 		condition := conditionSuspended(node)
+		member.receipt = receipt
+		member.node = node.DeepCopy()
+		if condition == nil && receipt.legacyAdopted {
+			if err := scaleSet.holdSuspended(ctx, member); err != nil {
+				return err
+			}
+			node = member.node
+			condition = conditionSuspended(node)
+		}
 		if condition == nil || condition.Status != apiv1.ConditionTrue || condition.Reason != suspendedReason {
 			return fmt.Errorf("Node %q has no settled provider-owned Suspended condition", node.Name)
 		}
-		member.receipt = receipt
 		member.stopCompleted = true
-		member.node = node.DeepCopy()
 	}
 	return nil
 }

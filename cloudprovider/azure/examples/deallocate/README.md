@@ -86,9 +86,11 @@ specific Start's acceptance time. The provider publishes active availability
 only after owned status and taint cleanup succeed. Kubernetes status and spec
 cannot be updated atomically: status release is performed while NoSchedule
 protection remains, and the coherent provider view continues reporting
-inactivity until both updates succeed. Unrelated conditions, taints, annotations,
-UIDs and administrative cordons are preserved. Later ordinary Unready or
-administrative cordoning does not replay activation.
+inactivity until both updates succeed. Unrelated conditions, taints and
+annotations are preserved. Receipt-based cycles preserve administrative cordons.
+The legacy cordon exception described below applies only during receiptless
+restart adoption. Later ordinary Unready or administrative cordoning does not
+replay activation.
 
 Each accepted attempt keeps its own deadline from the node group's maximum
 provision time. New requests do not extend older deadlines. Failed or expired
@@ -112,21 +114,39 @@ growing the VMSS. A recovered Node remains inactive until the new Start
 completes and its Ready heartbeat advances beyond both the pre-Start heartbeat
 and the new acceptance time.
 
+Settled parks created by the legacy Azure implementation or an earlier
+receiptless prototype are also adopted when the group is explicitly configured
+for Deallocate, the VM is exactly `deallocated` with successful provisioning,
+and its matching Kubernetes Node still exists with a stable UID and provider ID.
+The Node may already have the exact legacy
+`ToBeDeletedByClusterAutoscaler=<unix timestamp>:NoSchedule` taint, or recovery
+adds a new owned deletion taint. It may be schedulable or cordoned. Recovery
+establishes the current receipt and `Suspended=True` protection before making the
+park available for reuse.
+
+Legacy AKS did not record whether it introduced `spec.unschedulable`. When a
+receiptless Node has both the exact legacy deletion taint and an existing cordon,
+compatibility recovery treats that cordon as legacy autoscaler protection and
+may remove it after Start completes and fresh Ready evidence arrives. This can
+remove a cordon that an administrator set before the legacy scale-down. The
+exception does not apply to normal receipt-based recovery or to a receiptless
+legacy Node that is cordoned without the legacy deletion taint; those existing
+cordons remain in place. Unrelated taints, annotations and conditions are never
+claimed by this compatibility rule.
+
 This is settled-state adoption, not a durable cloud-operation journal. A
 `pending` receipt, deallocating or otherwise ambiguous VM state, missing Node,
-changed UID or ownership metadata blocks accounting and mutation. A crash before
-the provider publishes `parked` can therefore strand an otherwise deallocated
-VM for operator reconciliation.
-
-Legacy parked inventory without this receipt, including inventory produced by
-other AKS autoscaler implementations, is not adopted automatically. Resolve it
-through an operator-controlled migration before enabling this implementation.
-Removing a policy entry is not recovery and does not purge retained instances.
+identity changes during adoption, conflicting receipt or `Suspended` metadata,
+or malformed or duplicate legacy deletion taints block accounting and mutation.
+A crash before the provider publishes `parked` for a new scale-down can therefore
+strand an otherwise deallocated VM for operator reconciliation. Node-less legacy
+parks are not adopted. Removing a policy entry is not recovery and does not
+purge retained instances.
 
 A later operator request to keep a Node cordoned while it is already under a
-provider-owned cordon cannot be distinguished from no change. Preexisting
-operator cordons and cordons applied when provider cordoning is disabled are
-preserved.
+receipt-based provider-owned cordon cannot be distinguished from no change.
+Outside the explicit legacy-taint exception above, preexisting operator cordons
+and cordons applied when provider cordoning is disabled are preserved.
 
 Before disabling Deallocate or migrating a group to Delete, resolve all retained,
 in-flight and uncertain work and restore ordinary active infrastructure through
