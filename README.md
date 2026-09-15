@@ -19,6 +19,7 @@ The resulting `cluster-autoscaler-<arch>` binary is Azure-only. `--cloud-provide
 ```shell
 make test-azure
 make test-ci
+make test-chart # requires Helm
 ```
 
 To build a local image without publishing it:
@@ -28,6 +29,10 @@ make image IMAGE=cluster-autoscaler-azure TAG=dev
 ```
 
 The Helm chart remains available at `charts/cluster-autoscaler`. Set `image.repository` and `image.tag` to an image published by your organization before deploying it. No official repository or image publication identity is configured in this bootstrap.
+
+The [Phase 1 migration record](docs/phase-1-migration.md) lists exact pins, local
+evidence, live acceptance gates, and cutover/rollback criteria. Phase 1 is not
+complete until those live gates pass.
 
 ## Azure configuration
 

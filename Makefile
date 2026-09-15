@@ -13,7 +13,7 @@ endif
 VERSION_LDFLAG := -X $(VERSION_PKG).ClusterAutoscalerVersion=$(VERSION)
 LDFLAGS_VALUE := $(strip $(LDFLAGS) $(VERSION_LDFLAG))
 
-.PHONY: all build build-arch test-azure test-unit test-ci test-apis clean format image
+.PHONY: all build build-arch test-azure test-unit test-ci test-apis test-chart test-core-integration clean format image
 
 all: build
 
@@ -31,7 +31,13 @@ test-unit: build test-azure
 test-apis:
 	cd apis && go test ./...
 
-test-ci: test-unit test-apis
+test-chart:
+	go test -mod=readonly -tags helm ./charts -count=1
+
+test-core-integration:
+	go test -mod=readonly -race sigs.k8s.io/cluster-autoscaler/pkg/test/integration/inmemory -run 'TestStaticAutoscaler_FullLifecycle|TestScaleUp_ResourceLimits' -count=1
+
+test-ci: test-unit test-apis test-core-integration
 
 clean:
 	rm -f cluster-autoscaler-*
