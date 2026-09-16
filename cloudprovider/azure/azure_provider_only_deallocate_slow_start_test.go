@@ -50,8 +50,9 @@ const (
 	stockMaxFailingTime = 15 * time.Minute
 	stockMaxStartupTime = 20 * time.Minute
 
-	slowStartPollInterval = 37 * time.Second
-	slowStartActionPath   = "/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/" +
+	slowStartMaxNodeProvisionTime = 15 * time.Minute
+	slowStartPollInterval         = 37 * time.Second
+	slowStartActionPath           = "/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/" +
 		"virtualMachineScaleSets/pool/virtualMachines/1/start"
 	slowStartPollPath = "/operations/slow-start"
 )
@@ -186,6 +187,36 @@ func startSlowStartLoopDriver(
 	return driver
 }
 
+func slowStartAutoscaler(
+	t *testing.T,
+	ctx context.Context,
+	infra *integration.TestInfrastructure,
+	provider *AzureCloudProvider,
+) *core.StaticAutoscaler {
+	t.Helper()
+	opts := integration.NewTestConfig().ResolveOptions()
+	opts.CloudProviderName = "azure"
+	opts.InitialNodeGroupBackoffDuration = 5 * time.Minute
+	opts.MaxNodeGroupBackoffDuration = 30 * time.Minute
+	opts.NodeGroupBackoffResetTimeout = 3 * time.Hour
+	opts.CordonNodeBeforeTerminate = true
+	opts.NodeGroupDefaults.ScaleDownUnneededTime = time.Second
+	opts.NodeGroupDefaults.MaxNodeProvisionTime = slowStartMaxNodeProvisionTime
+	opts.MaxGracefulTerminationSec = 30
+	opts.MaxPodEvictionTime = 30 * time.Second
+	opts.UnremovableNodeRecheckTimeout = time.Second
+	autoscaler, _, err := integration.DefaultAutoscalingBuilder(opts, infra).WithCloudProvider(provider).Build(ctx)
+	require.NoError(t, err)
+	require.NoError(t, autoscaler.Start())
+	static := autoscaler.(*core.StaticAutoscaler)
+	require.Equal(t, slowStartMaxNodeProvisionTime, static.NodeGroupDefaults.MaxNodeProvisionTime)
+	go func() {
+		<-ctx.Done()
+		static.ClusterStateRegistry.Stop()
+	}()
+	return static
+}
+
 type slowStartFixture struct {
 	world      *parkingWorld
 	provider   *AzureCloudProvider
@@ -217,7 +248,7 @@ func newSlowStartFixture(
 	_, err = client.CoreV1().Pods(busy.Namespace).Create(ctx, busy, metav1.CreateOptions{})
 	require.NoError(t, err)
 
-	autoscaler := parkingAutoscaler(t, ctx, infra, provider)
+	autoscaler := slowStartAutoscaler(t, ctx, infra, provider)
 	events := record.NewFakeRecorder(100)
 	autoscaler.LogRecorder, err = statusutils.NewStatusMapRecorder(
 		client,
@@ -311,6 +342,7 @@ func blockSlowStartPastHealthDeadline(
 	fixture.demandPods = append(fixture.demandPods, lateDemand.Name)
 	synctest.Wait()
 	slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
+	slowStartRequireDemandFitsReturningWorker(t, ctx, infra.Fakes.KubeClient, fixture)
 
 	time.Sleep(stockMaxInactivity - time.Nanosecond)
 	require.Equal(t, stockMaxInactivity-time.Nanosecond, time.Now().Sub(started.at))
@@ -321,7 +353,9 @@ func blockSlowStartPastHealthDeadline(
 	slowStartRequireNoLoopMoment(t, driver.started, "next loop started while IncreaseSize was blocked")
 
 	time.Sleep(2 * time.Nanosecond)
-	require.Equal(t, stockMaxInactivity+time.Nanosecond, time.Now().Sub(started.at))
+	healthFailureElapsed := time.Now().Sub(started.at)
+	require.Equal(t, stockMaxInactivity+time.Nanosecond, healthFailureElapsed)
+	require.Less(t, healthFailureElapsed, slowStartMaxNodeProvisionTime)
 	statusCode, body = slowStartHealthStatus(fixture.health)
 	require.Equal(t, http.StatusInternalServerError, statusCode)
 	require.Contains(t, body, "last activity more 10m0.000000001s ago")
@@ -364,7 +398,7 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 			infra.Fakes.InformerFactory = informers.NewSharedInformerFactory(infra.Fakes.KubeClient, 0)
 			recreatedProvider, recreatedGroup := newParkingProvider(t, fixture.world, infra.Fakes.KubeClient, 1, 3, true)
 			recreatedProvider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, fixture.transport)
-			recreatedAutoscaler := parkingAutoscaler(t, ctx, infra, recreatedProvider)
+			recreatedAutoscaler := slowStartAutoscaler(t, ctx, infra, recreatedProvider)
 			recreatedHealth := metrics.NewHealthCheck(stockMaxInactivity, stockMaxFailingTime, stockMaxStartupTime)
 			recreatedHealth.StartMonitoring()
 
@@ -568,6 +602,30 @@ func slowStartRequirePendingPods(
 		pod, err := client.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
 		require.NoError(t, err)
 		require.Empty(t, pod.Spec.NodeName)
+	}
+}
+
+func slowStartRequireDemandFitsReturningWorker(
+	t *testing.T,
+	ctx context.Context,
+	client kubernetes.Interface,
+	fixture *slowStartFixture,
+) {
+	t.Helper()
+	template, err := fixture.group.TemplateNodeInfo(ctx)
+	require.NoError(t, err)
+	returning := template.DeepCopy()
+	returning.Node().Name = "expected-returning-worker"
+
+	fixture.autoscaler.ClusterSnapshot.Fork()
+	defer fixture.autoscaler.ClusterSnapshot.Revert()
+	require.NoError(t, fixture.autoscaler.ClusterSnapshot.AddNodeInfo(returning))
+	for _, name := range fixture.demandPods {
+		pod, err := client.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
+		require.NoError(t, err)
+		candidate := pod.DeepCopy()
+		candidate.Spec.NodeName = ""
+		require.NoError(t, fixture.autoscaler.ClusterSnapshot.SchedulePod(candidate, returning.Node().Name))
 	}
 }
 
