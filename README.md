@@ -30,9 +30,10 @@ make image IMAGE=cluster-autoscaler-azure TAG=dev
 
 The Helm chart remains available at `charts/cluster-autoscaler`. Set `image.repository` and `image.tag` to an image published by your organization before deploying it. No official repository or image publication identity is configured in this bootstrap.
 
-The [Phase 1 migration record](docs/phase-1-migration.md) lists exact pins, local
-evidence, live acceptance gates, and cutover/rollback criteria. Phase 1 is not
-complete until those live gates pass.
+The [Phase 1 migration record](docs/phase-1-migration.md) lists exact pins and
+release gates. The [acceptance evidence](docs/phase-1-acceptance-evidence.md)
+records the qualified Kubernetes v1.37.0 profile, paired cases, rollback and
+cleanup. Publication and support decisions remain separate release gates.
 
 ## Azure configuration
 

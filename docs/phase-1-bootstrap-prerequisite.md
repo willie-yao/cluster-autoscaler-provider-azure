@@ -1,9 +1,24 @@
-# Bootstrap prerequisite: blocked
+# Bootstrap prerequisite record
 
-Read-only assessment on September 15, 2026. The Kubernetes v1.37.0, West US 3,
-Linux VMSS Uniform and four-VM acceptance envelope is unchanged. **No usable,
-fully pinned bootstrap was established within this scope. No provisioning
-approval is requested.**
+## Resolution
+
+The September 15, 2026 assessment below was a historical blocker. It was resolved
+for the exact tested profile on September 16 by using a versioned stock Ubuntu
+image with pinned boot-time Kubernetes, runtime, CNI and cloud-provider
+components. New VMSS instances joined autonomously and passed the first-worker,
+paired autoscaler and rollback gates. See the
+[Phase 1 acceptance evidence](phase-1-acceptance-evidence.md).
+
+This resolution qualifies only that profile. It does not create an official
+image, provisioning framework, or published support claim for the selected CNI
+or cloud-provider versions.
+
+## Historical assessment
+
+At the time of the read-only assessment, no usable fully pinned bootstrap had
+been established for the proposed Kubernetes v1.37.0, West US 3, Linux VMSS
+Uniform and four-VM envelope. No provisioning approval was requested by that
+assessment.
 
 ## Existing source inspected
 
@@ -53,9 +68,9 @@ These are expected download hashes, not verification of downloaded binaries.
 | `kubelet` | `ee554f77da57ad40a5d5f8625ac9c4af8b75d9d5a259367a885e5e816954b044` |
 | `kubectl` | `6129359f4e1f3848a5572ccb0b26cf28b8ca08cef38c95a765b2f64a2c961a2f` |
 
-## Remaining inputs
+## Historical remaining inputs
 
-**Technical unblocker, not provisioning approval:** an existing, inspectable
+At that time, the technical unblocker was an existing, inspectable
 self-managed bootstrap and image reference available in West US 3, including
 image version/resource ID and build provenance for its runtime and components.
 It must support autonomous VMSS joining and avoid a competing capacity controller.
@@ -68,8 +83,8 @@ After that is resolved, ordinary operator inputs remain:
 - Approved subscription, zone/SKU quota, resource names and non-overlapping CIDRs.
 - Operator source IP and SSH public key, not the private key.
 - Approved scoped identity/role plan and setup permissions.
-- Run window, primary cleanup owner and named backup within the retained
-  eight-hour/$20 ceiling.
+- Run window and accountable cleanup owner within the retained eight-hour/$20
+  ceiling.
 
 The acceptance plan now requires CoreDNS and all other non-DaemonSet system
 workloads on the control plane, with required placement. Autonomous joining,
@@ -77,5 +92,6 @@ correct identity/version, sustained readiness, working networking/DNS and system
 placement of the first worker must pass before either autoscaler starts.
 
 No cloud mutation, role assignment, guest operation, binary execution, image
-transfer/publication, dependency edit, commit or push occurred in this assessment.
-The reviewed candidate remains `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`.
+transfer/publication, dependency edit, commit or push occurred in the historical
+assessment. The later acceptance run used separate authorization and retained
+candidate `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`.

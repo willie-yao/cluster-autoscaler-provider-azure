@@ -1,13 +1,16 @@
 # Kubernetes v1.37.0 live acceptance plan
 
-**Proposal only. No live action is authorized.** One dedicated, self-managed
-Kubernetes **v1.37.0** cluster, Linux x86-64 VMSS **Uniform** workers, ordinary
-**Delete** mode. HA, AKS, Flex, VMs-pool, deallocate and broad E2E are excluded.
+> Historical execution plan. The run was later authorized, completed and cleaned
+> up. See the [Phase 1 acceptance evidence](phase-1-acceptance-evidence.md).
+> This plan does not authorize future cloud actions.
 
-**Bootstrap prerequisite is blocked.** See the
-[read-only bootstrap assessment](phase-1-bootstrap-prerequisite.md). Do not
-request provisioning approval until an inspectable, region-available bootstrap
-and complete component lock are established.
+The proposed profile used one dedicated, self-managed Kubernetes **v1.37.0**
+cluster, Linux x86-64 VMSS **Uniform** workers and ordinary **Delete** mode. HA,
+AKS, Flex, VMs-pool, deallocate and broad E2E were excluded.
+
+The bootstrap prerequisite was blocked when this proposal was written. The
+[prerequisite record](phase-1-bootstrap-prerequisite.md) now documents its
+resolution for the tested profile.
 
 ## Fixed references
 
@@ -48,9 +51,9 @@ permissions to the two disposable groups. The operator uses interactive Azure
 authentication and an explicit temporary kubeconfig; setup/cleanup requires scoped
 role-assignment authority. No worker receives a cloud-management identity.
 
-**Cleanup owner:** William Yao, or a named delegate accepted before creation,
-with a named backup. The agent executes approved, attended steps only. On session
-loss, the owner takes over from the resource ledger; no background cleanup promise.
+**Cleanup owner:** a named accountable human accepted before creation. The agent
+executes approved, attended steps only. On session loss, the owner takes over
+from the resource ledger; no background cleanup promise.
 
 ## Bootstrap and image delivery
 
@@ -239,8 +242,8 @@ billing caps. Extensions, extra resources, another region or failed cleanup
 require renewed approval and an updated estimate.
 
 Approval must confirm: subscription; West US 3/zone/SKU; operator IP; resource
-names; exact node/bootstrap/component pins; scoped roles; primary and backup
-cleanup owners; eight-hour/$20 bounds; and permission for provisioning, protected
+names; exact node/bootstrap/component pins; scoped roles; accountable cleanup
+ownership; eight-hour/$20 bounds; and permission for provisioning, protected
 bootstrap credentials, SSH image import, workload tests, cutover/rollback and
 cleanup. Repository pushes and image publication remain excluded.
 

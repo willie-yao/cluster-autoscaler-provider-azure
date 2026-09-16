@@ -1,8 +1,9 @@
 # Phase 1 migration acceptance
 
-**Phase 1 is not complete.** Local compatibility evidence does not establish
-functional acceptance on a live stable Kubernetes v1.37.0 cluster or authorize
-cutover.
+**Phase 1 functional migration acceptance passed for the tested profile.** The
+[live evidence](phase-1-acceptance-evidence.md) covers stable Kubernetes
+`v1.37.0`, paired upstream/candidate cases, cutover, rollback and cleanup. It
+does not establish release readiness or broader provider support.
 
 ## Baseline and scope
 
@@ -15,7 +16,7 @@ cutover.
 | Application module | `k8s.io/autoscaler/cluster-autoscaler` |
 | API replacement | `replace k8s.io/autoscaler/cluster-autoscaler/apis => ./apis` |
 | Kubernetes dependencies | `v1.37.0-rc.1`, with staging modules at `v0.37.0-rc.1` |
-| Exact live acceptance target | Stable Kubernetes `v1.37.0`; the self-managed environment, bootstrap artifacts and live-test authorization remain unresolved. |
+| Exact live acceptance target | Stable Kubernetes `v1.37.0`; the qualified self-managed profile is recorded in the [acceptance evidence](phase-1-acceptance-evidence.md). |
 
 Phase 1 preserves upstream Azure functionality: standard pools, explicit VMSS
 groups, discovery, scale-from-zero, existing authentication/configuration paths,
@@ -34,10 +35,11 @@ Intentional migration differences:
   preserve generated-client compatibility. CRD schemas are unchanged.
 - VPA packaging is restored from upstream, not excluded as another provider.
 
-## Local evidence
+## Local and live evidence
 
-The following checks use Go 1.26.0 and unchanged dependency pins. Tests use fake
-clients or local processes. There is no live Azure or Kubernetes API access.
+The local checks use Go 1.26.0 and unchanged dependency pins. Fake-client and
+local-process limits remain explicit. The final row records the separately
+authorized live profile.
 
 | Evidence | Status | Limit |
 | --- | --- | --- |
@@ -51,7 +53,7 @@ clients or local processes. There is no live Azure or Kubernetes API access.
 | Core demand-driven growth and safe scale-down | Pass | `make test-core-integration` runs the pinned core's existing fake-provider lifecycle and resource-limit tests. This is not an integrated Azure-cloud E2E test. |
 | Full local race and API suites | Pass | `make test-ci GOOS=darwin`, API informer race tests, and repeated migration tests pass. API and focused migration tests were repeated ten times. |
 | Hosted CI for this change | Missing | No push or workflow run requested. Bootstrap run `34291127550` passed at the bootstrap SHA only. The existing `ct lint` version-increment gate still needs an approved chart version beyond inherited `9.59.0`. |
-| Real auth, registration, scheduling, deletion, cutover and rollback | Missing | Require an agreed target and separately authorized live testing. |
+| Real auth, registration, scheduling, deletion, cutover and rollback | Pass | Passed for the exact bounded profile in the [Phase 1 acceptance evidence](phase-1-acceptance-evidence.md). This is not a general support claim. |
 
 The generated apply-aware fake client has a separate unresolved limitation:
 updating a seeded CapacityBuffer fails with a structured-merge schema type lookup
@@ -99,7 +101,7 @@ speed up rollback.
 | Image registry | Registry owner, image naming, signing/provenance and publishing authority |
 | Module and APIs | Downstream publication policy while retaining current identities until approved |
 | Versioning | First application/chart release, tag policy, Kubernetes support policy and upgrade guarantees |
-| Kubernetes 1.37 acceptance | Self-managed environment, bootstrap/component pins, credential mode, pool scope and live-test authorization |
+| Kubernetes 1.37 acceptance | Tested profile is qualified; broader support policy and future environment coverage remain release decisions |
 
 Changing these decisions, publishing artifacts, and performing cloud or cluster
 mutations require separate authorization.
