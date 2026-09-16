@@ -1,8 +1,8 @@
 # Phase 2 public-source E2E matrix
 
 **Phase 2 is not complete.** Runnable tests, required review and live execution
-are separate gates. Verified live batches record seven public-source passes
-and one supplemental pass through September 16, 2026 at 11:09 UTC. Remaining
+are separate gates. Verified live batches record ten public-source passes
+and one supplemental pass through September 16, 2026 at 11:52 UTC. Remaining
 rows are not implied to pass. Phase 1 evidence does not substitute for running
 these new tests.
 
@@ -43,9 +43,9 @@ not mean reviewed, executed, or passed.
 | [CA-005][ca005] | Required hostname anti-affinity grows from one to three Pods on three distinct workers. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, namespace-owned constraints only. |
 | [CA-006][ca006] | A pending Pod with an EmptyDir and anti-affinity triggers growth and runs on a second worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Local-storage scale-down protection remains enabled. |
 | [CA-007][ca007] | Remove three-worker pressure and require physical deletion back to baseline, not just desired-capacity change. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`. |
-| [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Implemented; unexecuted. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
-| [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged throughout five minutes. | `public_test.go` | Implemented; unexecuted. Scale-down timings are explicit and at most one minute. |
-| [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Implemented; unexecuted. `B+2`, PDB budget must replenish. |
+| [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
+| [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged throughout five minutes. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Scale-down timings are explicit and at most one minute. |
+| [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, PDB budget must replenish. |
 | [CA-011][ca011] | The multi-Pod PDB drain runs with synthetic test-owned kube-system objects, preserving actual system addons and protections. | `system_test.go` | Implemented; unexecuted. Explicit `allow-kube-system-fixture: CA-011` marker and no overlapping PDB selectors required. |
 | [CA-012][ca012] | Real low-priority demand is created in the test body; one Ready and one Pending expendable Pod do not grow the pool. | `priority_test.go` | Implemented; unexecuted. Corrects source bug that creates workload only in deferred cleanup. |
 | [CA-013][ca013] | Two high-priority reservations cause growth and become Ready on distinct workers. | `priority_test.go` | Implemented; unexecuted. Operator-owned PriorityClasses/cutoff required. |
@@ -91,7 +91,7 @@ outside this Azure CA inventory.
 ## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
-dry-runs, filtered specs or passing setup hooks. All eight JSON reports declare
+dry-runs, filtered specs or passing setup hooks. All eleven JSON reports declare
 the suite and selected scenario passed; their JUnit reports have zero failures
 and errors. Each invocation removed its test namespace and returned to actual
 main/zero `1/0` before the next case.
@@ -112,6 +112,9 @@ campaign identity, not an official image publication or release decision.
 | `AZ-001` | 10:27:31.947 to 10:40:50.644 (suite) | 13m18.70s suite | 100 CPU-requesting Pods caused actual and desired `1/0 -> 2/1 -> 1/0`; Ready test Pods used all three workers and excess demand remained Pending. Peak four VMs/eight vCPUs. Main instance `0` and zero instance `2`, their Nodes and captured NICs were physically deleted; main instance `4` survived. This is not a claim that all 100 Pods became Ready. |
 | `CA-006` | 10:41:38.259 to 10:54:47.104 (suite) | 13m08.85s suite | The EmptyDir/anti-affinity pair became Ready after actual and desired `1/0 -> 2/0` growth; peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, retaining main instance `5`. Local-storage protection remained enabled. This growth case does not separately assert individual NIC deletion. |
 | `CA-007` | 10:55:57.058 to 11:09:15.652 (suite) | 13m18.59s suite | Three-worker pressure grew actual and desired `1/0 -> 2/1`; peak four VMs/eight vCPUs. Removing pressure restored `1/0` with physical deletion of main instance `6`, zero instance `3`, their Nodes and captured NICs. Main instance `5` survived. |
+| `CA-008` | 11:09:55.826 to 11:23:58.011 (suite) | 14m02.18s suite | Three movable Pods initially occupied separate workers. The one-disruption PDB drain kept at least two Ready at every observation and all three recovered on main instance `5`. Main instance `7`, zero instance `4`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
+| `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 12m56.38s suite | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
+| `CA-010` | 11:37:59.182 to 11:52:00.949 (suite) | 14m01.77s suite | Six movable Pods initially occupied three workers, two per worker. The one-disruption drain kept at least five Ready at every observation and all six recovered on main instance `5`. Main instance `9`, zero instance `6`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
 
 The sole operator preserves each run's non-secret runner log, JSON and JUnit
 under the run name below. Verified SHA-256 digests:
@@ -126,6 +129,9 @@ under the run name below. Verified SHA-256 digests:
 | `AZ-001-886f31f` | `de8c6773d711170abf120a31c1ef09053db3f4dcfd512627bc4322c8bd7faa88` | `18455b5c53988a67f98a75dca551ed076e2dee6032ee1f286df503331a7dc34e` | `3fa7957f76ebc89d500e5e736852f176dad876df947f61c8c70205f9d0c800be` |
 | `CA-006-886f31f` | `259f28769ee83488adfda1b66001d5792ddd940fcdf46dbf5b31552d28592de5` | `a0a4150c420bf5984266cfb0ef36919c561a689e285c48156eafedebc6c2d777` | `7d6080e8c6e89e26039923f42f531488a1f8f0148f199af6cb8aeb5f34160f1a` |
 | `CA-007-886f31f` | `77f46f2d166555b204818555e790acc0b327c6aef0ab6fb7fb88b6e72d145665` | `8daa7e1472369d380907bb671c065eb56394c6879e85b4090a86f1138db4bc9b` | `86bb633ff57d33e2d59281b83306957c6da916068778d87e038bc7b2f0dcf864` |
+| `CA-008-886f31f` | `63abff5dd6410b6fadf15822822649d2db85301204ce550a434d23c733399c89` | `0d0f6b21d8609023109b655ec2feb87d8760069bd5f7e8991d1eadb8ab1efaed` | `f7835a1d0c31a1f14da1a1c02b98c6853ab8526c514c4e5199f975cb79e03c4b` |
+| `CA-009-886f31f` | `f4ef3c493011f3c8a2499e034170e7b66b46f4e3d77a07f900a05c81bdc8f19a` | `3f62073d94a5d14cbbc90e25ac76f14454bdcf702c6d6e919de6d2263aa87e62` | `3de87bf316c9b3b08ccd58fc8a3df2bf6b2b4e29a8d24a7c1762acd0f626bae3` |
+| `CA-010-886f31f` | `b249a66f999609c3622ec0d8ed000f1916dd2f244890deee73acf90a39c938a5` | `a5294fcddc60004d79405f5177b1e464682360f6fac23762668f23d6b1ed9c6d` | `88660148940ec229f78215754f0b1f2e3122ebefe613dbe93b9fcf575e814e90` |
 
 ## Evidence gates
 
