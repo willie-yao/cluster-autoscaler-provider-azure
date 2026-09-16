@@ -9,6 +9,7 @@ CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME?=cluster-autoscaler
 # When unset, all suites under suites/ are run.
 TEST_SUITE?=
 TEST_TIMEOUT?=3h
+ENVIRONMENT?=
 
 # Compute ginkgo suite path: ./suites/... (all) or ./suites/<name>/... (single)
 SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/...,./suites/...)
@@ -20,10 +21,8 @@ ARTIFACTS?=_artifacts
 # Local developer targets
 # --------------------------------------------------------------------------
 # Prerequisites:
-#   1. az login
-#   2. make setup-cluster   (creates AKS + ACR + identity, one-time)
-#   3. make deploy-local    (builds + deploys CAS via skaffold)
-#   4. make e2etests        (runs the tests)
+#   Prepare an isolated cluster separately, then provide an explicit environment
+#   binding. Test execution never invokes setup/deployment targets.
 #
 # Required env var: AZURE_RESOURCE_GROUP (set automatically by setup-cluster)
 
@@ -53,7 +52,8 @@ deploy-local-dev: ## Build + deploy CAS in watch mode (auto-redeploy on changes)
 
 .PHONY: e2etests
 e2etests: ## Run e2e tests (CAS must already be deployed)
-	go run github.com/onsi/ginkgo/v2/ginkgo \
+	@test -n "$(ENVIRONMENT)" || (echo "ENVIRONMENT must name an explicit JSON binding"; exit 1)
+	go run -mod=readonly github.com/onsi/ginkgo/v2/ginkgo \
 		--tags e2e \
 		-v --trace \
 		--timeout $(TEST_TIMEOUT) \
@@ -62,7 +62,12 @@ e2etests: ## Run e2e tests (CAS must already be deployed)
 		$(if $(FOCUS),--focus="$(FOCUS)",) \
 		$(if $(LABEL_FILTER),--label-filter="$(LABEL_FILTER)",) \
 		$(SUITE_PATH) -- \
-		-resource-group="$(AZURE_RESOURCE_GROUP)"
+		-environment="$(ENVIRONMENT)"
+
+.PHONY: test-local
+test-local: ## Validate harness logic and compile E2E without cloud credentials
+	go test -mod=readonly -race ./pkg/...
+	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
 
 ##@ Utilities
 

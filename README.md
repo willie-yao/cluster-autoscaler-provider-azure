@@ -20,6 +20,7 @@ The resulting `cluster-autoscaler-<arch>` binary is Azure-only. `--cloud-provide
 make test-azure
 make test-ci
 make test-chart # requires Helm
+make test-e2e-local # nested Azure E2E harness checks, no cloud credentials
 ```
 
 To build a local image without publishing it:
@@ -34,6 +35,10 @@ The [Phase 1 migration record](docs/phase-1-migration.md) lists exact pins and
 release gates. The [acceptance evidence](docs/phase-1-acceptance-evidence.md)
 records the qualified Kubernetes v1.37.0 profile, paired cases, rollback and
 cleanup. Publication and support decisions remain separate release gates.
+
+The [Azure E2E runner](cloudprovider/azure/test/README.md) executes focused
+scenarios on explicitly authorized, operator-prepared disposable clusters.
+Environment setup and infrastructure cleanup are separate from test execution.
 
 ## Azure configuration
 

@@ -1,0 +1,129 @@
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package environment
+
+import (
+	"strings"
+	"testing"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+)
+
+func testNode(c Config) corev1.Node {
+	return corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "worker-0", Labels: map[string]string{c.PoolLabel: c.MainLabel}},
+		Spec:       corev1.NodeSpec{ProviderID: "azure://" + c.PoolID(c.MainPool) + "/virtualMachines/0"},
+		Status: corev1.NodeStatus{
+			Conditions:  []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}},
+			Allocatable: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+		},
+	}
+}
+
+func testSnapshot(c Config) Snapshot {
+	node := testNode(c)
+	id := normalizeID(node.Spec.ProviderID)
+	return Snapshot{
+		Pools: map[string]PoolState{
+			c.MainPool: {Capacity: 1, Instances: map[string]Instance{id: {ID: id, NICs: []string{c.PoolID(c.MainPool) + "/virtualMachines/0/networkInterfaces/nic"}}}},
+			c.ZeroPool: {Capacity: 0, Instances: map[string]Instance{}},
+		},
+		Nodes: []corev1.Node{node, {ObjectMeta: metav1.ObjectMeta{Name: "cp"}, Spec: corev1.NodeSpec{ProviderID: "azure://" + c.ControlPlaneID}}},
+		VMs:   2, VCPUs: 4,
+	}
+}
+
+func TestSnapshotStable(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		change func(*Snapshot)
+	}{
+		{name: "unready worker", change: func(s *Snapshot) { s.Nodes[0].Status.Conditions[0].Status = corev1.ConditionFalse }},
+		{name: "cordoned worker", change: func(s *Snapshot) { s.Nodes[0].Spec.Unschedulable = true }},
+		{name: "wrong predicted label", change: func(s *Snapshot) { s.Nodes[0].Labels["acceptance-pool"] = "wrong" }},
+		{name: "capacity without actual VM", change: func(s *Snapshot) { delete(s.Pools["main"].Instances, normalizeID(s.Nodes[0].Spec.ProviderID)) }},
+		{name: "duplicate registration", change: func(s *Snapshot) { s.Nodes = append(s.Nodes, s.Nodes[0]) }},
+		{name: "stale provider identity", change: func(s *Snapshot) { s.Nodes[0].Spec.ProviderID += "different" }},
+		{name: "resource ceiling", change: func(s *Snapshot) { s.VCPUs = 10 }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			s := testSnapshot(c)
+			if err := s.Stable(c, 1, 0); err != nil {
+				t.Fatalf("control plane must not count as a pool worker: %v", err)
+			}
+			tt.change(&s)
+			if err := s.Stable(c, 1, 0); err == nil {
+				t.Fatal("invalid cloud/Node state accepted")
+			}
+		})
+	}
+}
+
+func TestValidateDemand(t *testing.T) {
+	t.Parallel()
+	node := testNode(testConfig())
+	pods := []corev1.Pod{{Spec: corev1.PodSpec{
+		NodeName: node.Name, Containers: []corev1.Container{{
+			Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("300m")}},
+		}},
+	}}}
+	for _, tt := range []struct {
+		name   string
+		demand int64
+		valid  bool
+	}{
+		{name: "measured Phase1 geometry", demand: 1200, valid: true},
+		{name: "two fit on a worker", demand: 800},
+		{name: "one cannot fit", demand: 1800},
+		{name: "exact two fit", demand: 850},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateDemand(node, pods, tt.demand)
+			if (err == nil) != tt.valid {
+				t.Fatalf("ValidateDemand = %v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckStatus(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 9, 16, 9, 0, 0, 0, time.UTC)
+	status := "time: 2026-09-16T09:00:00Z\nautoscalerStatus: Running\nnodeGroups:\n- name: main\n- name: zero\n"
+	for _, tt := range []struct {
+		name, status string
+		valid        bool
+	}{
+		{name: "exact reported inventory", status: status, valid: true},
+		{name: "missing status", status: ""},
+		{name: "wrong group", status: strings.ReplaceAll(status, "zero", "unowned")},
+		{name: "extra group", status: status + "- name: unowned\n"},
+		{name: "stale controller", status: strings.ReplaceAll(status, "09:00:00", "08:00:00")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckStatus(tt.status, []string{"main", "zero"}, now)
+			if (err == nil) != tt.valid {
+				t.Fatalf("CheckStatus = %v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
