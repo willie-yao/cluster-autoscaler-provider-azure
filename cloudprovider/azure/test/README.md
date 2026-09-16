@@ -49,7 +49,10 @@ tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:
 
 The test runner verifies the controller's fresh status ConfigMap contains
 exactly these two groups and its fresh lease belongs to the single Ready
-controller Pod. It does not read cloud Secrets or claim to detect every
+controller Pod. The pinned runtime uses `os.Hostname()` as its lease identity:
+the exact Pod name normally, or the exact scheduled Node name when that Pod
+uses host networking. Arbitrary prefixes and foreign Node identities fail.
+It does not read cloud Secrets or claim to detect every
 possible external controller. The operator must disable any managed or other
 autoscaler that could share these pools.
 
@@ -86,6 +89,22 @@ Do not commit the real kubeconfig, credentials, bootstrap material or private
 keys. Azure observations use the existing SDK's `DefaultAzureCredential`.
 Azure errors retain HTTP status/code but omit response bodies that might
 contain bootstrap data.
+
+For an operator intentionally authenticating the runner through an existing
+Azure CLI login, stale inherited service-principal variables can take
+precedence. Scope their removal to that runner process only:
+
+```sh
+env -u AZURE_CLIENT_ID -u AZURE_CLIENT_SECRET -u AZURE_TENANT_ID \
+  make -C cloudprovider/azure/test e2etests \
+  ENVIRONMENT=/absolute/path/to/environment.json \
+  ARTIFACTS=/absolute/path/to/non-secret-artifacts \
+  LABEL_FILTER=CA-005 TEST_TIMEOUT=45m
+```
+
+Do not print credential values or change global shell/CI authentication.
+This is an operator-process option, not a requirement to use CLI credentials
+in all environments. It does not change the application's managed identity.
 
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested

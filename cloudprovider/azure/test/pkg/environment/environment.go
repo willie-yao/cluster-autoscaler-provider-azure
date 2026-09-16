@@ -150,15 +150,27 @@ func (e *Environment) Controller(ctx context.Context) error {
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.LeaseName}, &lease); err != nil {
 		return err
 	}
-	if lease.Spec.HolderIdentity == nil || !strings.HasPrefix(*lease.Spec.HolderIdentity, pod.Name+"_") ||
-		lease.Spec.RenewTime == nil || time.Since(lease.Spec.RenewTime.Time) > time.Minute {
-		return fmt.Errorf("fresh leader lease does not belong to the authorized autoscaler Pod")
+	if err := checkLeaderLease(pod, lease, time.Now()); err != nil {
+		return err
 	}
 	var status corev1.ConfigMap
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
 		return err
 	}
 	return CheckStatus(status.Data["status"], []string{c.MainPool, c.ZeroPool}, time.Now())
+}
+
+func checkLeaderLease(pod corev1.Pod, lease coordinationv1.Lease, now time.Time) error {
+	if lease.Spec.HolderIdentity == nil || lease.Spec.RenewTime == nil ||
+		now.Sub(lease.Spec.RenewTime.Time) > time.Minute || lease.Spec.RenewTime.Time.After(now.Add(10*time.Second)) {
+		return fmt.Errorf("autoscaler leader lease is missing or stale")
+	}
+	holder := *lease.Spec.HolderIdentity
+	// The pinned autoscaler uses os.Hostname() without adding a UUID.
+	if holder != pod.Name && !(pod.Spec.HostNetwork && pod.Spec.NodeName != "" && holder == pod.Spec.NodeName) {
+		return fmt.Errorf("fresh leader lease does not belong to the authorized autoscaler Pod")
+	}
+	return nil
 }
 
 // These non-secret environment values override the provider's cloud-config file.

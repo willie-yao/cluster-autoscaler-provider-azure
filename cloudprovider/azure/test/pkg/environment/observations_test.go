@@ -17,6 +17,7 @@ limitations under the License.
 package environment
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,6 +27,43 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 )
+
+func TestSnapshotStableChecksEachPoolBounds(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		main, zero int
+		valid      bool
+	}{
+		{main: 1, zero: 0, valid: true},
+		{main: 2, zero: 1, valid: true},
+		{main: 3, zero: 0},
+		{main: 1, zero: 2},
+		{main: 0, zero: 1},
+	} {
+		t.Run(fmt.Sprintf("main=%d zero=%d", tt.main, tt.zero), func(t *testing.T) {
+			c := testConfig()
+			snapshot := Snapshot{Pools: map[string]PoolState{}, VMs: 1 + tt.main + tt.zero, VCPUs: 2 * (1 + tt.main + tt.zero)}
+			for name, count := range map[string]int{c.MainPool: tt.main, c.ZeroPool: tt.zero} {
+				pool := PoolState{Capacity: count, Instances: map[string]Instance{}}
+				for i := 0; i < count; i++ {
+					node := testNode(c)
+					node.Name = fmt.Sprintf("%s-%d", name, i)
+					node.Spec.ProviderID = fmt.Sprintf("azure://%s/virtualMachines/%d", c.PoolID(name), i)
+					if name == c.ZeroPool {
+						node.Labels[c.PoolLabel] = c.ZeroLabel
+					}
+					snapshot.Nodes = append(snapshot.Nodes, node)
+					id := normalizeID(node.Spec.ProviderID)
+					pool.Instances[id] = Instance{ID: id}
+				}
+				snapshot.Pools[name] = pool
+			}
+			if err := snapshot.Stable(c, tt.main, tt.zero); (err == nil) != tt.valid {
+				t.Fatalf("observed-distribution error=%v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
 
 func testNode(c Config) corev1.Node {
 	return corev1.Node{

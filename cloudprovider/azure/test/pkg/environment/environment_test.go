@@ -72,10 +72,19 @@ func TestCheckControllerScope(t *testing.T) {
 	}
 }
 
-func TestControllerChecksTemplateAndRunningPodScope(t *testing.T) {
+func TestControllerChecksScopeAndLeader(t *testing.T) {
 	t.Parallel()
-	for _, invalid := range []string{"", "template", "running Pod"} {
-		t.Run("invalid "+invalid, func(t *testing.T) {
+	for _, tt := range []struct {
+		name, invalidScope, holder string
+		hostNetwork, valid         bool
+	}{
+		{name: "exact scope and Pod leader", valid: true},
+		{name: "wrong template scope", invalidScope: "template"},
+		{name: "wrong running Pod scope", invalidScope: "running Pod"},
+		{name: "host-network Node leader", hostNetwork: true, holder: "control-plane", valid: true},
+		{name: "foreign host-network leader", hostNetwork: true, holder: "foreign-node"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
 			container := corev1.Container{Name: c.AutoscalerContainer, Image: c.ExpectedImage,
 				Env: []corev1.EnvVar{{Name: "ARM_SUBSCRIPTION_ID", Value: c.SubscriptionID}, {Name: "ARM_RESOURCE_GROUP", Value: c.ResourceGroup}},
@@ -90,24 +99,57 @@ func TestControllerChecksTemplateAndRunningPodScope(t *testing.T) {
 				Status: appsv1.DeploymentStatus{ReadyReplicas: 1, UpdatedReplicas: 1},
 			}
 			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "autoscaler-0", Namespace: c.AutoscalerNamespace, Labels: labels},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{*container.DeepCopy()}},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{*container.DeepCopy()}, HostNetwork: tt.hostNetwork, NodeName: "control-plane"},
 				Status: corev1.PodStatus{Phase: corev1.PodRunning,
 					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
 			}
-			if invalid == "template" {
+			if tt.invalidScope == "template" {
 				deployment.Spec.Template.Spec.Containers[0].Env[1].Value = "foreign-workers"
 			}
-			if invalid == "running Pod" {
+			if tt.invalidScope == "running Pod" {
 				pod.Spec.Containers[0].Env[1].Value = "foreign-workers"
 			}
 			lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: c.LeaseName, Namespace: c.AutoscalerNamespace},
-				Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr.To(pod.Name + "_leader"), RenewTime: &metav1.MicroTime{Time: time.Now()}}}
+				Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr.To(pod.Name), RenewTime: &metav1.MicroTime{Time: time.Now()}}}
+			if tt.holder != "" {
+				lease.Spec.HolderIdentity = ptr.To(tt.holder)
+			}
 			status := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cluster-autoscaler-status", Namespace: c.AutoscalerNamespace},
 				Data: map[string]string{"status": fmt.Sprintf("time: %s\nautoscalerStatus: Running\nnodeGroups:\n- name: %s\n- name: %s\n",
 					time.Now().UTC().Format(time.RFC3339), c.MainPool, c.ZeroPool)}}
 			e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(deployment, pod, lease, status).Build()}
-			if err := e.Controller(context.Background()); (err == nil) != (invalid == "") {
-				t.Fatalf("invalid %q scope: %v", invalid, err)
+			if err := e.Controller(context.Background()); (err == nil) != tt.valid {
+				t.Fatalf("Controller error=%v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckLeaderLease(t *testing.T) {
+	t.Parallel()
+	now := time.Now()
+	for _, tt := range []struct {
+		name, holder string
+		hostNetwork  bool
+		age          time.Duration
+		valid        bool
+	}{
+		{name: "exact Pod hostname", holder: "autoscaler-0", valid: true},
+		{name: "host-network Node hostname", holder: "control-plane", hostNetwork: true, valid: true},
+		{name: "foreign Node hostname", holder: "foreign-node", hostNetwork: true},
+		{name: "Node hostname without host networking", holder: "control-plane"},
+		{name: "stale lease", holder: "autoscaler-0", age: 2 * time.Minute},
+		{name: "future lease", holder: "autoscaler-0", age: -time.Minute},
+		{name: "unrecognized Pod prefix", holder: "autoscaler-0_foreign"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "autoscaler-0"},
+				Spec: corev1.PodSpec{NodeName: "control-plane", HostNetwork: tt.hostNetwork}}
+			lease := coordinationv1.Lease{Spec: coordinationv1.LeaseSpec{
+				HolderIdentity: ptr.To(tt.holder), RenewTime: &metav1.MicroTime{Time: now.Add(-tt.age)},
+			}}
+			if err := checkLeaderLease(pod, lease, now); (err == nil) != tt.valid {
+				t.Fatalf("lease error=%v, valid=%v", err, tt.valid)
 			}
 		})
 	}

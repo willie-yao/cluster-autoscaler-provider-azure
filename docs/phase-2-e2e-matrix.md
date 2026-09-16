@@ -103,6 +103,16 @@ promise to delete a preselected worker. No survivor-pinning machinery was added.
 Full-diff follow-up review remains required; these dispositions are not a
 completed review cycle.
 
+The second actual review covered the full Phase 2 diff through `e2038d649`.
+It verified the accepted first-round fixes and Calico helper reuse, accepted
+the predetermined-victim scope disposition, and found one additional concrete
+gap: three total workers could hide an invalid `main=3/zero=0` or
+`main=1/zero=2` distribution. Shared snapshot validation now checks each pool's
+requested and actual bounds before accepting caller-derived expectations.
+The related split-form argument guard and the live-discovered hostname lease
+repair also require the third, focused review. No completed review cycle is
+claimed yet.
+
 Local race tests, tagged compilation and Ginkgo registration dry-runs cover
 harness logic only. Required
 custom review is coordinated separately and not yet complete. The sole live
@@ -116,6 +126,23 @@ checkpoint. The runtime under test remains the separate production candidate
 `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, unless operator evidence explicitly
 records a different approved runtime. Test-suite commits and runtime provenance
 must not be conflated.
+
+The first recorded live harness attempt, `AZ-P1-001-retry2`, used frozen tests
+`e2038d649400890f960f64d1b9c8e3e7aba2a876` and the unchanged candidate runtime.
+Its non-dry-run JSON report records initialization passing, then `BeforeEach`
+failing on the lease guard from 09:05:52 to 09:06:07 UTC on September 16.
+There were **zero passing scenarios**. The guard incorrectly required a
+Pod-name/UUID prefix while the approved host-network runtime's fresh lease
+contained its exact control-plane Node hostname. No workload namespace or
+scaling workload was created. The operator reported unchanged `main=1/zero=0`
+and stopped the controller before the repair.
+
+The operator preserves `AZ-P1-001-retry2/report.e2e_suite.1.json`, SHA-256
+`48c7f29a62ee52f296f7ad6ffe791036dab3bc81fd3a93ff5b5e151eebf591f3`,
+with its JUnit and runner log. Earlier inherited-credential failures are
+setup failures, not application or scenario passes. The hostname guard now
+uses the pinned runtime's exact identity forms with freshness and foreign-node
+rejection; a rerun is still required.
 
 The approved September 16, 2026 live campaign stops starting new cases at
 13:30 UTC. Every test process must return or be stopped by 14:00 UTC, and the

@@ -80,6 +80,15 @@ func (s Snapshot) Stable(c Config, main, zero int) error {
 	}
 	for name, expected := range map[string]int{c.MainPool: main, c.ZeroPool: zero} {
 		pool, ok := s.Pools[name]
+		minimum, maximum := 1, 2
+		if name == c.ZeroPool {
+			minimum, maximum = 0, 1
+		}
+		if expected < minimum || expected > maximum || pool.Capacity < minimum || pool.Capacity > maximum ||
+			len(pool.Instances) < minimum || len(pool.Instances) > maximum {
+			return fmt.Errorf("pool %s: expected=%d desired=%d actual=%d violates bounds %d..%d",
+				name, expected, pool.Capacity, len(pool.Instances), minimum, maximum)
+		}
 		if !ok || pool.Capacity != expected || len(pool.Instances) != expected {
 			return fmt.Errorf("pool %s: desired=%d actual=%d, want %d", name, pool.Capacity, len(pool.Instances), expected)
 		}
