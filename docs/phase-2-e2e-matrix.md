@@ -1,10 +1,13 @@
 # Phase 2 public-source E2E matrix
 
-**Phase 2 is not complete.** Runnable tests, required review and live execution
-are separate gates. Verified live batches record twelve public-source passes
-and one supplemental pass through September 16, 2026 at 12:14 UTC. Remaining
-rows are not implied to pass. Phase 1 evidence does not substitute for running
-these new tests.
+**Full Phase 2 live completion is not established.** All 22 active public-source
+tests are implemented and reviewed. This campaign records 19 baseline public
+passes and one supplemental pass through September 16, 2026 at 13:31 UTC.
+The three DRA cases were prepared but not installed or executed within the
+approved campaign window. They are unexecuted, not unsupported or Phase 3.
+Phase 1 evidence does not substitute for running these new tests.
+Campaign infrastructure and campaign-specific credentials were removed before
+the deadline; see [campaign closeout](#campaign-closeout).
 
 The accepted inventory source is
 [`Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`](https://github.com/Azure/autoscaler/commit/d892fba1cf557b26d45540f2f6418b7ae52cca46),
@@ -20,6 +23,20 @@ release contains one Azure smoke and 22 generic registrations, including three
 optional DRA cases. No separate public AKS product suite or deallocate E2E was
 found. Registration counts are not pass counts and say nothing about private
 AKS product test coverage.
+
+## Campaign accounting
+
+| Coverage | Implemented tests | Live outcome |
+| --- | --- | --- |
+| Public baseline: `AZ-001`, `CA-001`, `CA-002`, `CA-004` through `CA-019` | 19 | 19 passed on the frozen candidate. |
+| Public DRA: `CA-020` through `CA-022` | 3 | Unexecuted. Prepared setup artifacts were retained, but the profile was not installed because the remaining campaign window was insufficient. |
+| Source-disabled `CA-003` | 0 | Explicit disabled/flaky source gap, not a passing or skipped proxy spec. |
+| Supplemental cases | 5 | `AZ-P1-001` passed; four cases remain unexecuted in this campaign. |
+
+The 22 active public tests plus five supplemental tests account for all 27
+registered specs. Registration and local fake/unit coverage are not live passes.
+The unexecuted DRA profile requires a later approved live window; it is not a
+deallocate dependency and was not found unsupported.
 
 ## Source-to-test mapping
 
@@ -48,16 +65,16 @@ not mean reviewed, executed, or passed.
 | [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, PDB budget must replenish. |
 | [CA-011][ca011] | The multi-Pod PDB drain runs with synthetic test-owned kube-system objects, preserving actual system addons and protections. | `system_test.go` | Passed on `886f31f8d`; see verified live batches. Explicit `allow-kube-system-fixture: CA-011` marker and no overlapping PDB selectors required. |
 | [CA-012][ca012] | Real low-priority demand is created in the test body; one Ready and one Pending expendable Pod do not grow the pool. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Corrects source bug that creates workload only in deferred cleanup. |
-| [CA-013][ca013] | Two high-priority reservations cause growth and become Ready on distinct workers. | `priority_test.go` | Implemented; unexecuted. Operator-owned PriorityClasses/cutoff required. |
-| [CA-014][ca014] | High-priority demand actually replaces the captured low-priority Pod; low-priority replacement remains Pending without growth. | `priority_test.go` | Implemented; unexecuted. Real scheduling preemption, not direct test eviction. |
-| [CA-015][ca015] | Three expendable memory reservations do not prevent physical shrink; remaining demand is explicitly one Ready/two Pending. | `priority_test.go` | Implemented; unexecuted. `B+2`, source's running expendable workload intent retained. |
-| [CA-016][ca016] | Non-expendable memory reservations keep captured workers and all three Pods Ready throughout five minutes. | `priority_test.go` | Implemented; unexecuted. Negative window exceeds the required timing profile. |
-| [CA-017][ca017] | Unprocessed bypassed-scheduler demand that cannot fit triggers actual growth while remaining unprocessed. | `scheduler_test.go` | Implemented; unexecuted. Optional bypass profile, not Phase 3. |
-| [CA-018][ca018] | Bypassed-scheduler demand measured to fit stays unprocessed without growth. | `scheduler_test.go` | Implemented; unexecuted. Optional bypass profile. |
-| [CA-019][ca019] | Unprocessed demand under a unique, unconfigured scheduler name never triggers growth. | `scheduler_test.go` | Implemented; unexecuted. Can run as a baseline control without the bypass flag. |
-| [CA-020][ca020] | Twelve one-device DRA Pods cause three-worker growth; all are Ready with unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Operator-prepared DRA API/driver/future-node simulation required, no GPU SKU. |
-| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Implemented; unexecuted. Explicit optional DRA profile, not deallocate. |
-| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Implemented; unexecuted. Explicit optional DRA profile, not deallocate. |
+| [CA-013][ca013] | Two high-priority reservations cause growth and become Ready on distinct workers. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Operator-owned PriorityClasses/cutoff required. |
+| [CA-014][ca014] | High-priority demand actually replaces the captured low-priority Pod; low-priority replacement remains Pending without growth. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Real scheduling preemption, not direct test eviction. |
+| [CA-015][ca015] | Three expendable memory reservations do not prevent physical shrink; remaining demand is explicitly one Ready/two Pending. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, source's running expendable workload intent retained. |
+| [CA-016][ca016] | Non-expendable memory reservations keep captured workers and all three Pods Ready throughout five minutes. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Negative window exceeds the required timing profile. |
+| [CA-017][ca017] | Unprocessed bypassed-scheduler demand that cannot fit triggers actual growth while remaining unprocessed. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile, not Phase 3. |
+| [CA-018][ca018] | Bypassed-scheduler demand measured to fit stays unprocessed without growth. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile. |
+| [CA-019][ca019] | Unprocessed demand under a unique, unconfigured scheduler name does not trigger growth for five minutes. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Can run as a baseline control without the bypass flag. |
+| [CA-020][ca020] | Twelve one-device DRA Pods cause three-worker growth; all are Ready with unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window. DRA API/driver/future-node simulation required, no GPU SKU. |
+| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
+| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
 
 ## Supplemental and excluded coverage
 
@@ -67,6 +84,11 @@ registrations in the 23-row public inventory. They add discovery/idle,
 min/max, zero-pool identity/deletion, and an explicit PDB release transition.
 The retained ETag example is supplemental; the selected source has ETag
 unit tests, not an ETag E2E registration.
+
+Only `AZ-P1-001` was executed in this campaign. `AZ-P1-002`, `AZ-P1-003`,
+`AZ-P1-004` and `AZ-SUP-ETAG` remain implemented but unexecuted. Similar behavior
+observed by other public cases or the separate Phase 1 acceptance does not
+turn these four named specs into passes.
 
 Standard/availability-set pools, Flex, VMs-pool, Windows, spot, zone balancing,
 managed AKS installation and Azure Disk/PVC have no dedicated registration
@@ -91,7 +113,7 @@ outside this Azure CA inventory.
 ## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
-dry-runs, filtered specs or passing setup hooks. All thirteen JSON reports declare
+dry-runs, filtered specs or passing setup hooks. All 20 JSON reports declare
 the suite and selected scenario passed; their JUnit reports have zero failures
 and errors. Each invocation removed its test namespace and returned to actual
 main/zero `1/0` before the next case.
@@ -101,6 +123,8 @@ Test source was frozen at
 remained `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, image
 `localhost/cluster-autoscaler-azure:candidate-48f997f`. This is private local
 campaign identity, not an official image publication or release decision.
+These are candidate-only checks. The separate Phase 1 upstream/candidate
+comparison was not repeated as part of this Phase 2 campaign.
 
 | ID | Recorded interval, UTC | Recorded duration | Observed result |
 | --- | --- | --- | --- |
@@ -116,7 +140,14 @@ campaign identity, not an official image publication or release decision.
 | `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 13m02s wall | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
 | `CA-010` | 11:37:59.182 to 11:52:00.949 (suite) | 14m07s wall | Six movable Pods initially occupied three workers, two per worker. The one-disruption drain kept at least five Ready at every observation and all six recovered on main instance `5`. Main instance `9`, zero instance `6`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
 | `CA-011` | 11:52:40.531 to 12:06:40.655 (suite) | 14m05s wall | Six run-owned synthetic kube-system Pods initially occupied three workers, two per worker. The PDB drain kept at least five Ready per observation and all six recovered on main instance `10`; system-pod protection was not disabled. Main instance `5`, zero instance `7`, their Nodes and captured NICs were physically deleted. Peak four VMs/eight vCPUs; actual `1/0` restored. Operator also confirmed zero remaining run-owned kube-system Deployments/PDBs. |
-| `CA-012` | 12:07:48.940 to 12:14:05.286 (suite) | 6m16.35s suite | Real expendable demand remained one Ready/one Pending without growth throughout five minutes. Each reservation requested 5,715,880,755 bytes against measured allocatable 8,165,543,936 and existing requests 52,428,800 bytes. Main instance `10` remained the sole worker, actual `1/0`, total two VMs/four vCPUs. Namespace cleanup passed. |
+| `CA-012` | 12:07:48.940 to 12:14:05.286 (suite) | 6m22s wall | Real expendable demand remained one Ready/one Pending without growth throughout five minutes. Each reservation requested 5,715,880,755 bytes against measured allocatable 8,165,543,936 and existing requests 52,428,800 bytes. Main instance `10` remained the sole worker, actual `1/0`, total two VMs/four vCPUs. Namespace cleanup passed. |
+| `CA-013` | 12:14:40.658 to 12:27:52.264 (suite) | 13m17s wall | Two non-expendable high-priority reservations became Ready on distinct actual main workers, each using the same measured 5,715,880,755-byte request. Actual and desired `1/0 -> 2/0 -> 1/0`, peak three VMs/six vCPUs. Namespace cleanup retained main instance `11`; this growth case does not separately assert individual NIC deletion. |
+| `CA-014` | 12:28:29.080 to 12:35:24.736 (suite) | 7m01s wall | Scheduler preemption replaced the captured expendable Pod with actual high-priority demand. The high-priority Pod remained Ready and the expendable replacement Pending throughout the no-growth window. Main instance `11` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. |
+| `CA-015` | 12:36:10.234 to 12:50:55.122 (suite) | 14m50s wall | Three running expendable reservations allowed physical shrink, ending with one Ready/two Pending. Main instance `12`, zero instance `8`, their Nodes and captured NICs were physically deleted; main instance `11` survived. Actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs; namespace cleanup passed. |
+| `CA-016` | 12:51:30.988 to 13:04:41.811 (suite) | 13m16s wall | Three non-expendable reservations kept captured main instances `11`/`13`, zero instance `9` and all three Pods Ready throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `11` surviving; no separate individual NIC deletion assertion after cleanup. |
+| `CA-017` | 13:05:29.458 to 13:18:47.205 (suite) | 13m23s wall | Bypassed-scheduler demand that could not fit the baseline caused actual `1/0 -> 2/0` growth while the Pods remained genuinely unprocessed/Pending. Peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, main instance `14` surviving; this growth case does not separately assert individual NIC deletion. |
+| `CA-018` | 13:19:38.071 to 13:25:02.101 (suite) | 5m30s wall | A measured fitting 4,082,771,968-byte request stayed unprocessed/Pending under the bypassed scheduler without growth throughout five minutes. Main instance `14` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. |
+| `CA-019` | 13:25:53.110 to 13:31:17.872 (suite) | 5m30s wall | Demand under a distinct unconfigured scheduler stayed unprocessed/Pending without growth throughout five minutes. Main instance `14` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. The invocation began before the 13:30 UTC launch cutoff and completed before the 14:00 UTC process deadline. |
 
 The sole operator preserves each run's non-secret runner log, JSON and JUnit
 under the run name below. Verified SHA-256 digests:
@@ -136,6 +167,55 @@ under the run name below. Verified SHA-256 digests:
 | `CA-010-886f31f` | `b249a66f999609c3622ec0d8ed000f1916dd2f244890deee73acf90a39c938a5` | `a5294fcddc60004d79405f5177b1e464682360f6fac23762668f23d6b1ed9c6d` | `88660148940ec229f78215754f0b1f2e3122ebefe613dbe93b9fcf575e814e90` |
 | `CA-011-886f31f` | `8f0b0de24bbb180d260210b76564b1270f233fdf7f1b6f3d6e16507ea48d7c35` | `977e658862607e2da7fca7606ff51a470524c4b99d11ff59b6bcd4fe561e8c64` | `390cba57f2d480eaa88783e9a708fa0686b16a9634b12a88d207dfdd35e112a9` |
 | `CA-012-886f31f` | `9c7b13266a00b7e91e55d7f334485e55bde83e1b0944318b939ce58a7c46357c` | `344291d512d9226f12ef5f0a82e849c12386c901f0e71b75d5df78e2b8bf53d5` | `6246f661d6278a7fd5d6400b4614ab71ea4f9feed44b1710d2e5dd6e312ffc58` |
+| `CA-013-886f31f` | `8899ba7a8d894485efaa046f90e0b6aeb02740d6d371c12bad871bfd6d7e9b89` | `9a818cdbbbaae0578a4dad76a3ce8dae49732f75eb16d34ebaec63152ab47540` | `3455e545a0dcef78d7948300f579b0e9805641f753924d86c88f2fe6daaaacd9` |
+| `CA-014-886f31f` | `5031529b9a68c6273c0264fec33f69712f8057ece0fca99e31955ce8ca109321` | `660101b66c07eb5e61f68123226eb97fba0957b7a21f801954e43db73af173c7` | `6702a3f7da6fa72a299517757f92a9e912eae6874f173394299fcea2fb5a2897` |
+| `CA-015-886f31f` | `be6396dca1d2d1c15c4aba6aab015c137e009b485fdc9cedad9090d649bfce85` | `29a0b2f2a89b9ee8d92c0d5c252c7f69b9dd407fc574b86d871bd889c61a9630` | `ccfc5949aca565349d31668172c9908246086823519cc7b5f637a7782a4a70b5` |
+| `CA-016-886f31f` | `852c47af9e1b379da2ab730471b5143f26ff20fb55fe3888e7e3043689cc8b8e` | `b503ca83ecffae5e65e2f702e40afc006fb4f12448cc68db7938c22417b62e82` | `a41766800fad2e5dbade8a0bfa4b4028e3c47b201859f7d10a8d563886845442` |
+| `CA-017-886f31f` | `d718ca1e05c73451095198b631195c23f2b556411bcdd7585143bbb6adbce7ef` | `73c82d791a9cad10591eb80cc6e794f0f9b0ed15607cb5df9d5f483ac4723f86` | `db61d1db593a825753685ca5687b8c400c689ffca49b6cf6b45970ca981bf344` |
+| `CA-018-886f31f` | `5de37587f7d0017f4ebdc53ac76b7da496da26df7dde9c53c1af591cef67b1bb` | `7a6b5b0fd84e23a46796226e163c27e719f89ba9ad4f055bb18a4c53471f8f95` | `53887046801f3772c982523041cda0e02cedc5e0dcac5fecd0e622d10b488bfd` |
+| `CA-019-886f31f` | `81ad26d6b60aaad82d7505bcd9539675ec5c683d296c87488f7c0e943310407b` | `29287487c4954d5db4750f1c85f8f99036aaf795a9b9ac37182f9b1042ff67b2` | `310498ca3d8f0e670aee9db0d281d0a9fd00968b9568fc419e608a7376691460` |
+
+## Campaign closeout
+
+The sole cloud operator stopped the autoscaler at 13:32:11 UTC and confirmed
+settled state at 13:32:39 and 13:33:33. Run-owned workloads, PriorityClasses and
+the authorization marker were removed. No DRA fixture had been installed.
+All kubeadm bootstrap tokens were revoked, with a final count of zero, and the
+control-plane join template was removed.
+
+Three campaign-created scoped role assignments were deleted and verified
+absent. The worker resource group was deleted by 13:36:43; the infrastructure
+resource group was deleted by 13:42:49. At 13:43:22 the operator verified both
+groups absent, zero run-tagged resources and zero remaining created role
+assignments. Nine campaign credential files and their directory were removed
+and verified absent at 13:43:42, before the 15:00 deadline. The existing external
+policy identity was left untouched. An independent coordinator check also
+confirmed both groups and the campaign credential directory absent.
+
+**Current campaign resource inventory is zero.** No infrastructure deletion was
+performed by the test suite. The operator cleared its deadline automation.
+The operator's estimate of approximately $2.25 covers identifiable usage only;
+traffic, operations and external policy telemetry may add charges. This is not
+a final invoice or a claim of precisely measured total spend.
+
+The operator retains the detailed private ledger and non-secret artifacts.
+Their sanitized references and verified SHA-256 digests are below. The two
+resource inventories were captured before deletion, not mistaken for empty
+post-cleanup inventories. The corrected ledger explicitly distinguishes its
+historical two-VM state from the final zero-resource state.
+
+| Evidence | SHA-256 |
+| --- | --- |
+| Worker-resource inventory before deletion | `a6755ac4edf5893e45f73189f43d6f2f12813921557ee57a7b4d003438453a66` |
+| Infrastructure-resource inventory before deletion | `89fc31a97d6acacdc97c4e6f8eb499ae2479b1d7201d7f852af32086eae32985` |
+| Corrected final operator ledger | `e4ae9902fd4d7d0f6cab202d57c4aa247bb7dbab788a9e16257f6222a4c5b8c7` |
+| Final 102-file non-secret evidence manifest | `d746fa430796cc287a5cd279b10db179edfdad561f78a4a5fbaf6a97ca22e022` |
+
+All 102 manifest entries were verified against retained artifacts. The 60
+runner/JSON/JUnit digests for the 20 passing invocations were unchanged by the
+ledger correction. Cloud-resource, identity, network and credential details
+are intentionally omitted here. Successful campaign cleanup does not establish
+the unexecuted DRA coverage or full Phase 2 live completion.
 
 ## Evidence gates
 
