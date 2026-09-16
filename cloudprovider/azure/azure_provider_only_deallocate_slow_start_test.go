@@ -659,6 +659,100 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 			)
 		})
 	})
+
+	t.Run("overlapping later acceptance counts failed charge until cleanup", func(t *testing.T) {
+		infra := integration.SetupInfrastructure(t)
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer synctestutils.TearDown(cancel)
+
+			fixture := newSlowStartFixture(t, ctx, infra)
+			require.False(t, fixture.group.enableFastDeleteOnFailedProvisioning)
+			driver, acceptedAt := startAcceptedSlowStart(t, ctx, fixture, 20)
+			addSlowStartLateDemand(t, ctx, infra, fixture)
+
+			fixture.transport.setCompletion("Failed")
+			<-fixture.transport.terminal
+			synctest.Wait()
+			instances, err := fixture.group.Nodes(ctx)
+			require.NoError(t, err)
+			require.Len(t, instances, 2)
+			require.Equal(t, cloudprovider.InstanceRunning, instances[1].Status.State)
+			require.Nil(t, instances[1].Status.ErrorInfo)
+
+			for iteration := 2; iteration <= 14; iteration++ {
+				advanceSlowStartLoop(t, driver, time.Minute, iteration)
+				require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+			}
+			require.Equal(t, 13*time.Minute+37*time.Second, time.Now().Sub(acceptedAt.at))
+			initialRequestAt, err := fixture.autoscaler.ClusterStateRegistry.NodeGroupScaleUpTime(fixture.group)
+			require.NoError(t, err)
+			require.Equal(t, acceptedAt.at, initialRequestAt)
+
+			addSlowStartAdditionalDemand(t, ctx, infra, fixture)
+			laterAccepted := advanceSlowStartLoop(t, driver, time.Minute, 15)
+			require.Equal(t, 14*time.Minute+37*time.Second, laterAccepted.at.Sub(acceptedAt.at))
+			require.Equal(t, []string{"start-accepted:1", "grow:3"}, fixture.world.history())
+			require.Len(t, fixture.world.vms(), 3)
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-1", "vm-identity-2"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 3, slowStartTargetSize(t, fixture.group))
+			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			require.False(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+			upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 2, upcoming[fixture.group.Id()])
+			renewedRequestAt, err := fixture.autoscaler.ClusterStateRegistry.NodeGroupScaleUpTime(fixture.group)
+			require.NoError(t, err)
+			require.Equal(t, laterAccepted.at, renewedRequestAt)
+
+			originalAllowancePassed := advanceSlowStartLoop(t, driver, time.Minute, 16)
+			require.True(t, originalAllowancePassed.at.After(acceptedAt.at.Add(slowStartMaxNodeProvisionTime)))
+			require.True(t, originalAllowancePassed.at.Before(renewedRequestAt.Add(slowStartMaxNodeProvisionTime)))
+			require.Equal(t, []string{"start-accepted:1", "grow:3"}, fixture.world.history())
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-1", "vm-identity-2"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 3, slowStartTargetSize(t, fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			require.False(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 2, upcoming[fixture.group.Id()])
+
+			advanceSlowStartLoop(t, driver, time.Minute, 17)
+			cleanupAt := advanceSlowStartLoop(t, driver, time.Minute, 18)
+			require.Equal(t, []string{"start-accepted:1", "grow:3", "physical-delete:1"}, fixture.world.history())
+			require.Equal(t, 17*time.Minute+37*time.Second, cleanupAt.at.Sub(acceptedAt.at))
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-2"}, slowStartWorldVMIDs(fixture.world))
+			require.Len(t, fixture.world.vms(), 2)
+			require.Equal(t, 3, slowStartTargetSize(t, fixture.group), "size cache updates on the next ordinary refresh")
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+
+			correctiveAccepted := advanceSlowStartLoop(t, driver, time.Minute, 19)
+			require.Equal(t, []string{"start-accepted:1", "grow:3", "physical-delete:1", "grow:3"}, fixture.world.history())
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-2", "vm-identity-3"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 3, slowStartTargetSize(t, fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			require.False(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 2, upcoming[fixture.group.Id()])
+
+			trace, accepted := fixture.transport.snapshot()
+			require.True(t, accepted)
+			slowStartValidateTrace(t, trace, acceptedAt.at)
+			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
+			t.Logf(
+				"overlap timeline: later request accepted at %s, original allowance passed with failed VM counted at %s, cleanup removed it at %s, corrective growth followed at %s",
+				laterAccepted.at.Sub(acceptedAt.at),
+				originalAllowancePassed.at.Sub(acceptedAt.at),
+				cleanupAt.at.Sub(acceptedAt.at),
+				correctiveAccepted.at.Sub(acceptedAt.at),
+			)
+		})
+	})
 }
 
 func TestProviderOnlyDeallocateAcceptedStartObservationTimeout(t *testing.T) {
@@ -762,6 +856,47 @@ func slowStartRequireDemandFitsReturningWorker(
 		candidate.Spec.NodeName = ""
 		require.NoError(t, fixture.autoscaler.ClusterSnapshot.SchedulePod(candidate, returning.Node().Name))
 	}
+}
+
+func addSlowStartAdditionalDemand(
+	t *testing.T,
+	ctx context.Context,
+	infra *integration.TestInfrastructure,
+	fixture *slowStartFixture,
+) {
+	t.Helper()
+	additional := catest.BuildTestPod("overlapping-additional-demand", 2000, 100, catest.MarkUnschedulable())
+	additional.Spec.NodeSelector = map[string]string{"pool": "workers"}
+	_, err := infra.Fakes.KubeClient.CoreV1().Pods(additional.Namespace).Create(ctx, additional, metav1.CreateOptions{})
+	require.NoError(t, err)
+	synctest.Wait()
+
+	template, err := fixture.group.TemplateNodeInfo(ctx)
+	require.NoError(t, err)
+	first := template.DeepCopy()
+	first.Node().Name = "first-expected-worker"
+	second := template.DeepCopy()
+	second.Node().Name = "required-second-worker"
+
+	fixture.autoscaler.ClusterSnapshot.Fork()
+	defer fixture.autoscaler.ClusterSnapshot.Revert()
+	require.NoError(t, fixture.autoscaler.ClusterSnapshot.AddNodeInfo(first))
+	for _, name := range fixture.demandPods {
+		pod, err := infra.Fakes.KubeClient.CoreV1().Pods("default").Get(ctx, name, metav1.GetOptions{})
+		require.NoError(t, err)
+		candidate := pod.DeepCopy()
+		candidate.Name += "-overlap-fit"
+		candidate.Spec.NodeName = ""
+		require.NoError(t, fixture.autoscaler.ClusterSnapshot.SchedulePod(candidate, first.Node().Name))
+	}
+	candidate := additional.DeepCopy()
+	candidate.Name += "-overlap-fit"
+	require.Error(t, fixture.autoscaler.ClusterSnapshot.SchedulePod(candidate, first.Node().Name))
+	require.NoError(t, fixture.autoscaler.ClusterSnapshot.AddNodeInfo(second))
+	require.NoError(t, fixture.autoscaler.ClusterSnapshot.SchedulePod(candidate, second.Node().Name))
+
+	fixture.demandPods = append(fixture.demandPods, additional.Name)
+	slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
 }
 
 func slowStartValidateTrace(t *testing.T, trace []slowStartTrace, start time.Time) {
