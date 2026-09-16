@@ -65,11 +65,25 @@ func (transport *recordingTransport) Do(request *http.Request) (*http.Response, 
 }
 
 type powerOperationTransport struct {
-	requests []*http.Request
+	requests    []*http.Request
+	rejectStart bool
 }
 
 func (transport *powerOperationTransport) Do(request *http.Request) (*http.Response, error) {
 	transport.requests = append(transport.requests, request)
+	if transport.rejectStart && strings.HasSuffix(request.URL.Path, "/start") {
+		return &http.Response{
+			StatusCode: http.StatusConflict,
+			Header: http.Header{
+				"Content-Type":    []string{"application/json"},
+				"X-Ms-Request-Id": []string{"definite-rejection"},
+			},
+			Body: io.NopCloser(strings.NewReader(
+				`{"error":{"code":"OperationNotAllowed","message":"Start is not allowed for this VMSS instance."}}`,
+			)),
+			Request: request,
+		}, nil
+	}
 	response := &http.Response{
 		StatusCode: http.StatusOK,
 		Header:     http.Header{"Content-Type": []string{"application/json"}},
@@ -82,6 +96,28 @@ func (transport *powerOperationTransport) Do(request *http.Request) (*http.Respo
 		response.Body = io.NopCloser(strings.NewReader(`{}`))
 	}
 	return response, nil
+}
+
+func newTestVMSSPowerClient(t *testing.T, transport azcorepolicy.Transporter) vmssPowerClient {
+	t.Helper()
+	client, err := newVMSSPowerClient(
+		"subscription",
+		staticTokenCredential{},
+		&azclient.ARMClientConfig{Cloud: "AzurePublicCloud"},
+		cloud.Configuration{
+			Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
+				cloud.ResourceManager: {
+					Endpoint: "https://management.test/",
+					Audience: "https://management.test/",
+				},
+			},
+		},
+		func(options *armpolicy.ClientOptions) {
+			options.Transport = transport
+		},
+	)
+	require.NoError(t, err)
+	return client
 }
 
 func TestVMSSPowerClientBodylessRequests(t *testing.T) {
@@ -119,23 +155,7 @@ func TestVMSSPowerClientBodylessRequests(t *testing.T) {
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
 			transport := &powerOperationTransport{}
-			client, err := newVMSSPowerClient(
-				"subscription",
-				staticTokenCredential{},
-				&azclient.ARMClientConfig{Cloud: "AzurePublicCloud"},
-				cloud.Configuration{
-					Services: map[cloud.ServiceName]cloud.ServiceConfiguration{
-						cloud.ResourceManager: {
-							Endpoint: "https://management.test/",
-							Audience: "https://management.test/",
-						},
-					},
-				},
-				func(options *armpolicy.ClientOptions) {
-					options.Transport = transport
-				},
-			)
-			require.NoError(t, err)
+			client := newTestVMSSPowerClient(t, transport)
 
 			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 			defer cancel()
@@ -153,6 +173,34 @@ func TestVMSSPowerClientBodylessRequests(t *testing.T) {
 			assert.Equal(t, "/operations/1", pollRequest.URL.Path)
 		})
 	}
+}
+
+func TestVMSSPowerClientRejectedStart(t *testing.T) {
+	transport := &powerOperationTransport{rejectStart: true}
+	client := newTestVMSSPowerClient(t, transport)
+
+	poller, err := client.BeginStart(context.Background(), "resource-group", "scale-set", "1", nil)
+	require.Error(t, err)
+	require.Nil(t, poller)
+
+	var responseError *azcore.ResponseError
+	require.ErrorAs(t, err, &responseError)
+	assert.Equal(t, http.StatusConflict, responseError.StatusCode)
+	assert.Equal(t, "OperationNotAllowed", responseError.ErrorCode)
+	assert.Equal(t, "definite-rejection", responseError.RawResponse.Header.Get("X-Ms-Request-Id"))
+
+	require.Len(t, transport.requests, 1)
+	request := transport.requests[0]
+	assert.Equal(t, http.MethodPost, request.Method)
+	assert.Equal(
+		t,
+		"/subscriptions/subscription/resourceGroups/resource-group/providers/Microsoft.Compute/"+
+			"virtualMachineScaleSets/scale-set/virtualMachines/1/start",
+		request.URL.Path,
+	)
+	assert.NotEmpty(t, request.URL.Query().Get("api-version"))
+	assert.NotEmpty(t, request.Header.Get("Authorization"))
+	assert.Nil(t, request.Body)
 }
 
 func TestNewVMSSPowerClientControlsAzureStackAPIVersion(t *testing.T) {

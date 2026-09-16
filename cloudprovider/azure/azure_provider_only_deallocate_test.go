@@ -277,6 +277,9 @@ func parkingAutoscaler(t *testing.T, ctx context.Context, infra *integration.Tes
 	t.Helper()
 	opts := integration.NewTestConfig().ResolveOptions()
 	opts.CloudProviderName = "azure"
+	opts.InitialNodeGroupBackoffDuration = 5 * time.Minute
+	opts.MaxNodeGroupBackoffDuration = 30 * time.Minute
+	opts.NodeGroupBackoffResetTimeout = 3 * time.Hour
 	opts.CordonNodeBeforeTerminate = true
 	opts.NodeGroupDefaults.ScaleDownUnneededTime = time.Second
 	opts.NodeGroupDefaults.MaxNodeProvisionTime = 10 * time.Minute
@@ -507,6 +510,113 @@ func TestProviderOnlyDeallocateZeroActiveAndFailures(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestProviderOnlyDeallocateRejectedStartRecovery(t *testing.T) {
+	infra := integration.SetupInfrastructure(t)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer synctestutils.TearDown(cancel)
+
+		world := &parkingWorld{states: []string{vmPowerStateRunning, vmPowerStateDeallocated}}
+		client := infra.Fakes.KubeClient
+		provider, group := newParkingProvider(t, world, client, 1, 3, true)
+		_, err := client.CoreV1().Nodes().Create(ctx, parkingNode(0, "active", true), metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		busy := catest.BuildScheduledTestPod("busy", 3500, 100, "node-0")
+		_, err = client.CoreV1().Pods(busy.Namespace).Create(ctx, busy, metav1.CreateOptions{})
+		require.NoError(t, err)
+		demand := catest.BuildTestPod("demand", 2000, 100, catest.MarkUnschedulable())
+		demand.Spec.NodeSelector = map[string]string{"pool": "workers"}
+		_, err = client.CoreV1().Pods(demand.Namespace).Create(ctx, demand, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		transport := &powerOperationTransport{rejectStart: true}
+		provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, transport)
+		autoscaler := parkingAutoscaler(t, ctx, infra, provider)
+		events := record.NewFakeRecorder(50)
+		autoscaler.LogRecorder, err = statusutils.NewStatusMapRecorder(
+			client,
+			"kube-system",
+			events,
+			true,
+			"test-ca-status",
+		)
+		require.NoError(t, err)
+
+		require.NoError(
+			t,
+			synctestutils.RunOnceAfter(t, autoscaler, time.Second),
+			"stock RunOnce records a definite Start rejection and keeps running",
+		)
+		var eventMessages []string
+		for len(events.Events) > 0 {
+			eventMessages = append(eventMessages, <-events.Events)
+		}
+		messages := strings.Join(eventMessages, "\n")
+		require.Contains(t, messages, "FailedToScaleUpGroup")
+		require.Contains(t, messages, "OperationNotAllowed")
+		require.Contains(t, messages, "Start is not allowed for this VMSS instance")
+
+		require.Len(t, transport.requests, 1)
+		request := transport.requests[0]
+		require.Equal(t, http.MethodPost, request.Method)
+		require.Equal(
+			t,
+			"/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/"+
+				"virtualMachineScaleSets/pool/virtualMachines/1/start",
+			request.URL.Path,
+		)
+		require.Nil(t, request.Body)
+
+		checkParkingSize(t, group, 1)
+		vms, parked, err := group.parkingInventory()
+		require.NoError(t, err)
+		require.Len(t, vms, 2)
+		require.False(t, parked["0"])
+		require.True(t, parked["1"])
+		require.Empty(t, group.powerOverrides, "a definitely rejected Start must not be counted as accepted")
+		require.Equal(t, int64(2), *world.vmss().SKU.Capacity)
+		require.Empty(t, world.history(), "a definite rejection must not trigger same-attempt fresh growth")
+
+		instances, err := group.Nodes(ctx)
+		require.NoError(t, err)
+		require.Len(t, instances, 1)
+		require.Equal(t, cloudprovider.InstanceRunning, instances[0].Status.State)
+		upcoming, _ := autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+		require.Zero(t, upcoming["pool"])
+		currentSize, targetSize := autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
+		require.Equal(t, 1, currentSize)
+		require.Equal(t, 1, targetSize)
+
+		pending, err := client.CoreV1().Pods(demand.Namespace).Get(ctx, demand.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Empty(t, pending.Spec.NodeName)
+		backoffStatus := autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, group, time.Now())
+		require.True(t, backoffStatus.IsBackedOff)
+		require.Contains(t, backoffStatus.ErrorInfo.ErrorMessage, "OperationNotAllowed")
+
+		require.NoError(t, provider.azureManager.forceRefresh())
+		checkParkingSize(t, group, 1)
+		require.Empty(t, group.powerOverrides)
+
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute)
+		require.Len(t, transport.requests, 1, "the production five-minute group backoff must suppress an immediate retry")
+		backoffStatus = autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, group, time.Now())
+		require.True(t, backoffStatus.IsBackedOff)
+
+		synctestutils.MustRunOnceAfter(t, autoscaler, 5*time.Minute)
+		require.Len(t, transport.requests, 2, "pending demand must retry after the initial group backoff")
+		checkParkingSize(t, group, 1)
+		require.Empty(t, group.powerOverrides)
+		require.Empty(t, world.history(), "the incumbent retry remains fail-first without fresh fallback")
+		pending, err = client.CoreV1().Pods(demand.Namespace).Get(ctx, demand.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Empty(t, pending.Spec.NodeName)
+		backoffStatus = autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, group, time.Now())
+		require.True(t, backoffStatus.IsBackedOff, "the second rejection must begin the next backoff")
+	})
 }
 
 func TestProviderOnlyDeallocateNodeUIDAndDeleteControl(t *testing.T) {
