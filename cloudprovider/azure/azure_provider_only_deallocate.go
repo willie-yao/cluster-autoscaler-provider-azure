@@ -531,7 +531,7 @@ func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
 	if m.kubeClient == nil {
 		return nil
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), asyncContextTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), vmssContextTimeout)
 	defer cancel()
 	nodes, err := m.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -566,8 +566,13 @@ func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
 		byGroup[group] = append(byGroup[group], receipt)
 	}
 	for group, receipts := range byGroup {
-		group.parkMutex.Lock()
-		errs = append(errs, group.reconcileProviderOnlyDeleteReceipts(ctx, receipts)...)
+		if !group.parkMutex.TryLock() {
+			klog.V(3).Infof("Deferring provider-only deletion recovery for busy VMSS %s", group.Name)
+			continue
+		}
+		if err := group.reconcileProviderOnlyDeleteReceipts(ctx, receipts); err != nil {
+			errs = append(errs, err)
+		}
 		group.parkMutex.Unlock()
 	}
 	return errors.Join(errs...)
@@ -576,23 +581,27 @@ func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
 func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 	ctx context.Context,
 	receipts []providerOnlyDeleteReceipt,
-) []error {
+) error {
 	vms, _, err := s.parkingInventory()
 	if err != nil {
-		return []error{fmt.Errorf("load VM inventory for provider-only deletion recovery in %s: %w", s.Name, err)}
+		return fmt.Errorf("load VM inventory for provider-only deletion recovery in %s: %w", s.Name, err)
 	}
 	byProviderID := make(map[string]*armcompute.VirtualMachineScaleSetVM, len(vms))
 	for _, vm := range vms {
 		byProviderID[normalizeProviderID(azurePrefix+*vm.ID)] = vm
 	}
-	var errs []error
 	for _, receipt := range receipts {
 		current, err := s.manager.kubeClient.CoreV1().Nodes().Get(ctx, receipt.NodeName, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
 			continue
 		}
 		if err != nil {
-			errs = append(errs, fmt.Errorf("get Node %s for provider-only deletion recovery: %w", receipt.NodeName, err))
+			klog.Errorf(
+				"Provider-only deletion retry for Node %s in VMSS %s failed during GET: %v",
+				receipt.NodeName,
+				s.Name,
+				err,
+			)
 			continue
 		}
 		if err := validateProviderOnlyDeleteReceiptNode(current, receipt); err != nil {
@@ -617,10 +626,15 @@ func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 			continue
 		}
 		if err := s.deleteProviderOnlyReceiptNode(ctx, receipt); err != nil {
-			errs = append(errs, err)
+			klog.Errorf(
+				"Provider-only deletion retry for Node %s in VMSS %s failed during DELETE: %v",
+				receipt.NodeName,
+				s.Name,
+				err,
+			)
 		}
 	}
-	return errs
+	return nil
 }
 
 func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {

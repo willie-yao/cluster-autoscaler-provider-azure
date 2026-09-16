@@ -357,6 +357,18 @@ func parkingNode(id int, uid string, ready bool) *apiv1.Node {
 	return node
 }
 
+func addParkingReceipt(t *testing.T, node *apiv1.Node, vm *armcompute.VirtualMachineScaleSetVM) {
+	t.Helper()
+	receipt, err := newProviderOnlyDeleteReceipt(node, vm)
+	require.NoError(t, err)
+	value, err := providerOnlyDeleteReceiptValue(receipt)
+	require.NoError(t, err)
+	if node.Annotations == nil {
+		node.Annotations = make(map[string]string)
+	}
+	node.Annotations[providerOnlyDeleteReceiptAnnotation] = value
+}
+
 func parkingAutoscaler(t *testing.T, ctx context.Context, infra *integration.TestInfrastructure, provider *AzureCloudProvider) *core.StaticAutoscaler {
 	t.Helper()
 	opts := integration.NewTestConfig().ResolveOptions()
@@ -604,6 +616,102 @@ func TestProviderOnlyDeallocateInvalidReceiptDoesNotBlockCore(t *testing.T) {
 		autoscaler := parkingAutoscaler(t, ctx, infra, provider)
 		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
 		require.Equal(t, []string{"start:0"}, world.history())
+		checkParkingSize(t, group, 1)
+	})
+}
+
+func TestProviderOnlyDeallocateBusyGroupDefersReceiptRecovery(t *testing.T) {
+	ctx := t.Context()
+	client := fake.NewClientset()
+	world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+	node := parkingNode(0, "old", true)
+	addParkingReceipt(t, node, world.vms()[0])
+	_, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	require.NoError(t, err)
+	deleteCalls := 0
+	client.PrependReactor("delete", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		a := action.(clienttesting.DeleteAction)
+		deleteCalls++
+		require.Equal(t, node.UID, *a.GetDeleteOptions().Preconditions.UID)
+		return false, nil, nil
+	})
+	provider, group := newParkingProvider(t, world, client, 0, 1, true)
+
+	group.parkMutex.Lock()
+	refreshDone := make(chan error, 1)
+	go func() {
+		refreshDone <- provider.Refresh(ctx)
+	}()
+	select {
+	case err := <-refreshDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		group.parkMutex.Unlock()
+		t.Fatal("Refresh blocked behind a busy provider-only power operation")
+	}
+	require.Zero(t, deleteCalls)
+	_, err = client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	group.parkMutex.Unlock()
+
+	require.NoError(t, provider.Refresh(ctx))
+	require.Equal(t, 1, deleteCalls)
+	_, err = client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+	require.Empty(t, world.history())
+}
+
+func TestProviderOnlyDeallocateReceiptDeleteFailureDoesNotBlockCore(t *testing.T) {
+	infra := integration.SetupInfrastructure(t)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer synctestutils.TearDown(cancel)
+		client := infra.Fakes.KubeClient
+		world := &parkingWorld{states: []string{
+			vmPowerStateDeallocated,
+			vmPowerStateDeallocated,
+		}}
+		node := parkingNode(1, "old", false)
+		addParkingReceipt(t, node, world.vms()[1])
+		_, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+		require.NoError(t, err)
+		rejectDelete := true
+		deleteCalls := 0
+		client.PrependReactor("delete", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+			a := action.(clienttesting.DeleteAction)
+			deleteCalls++
+			require.Equal(t, node.UID, *a.GetDeleteOptions().Preconditions.UID)
+			world.record(fmt.Sprintf("delete:%s:attempt-%d", node.Name, deleteCalls))
+			if rejectDelete {
+				return true, nil, apierrors.NewForbidden(
+					schema.GroupResource{Resource: "nodes"},
+					node.Name,
+					errors.New("injected receipt DELETE rejection"),
+				)
+			}
+			return false, nil, nil
+		})
+		provider, group := newParkingProvider(t, world, client, 0, 2, true)
+		demand := catest.BuildTestPod("demand", 2000, 100, catest.MarkUnschedulable())
+		demand.Spec.NodeSelector = map[string]string{"pool": "workers"}
+		_, err = client.CoreV1().Pods(demand.Namespace).Create(ctx, demand, metav1.CreateOptions{})
+		require.NoError(t, err)
+
+		autoscaler := parkingAutoscaler(t, ctx, infra, provider)
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		require.Equal(t, []string{"delete:node-1:attempt-1", "start:0"}, world.history())
+		require.Equal(t, 1, deleteCalls)
+		checkParkingSize(t, group, 1)
+		current, err := client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.Contains(t, current.Annotations, providerOnlyDeleteReceiptAnnotation)
+
+		rejectDelete = false
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		require.Equal(t, 2, deleteCalls)
+		_, err = client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		require.True(t, apierrors.IsNotFound(err))
+		require.Equal(t, []string{"delete:node-1:attempt-1", "start:0", "delete:node-1:attempt-2"}, world.history())
 		checkParkingSize(t, group, 1)
 	})
 }
