@@ -21,12 +21,14 @@ package scaleup_test
 import (
 	"context"
 	"fmt"
+	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/utils/ptr"
@@ -35,18 +37,21 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure/test/pkg/environment"
 )
 
-const draDriver = "gpu.example.com"
+const (
+	draDriver = "gpu.example.com"
+	draImage  = "registry.k8s.io/dra-example-driver/dra-example-driver@sha256:728fbb69b99e335cfef2d1b9a3d695d2f502c58dd04f7f81143089a72e4044e3"
+)
 
 var _ = Describe("Public synthetic DRA scenarios", Serial, Label("public", "dra", "uniform"), func() {
 	BeforeEach(func(ctx SpecContext) {
 		checkDRAFixture(ctx)
 	})
 
-	It("CA-020 grows and allocates twelve synthetic devices on three workers", Label("CA-020"), func(ctx SpecContext) {
-		workload := draDeployment(ctx, "dra-pressure", "", 12, 1, false)
+	It("CA-020 grows main from one to two workers and allocates eight synthetic devices", Label("CA-020"), func(ctx SpecContext) {
+		workload := draDeployment(ctx, "dra-pressure", env.Config.MainLabel, 8, 1, false)
 		Expect(env.K8s.Create(ctx, workload)).To(Succeed())
-		waitWorkers(ctx, 3)
-		waitDRAWorkload(ctx, workload, 12, 1)
+		waitStable(ctx, 2, 0)
+		waitDRAWorkload(ctx, workload, 8, 1)
 	}, NodeTimeout(40*time.Minute))
 
 	It("CA-021 rejects a five-device claim when each worker offers four", Label("CA-021"), func(ctx SpecContext) {
@@ -110,7 +115,7 @@ func checkDRAFixture(ctx context.Context) {
 			continue
 		}
 		foundPlugin = true
-		Expect(container.Image).To(Equal("registry.k8s.io/dra-example-driver/dra-example-driver:v0.2.1"))
+		Expect(container.Image).To(Equal(draImage))
 		Expect(container.Env).To(ContainElements(
 			corev1.EnvVar{Name: "NUM_DEVICES", Value: "4"},
 			corev1.EnvVar{Name: "DRIVER_NAME", Value: draDriver},
@@ -118,6 +123,61 @@ func checkDRAFixture(ctx context.Context) {
 	}
 	Expect(foundPlugin).To(BeTrue())
 	Eventually(ctx, func() error { _, err := draDevices(ctx); return err }, 3*time.Minute, pollInterval).Should(Succeed())
+}
+
+func TestDRAFixtureImage(t *testing.T) {
+	RegisterFailHandler(Fail)
+	const approved = "registry.k8s.io/dra-example-driver/dra-example-driver@sha256:728fbb69b99e335cfef2d1b9a3d695d2f502c58dd04f7f81143089a72e4044e3"
+	for _, tt := range []struct {
+		name, image string
+		valid       bool
+	}{
+		{name: "approved immutable image", image: approved, valid: true},
+		{name: "mutable release tag", image: "registry.k8s.io/dra-example-driver/dra-example-driver:v0.2.1"},
+		{name: "wrong digest", image: "registry.k8s.io/dra-example-driver/dra-example-driver@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"},
+		{name: "arbitrary image", image: "example.invalid/driver:latest"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			observationEnvironment(t)
+			ctx := context.Background()
+			class := resourceObject("DeviceClass", "gpu", "")
+			class.SetLabels(map[string]string{environment.RunLabel: env.Config.RunID})
+			class.Object["spec"] = map[string]interface{}{"selectors": []interface{}{
+				map[string]interface{}{"cel": map[string]interface{}{"expression": "device.driver == 'gpu.example.com'"}},
+			}}
+			slice := resourceObject("ResourceSlice", "worker-devices", "")
+			slice.Object["spec"] = map[string]interface{}{
+				"driver": draDriver, "nodeName": "worker", "pool": map[string]interface{}{"name": "worker"},
+				"devices": []interface{}{
+					map[string]interface{}{"name": "device-0"}, map[string]interface{}{"name": "device-1"},
+					map[string]interface{}{"name": "device-2"}, map[string]interface{}{"name": "device-3"},
+				},
+			}
+			daemon := &appsv1.DaemonSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "dra-example-driver-kubeletplugin", Namespace: "kube-system",
+					Labels: map[string]string{environment.RunLabel: env.Config.RunID}},
+				Spec: appsv1.DaemonSetSpec{Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+					Name: "plugin", Image: tt.image, Env: []corev1.EnvVar{{Name: "NUM_DEVICES", Value: "4"}, {Name: "DRIVER_NAME", Value: draDriver}},
+				}}}}},
+				Status: appsv1.DaemonSetStatus{DesiredNumberScheduled: 1, NumberReady: 1},
+			}
+			marker := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: environment.MarkerName, Namespace: "kube-system"},
+				Data: map[string]string{"allow-dra-fixture": "CA-020,CA-021,CA-022"}}
+			for _, object := range []client.Object{class, slice, daemon, marker} {
+				if err := env.K8s.Create(ctx, object); err != nil {
+					t.Fatal(err)
+				}
+			}
+			failures := InterceptGomegaFailures(func() { checkDRAFixture(ctx) })
+			wantFailures := 1
+			if tt.valid {
+				wantFailures = 0
+			}
+			if len(failures) != wantFailures {
+				t.Fatalf("valid=%t, failures=%v", tt.valid, failures)
+			}
+		})
+	}
 }
 
 func draDevices(ctx context.Context) (map[string]string, error) {
@@ -130,7 +190,7 @@ func draDevices(ctx context.Context) (map[string]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	snapshot, err := env.Read(ctx)
+	snapshot, err := readSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +234,7 @@ func draDeployment(ctx context.Context, name, pool string, replicas int32, devic
 }
 
 func waitDRAWorkload(ctx context.Context, workload *appsv1.Deployment, replicas, perPod int) {
-	waitWorkload(ctx, workload.Name, "", replicas, 0)
+	waitWorkload(ctx, workload.Name, env.Config.MainPool, replicas, 0)
 	Eventually(ctx, func() error {
 		devices, err := draDevices(ctx)
 		if err != nil {

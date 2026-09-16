@@ -97,7 +97,7 @@ func waitUnprocessed(ctx context.Context, name string, replicas int) {
 func observeUnprocessedBaseline(ctx context.Context, name string, replicas int) {
 	Consistently(ctx, func(g Gomega) {
 		unprocessed(ctx, name, replicas)
-		snapshot, err := env.Read(ctx)
+		snapshot, err := readActiveSnapshot(ctx)
 		g.Expect(err).NotTo(HaveOccurred())
 		g.Expect(snapshot.Stable(env.Config, 1, 0)).To(Succeed())
 	}, 5*time.Minute, pollInterval).Should(Succeed())

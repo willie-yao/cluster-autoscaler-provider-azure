@@ -17,6 +17,7 @@ limitations under the License.
 package environment
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -25,6 +26,9 @@ import (
 	resourcehelper "k8s.io/kubectl/pkg/util/resource"
 	"sigs.k8s.io/yaml"
 )
+
+// ErrBounds identifies positively observed resource-envelope or per-pool breaches.
+var ErrBounds = errors.New("resource bounds violated")
 
 // Instance records only identifiers needed to prove physical deletion.
 type Instance struct {
@@ -73,10 +77,42 @@ func WorkerNodes(nodes []corev1.Node, c Config) []corev1.Node {
 	return append(PoolNodes(nodes, c.PoolID(c.MainPool)), PoolNodes(nodes, c.PoolID(c.ZeroPool))...)
 }
 
+// CheckBounds checks observed pools before any convergence checks.
+func (s Snapshot) CheckBounds(c Config) error {
+	if s.VMs > MaxVMs || s.VCPUs > MaxVCPUs {
+		return fmt.Errorf("%w: %d VMs, %d vCPUs", ErrBounds, s.VMs, s.VCPUs)
+	}
+	for _, name := range []string{c.MainPool, c.ZeroPool} {
+		pool, ok := s.Pools[name]
+		if !ok {
+			continue
+		}
+		minimum, maximum := 1, 2
+		if name == c.ZeroPool {
+			minimum, maximum = 0, 1
+		}
+		if err := checkCapacity(name, pool.Capacity, minimum, maximum); err != nil {
+			return err
+		}
+		if len(pool.Instances) < minimum || len(pool.Instances) > maximum {
+			return fmt.Errorf("%w: pool %s actual=%d, bounds %d..%d",
+				ErrBounds, name, len(pool.Instances), minimum, maximum)
+		}
+	}
+	return nil
+}
+
+func checkCapacity(name string, capacity, minimum, maximum int) error {
+	if capacity < minimum || capacity > maximum {
+		return fmt.Errorf("%w: pool %s desired=%d, bounds %d..%d", ErrBounds, name, capacity, minimum, maximum)
+	}
+	return nil
+}
+
 // Stable requires a one-to-one mapping between Azure instances and Ready Nodes.
 func (s Snapshot) Stable(c Config, main, zero int) error {
-	if s.VMs > MaxVMs || s.VCPUs > MaxVCPUs {
-		return fmt.Errorf("resource envelope exceeded: %d VMs, %d vCPUs", s.VMs, s.VCPUs)
+	if err := s.CheckBounds(c); err != nil {
+		return err
 	}
 	for name, expected := range map[string]int{c.MainPool: main, c.ZeroPool: zero} {
 		pool, ok := s.Pools[name]
@@ -84,10 +120,8 @@ func (s Snapshot) Stable(c Config, main, zero int) error {
 		if name == c.ZeroPool {
 			minimum, maximum = 0, 1
 		}
-		if expected < minimum || expected > maximum || pool.Capacity < minimum || pool.Capacity > maximum ||
-			len(pool.Instances) < minimum || len(pool.Instances) > maximum {
-			return fmt.Errorf("pool %s: expected=%d desired=%d actual=%d violates bounds %d..%d",
-				name, expected, pool.Capacity, len(pool.Instances), minimum, maximum)
+		if expected < minimum || expected > maximum {
+			return fmt.Errorf("pool %s: expected=%d violates bounds %d..%d", name, expected, minimum, maximum)
 		}
 		if !ok || pool.Capacity != expected || len(pool.Instances) != expected {
 			return fmt.Errorf("pool %s: desired=%d actual=%d, want %d", name, pool.Capacity, len(pool.Instances), expected)

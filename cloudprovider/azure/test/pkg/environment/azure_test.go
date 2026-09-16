@@ -17,6 +17,7 @@ limitations under the License.
 package environment
 
 import (
+	"errors"
 	"testing"
 
 	"k8s.io/utils/ptr"
@@ -59,15 +60,17 @@ func TestCheckPeakEnvelope(t *testing.T) {
 		name           string
 		main, zero, cp int
 		valid          bool
+		bounds         bool
 	}{
 		{name: "four two-core VMs at maximum", main: 2, zero: 2, cp: 2, valid: true},
-		{name: "idle zero pool hides sixteen-core SKU", main: 2, zero: 16, cp: 2},
-		{name: "main peak exceeds current one-worker count", main: 4, zero: 2, cp: 2},
-		{name: "control plane included", main: 2, zero: 2, cp: 4},
+		{name: "idle zero pool hides sixteen-core SKU", main: 2, zero: 16, cp: 2, bounds: true},
+		{name: "main peak exceeds current one-worker count", main: 4, zero: 2, cp: 2, bounds: true},
+		{name: "control plane included", main: 2, zero: 2, cp: 4, bounds: true},
 		{name: "unknown zero pool cores", main: 2, zero: 0, cp: 2},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			if err := checkPeakEnvelope(tt.main, tt.zero, tt.cp); (err == nil) != tt.valid {
+			err := checkPeakEnvelope(tt.main, tt.zero, tt.cp)
+			if (err == nil) != tt.valid || errors.Is(err, ErrBounds) != tt.bounds {
 				t.Fatalf("peak error=%v, valid=%v", err, tt.valid)
 			}
 		})

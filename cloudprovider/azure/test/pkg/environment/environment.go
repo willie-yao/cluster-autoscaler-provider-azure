@@ -253,6 +253,9 @@ func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return result, err
 	}
+	if err := result.CheckBounds(e.Config); err != nil {
+		return result, err
+	}
 	var nodes corev1.NodeList
 	if err := e.K8s.List(ctx, &nodes); err != nil {
 		return result, err

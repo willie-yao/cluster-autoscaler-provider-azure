@@ -68,8 +68,9 @@ e2etests: ## Run e2e tests (CAS must already be deployed)
 .PHONY: test-local
 test-local: ## Validate harness logic and E2E registration without cloud credentials
 	go test -mod=readonly -race ./pkg/...
+	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage)$$'
 	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
-	go test -mod=readonly -tags=e2e ./suites/... -count=1 -args -ginkgo.dry-run
+	go test -mod=readonly -tags=e2e ./suites/... -run '^TestScaleUp$$' -count=1 -args -ginkgo.dry-run
 
 ##@ Utilities
 

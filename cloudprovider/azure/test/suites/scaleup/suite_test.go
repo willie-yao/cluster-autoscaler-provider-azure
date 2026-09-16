@@ -20,6 +20,7 @@ package scaleup_test
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"testing"
@@ -108,10 +109,7 @@ var _ = BeforeEach(func(ctx SpecContext) {
 var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 	It("AZ-P1-001 discovers only owned groups and remains idle for five minutes", Label("AZ-P1-001", "idle"), func(ctx SpecContext) {
 		Consistently(ctx, func() error {
-			if err := env.Controller(ctx); err != nil {
-				return err
-			}
-			snapshot, err := env.Read(ctx)
+			snapshot, err := readActiveSnapshot(ctx)
 			if err != nil {
 				return err
 			}
@@ -159,7 +157,7 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 			g.Expect(pdb.Status.DisruptionsAllowed).To(BeZero())
 		}, time.Minute, pollInterval).Should(Succeed())
 		Consistently(ctx, func(g Gomega) {
-			snapshot, err := env.Read(ctx)
+			snapshot, err := readActiveSnapshot(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(snapshot.Stable(env.Config, 2, 0)).To(Succeed())
 			g.Expect(snapshot.Pools[env.Config.MainPool].Instances).To(Equal(grown.Pools[env.Config.MainPool].Instances))
@@ -179,8 +177,8 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 				}
 			}
 			// A continuity failure must fail the spec, not merely retry until recovery.
-			Expect(healthy).To(BeNumerically(">=", 1), "PDB must preserve at least one Ready replica throughout drain")
-			after, err := env.Read(ctx)
+			Expect(healthy).To(BeNumerically(">=", 1), "PDB must preserve at least one Ready replica at each observation")
+			after, err := readSnapshot(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(after.Stable(env.Config, 1, 0)).To(Succeed())
 			g.Expect(env.Deleted(ctx, grown, after, env.Config.MainPool, 1)).To(Succeed())
@@ -205,11 +203,26 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 	}, NodeTimeout(50*time.Minute))
 })
 
+func readSnapshot(ctx context.Context) (environment.Snapshot, error) {
+	snapshot, err := env.Read(ctx)
+	if errors.Is(err, environment.ErrBounds) {
+		StopTrying("observed resource bounds breach").Wrap(err).Now()
+	}
+	return snapshot, err
+}
+
+func readActiveSnapshot(ctx context.Context) (environment.Snapshot, error) {
+	if err := env.Controller(ctx); err != nil {
+		return environment.Snapshot{}, err
+	}
+	return readSnapshot(ctx)
+}
+
 func waitStable(ctx context.Context, main, zero int) environment.Snapshot {
 	var snapshot environment.Snapshot
 	Eventually(ctx, func() error {
 		var err error
-		snapshot, err = env.Read(ctx)
+		snapshot, err = readSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -249,7 +262,7 @@ func waitDeleted(ctx context.Context, before environment.Snapshot, pool string, 
 	var after environment.Snapshot
 	Eventually(ctx, func() error {
 		var err error
-		after, err = env.Read(ctx)
+		after, err = readSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -274,7 +287,7 @@ func growthAndDelete(ctx context.Context) {
 	Expect(env.K8s.Update(ctx, deployment)).To(Succeed())
 	waitWorkload(ctx, deployment.Name, env.Config.MainPool, 2, 1)
 	Consistently(ctx, func() error {
-		snapshot, err := env.Read(ctx)
+		snapshot, err := readActiveSnapshot(ctx)
 		if err != nil {
 			return err
 		}

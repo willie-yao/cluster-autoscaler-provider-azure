@@ -109,16 +109,19 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				return result, fmt.Errorf("incomplete VMSS observation")
 			}
 			name := *set.Name
-			min, max := "1", "2"
+			minimum, maximum := 1, 2
 			if name == c.ZeroPool {
-				min, max = "0", "1"
+				minimum, maximum = 0, 1
 			} else if name != c.MainPool {
 				return result, fmt.Errorf("unexpected VMSS %s in dedicated worker resource group", name)
 			}
 			if value(set.Tags[RunLabel]) != c.RunID ||
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
-				value(set.Tags["min"]) != min || value(set.Tags["max"]) != max {
+				value(set.Tags["min"]) != strconv.Itoa(minimum) || value(set.Tags["max"]) != strconv.Itoa(maximum) {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization", name)
+			}
+			if err := checkCapacity(name, int(*set.SKU.Capacity), minimum, maximum); err != nil {
+				return result, err
 			}
 			if err := checkScaleDownTags(set.Tags); err != nil {
 				return result, fmt.Errorf("VMSS %s: %w", name, err)
@@ -152,6 +155,10 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 					pool.Instances[instance.ID] = instance
 				}
 			}
+			result.Pools[name] = pool
+			if err := result.CheckBounds(c); err != nil {
+				return result, err
+			}
 			n := maxInt(pool.Capacity, len(pool.Instances))
 			cores := a.cores[strings.ToLower(value(set.SKU.Name))]
 			if cores == 0 {
@@ -160,7 +167,9 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			result.VMs += n
 			result.VCPUs += n * cores
 			poolCores[name] = cores
-			result.Pools[name] = pool
+			if err := result.CheckBounds(c); err != nil {
+				return result, err
+			}
 		}
 	}
 	if len(result.Pools) != 2 {
@@ -195,10 +204,7 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	if err := checkPeakEnvelope(poolCores[c.MainPool], poolCores[c.ZeroPool], cores); err != nil {
 		return result, err
 	}
-	if result.VMs > MaxVMs || result.VCPUs > MaxVCPUs {
-		return result, fmt.Errorf("resource envelope exceeded: %d VMs, %d vCPUs", result.VMs, result.VCPUs)
-	}
-	return result, nil
+	return result, result.CheckBounds(c)
 }
 
 func checkScaleDownTags(tags map[string]*string) error {
@@ -225,7 +231,7 @@ func checkPeakEnvelope(mainCores, zeroCores, controlPlaneCores int) error {
 	// The authorized pool maxima are two main workers and one zero-pool worker.
 	peak := 2*mainCores + zeroCores + controlPlaneCores
 	if peak > MaxVCPUs {
-		return fmt.Errorf("configured pool maxima and control plane require %d vCPUs, exceeding %d", peak, MaxVCPUs)
+		return fmt.Errorf("%w: configured pool maxima and control plane require %d vCPUs, exceeding %d", ErrBounds, peak, MaxVCPUs)
 	}
 	return nil
 }

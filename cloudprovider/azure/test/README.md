@@ -15,6 +15,11 @@ need their own qualified fixtures and execution evidence.
 Before any workload, the configured maximum of two main workers, one zero-pool
 worker and the control plane must also fit eight vCPUs. A zero-capacity pool
 with an oversized SKU is rejected before it can scale.
+Positively observed envelope or per-pool capacity/instance-count breaches stop
+the observation immediately, even if a later read would converge within bounds.
+Ordinary read failures and convergence remain retryable in positive waits.
+These sampled guards are not a hard spending interlock: the operator still
+owns independent budget monitoring and cleanup.
 
 ## Local validation
 
@@ -24,7 +29,8 @@ make test-e2e-local # from the repository root
 make test-local
 ```
 
-These run race-enabled fake/unit checks, compile the `e2e`-tagged suite and
+These run race-enabled fake/unit checks, including the tagged observation and
+DRA image-guard regressions, compile the `e2e`-tagged suite and
 dry-run Ginkgo registration without running setup hooks or test bodies.
 They do not authenticate to Azure or contact Kubernetes. Ordinary PR CI runs
 the same target through `make test-ci`. The nested module's existing dependency
@@ -55,6 +61,10 @@ uses host networking. Arbitrary prefixes and foreign Node identities fail.
 It does not read cloud Secrets or claim to detect every
 possible external controller. The operator must disable any managed or other
 autoscaler that could share these pools.
+Every negative observation of no-growth, PDB blocking, workload retention,
+scheduler suppression or the maximum-capacity refusal rechecks the same
+controller Pod, lease, status, image and scope contract. Losing the controller
+or observing stale leadership/status fails that negative window.
 
 Both the Deployment template and its running autoscaler container must contain
 exactly one literal `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` matching the
@@ -114,6 +124,12 @@ helper accounts for init containers, restartable sidecars and overhead.
 Pod-level requests, which this helper predates, fail instead of using a guessed
 calculation. The helper's existing selected `v0.33.1` dependency has only the
 needed direct/indirect declarations and checksums added; no version was upgraded.
+Use homogeneous worker SKUs, allocatable CPU/memory and background Pod request
+profiles across both pools, including newly joined workers. CPU and memory
+geometry is measured on current workers and assumes future eligible workers
+match; the memory-based cross-pool cases use the baseline main worker's
+measurement. Qualifying those assumptions after installing addons is an
+operator prerequisite, not heterogeneous packing support.
 
 ## Focused execution
 
@@ -176,7 +192,7 @@ addons or global system-pod protections.
 synthetic DRA profile. The suite never installs its privileged addon, RBAC or
 DeviceClass. Prepare the public source's `dra-example-driver-kubeletplugin`
 DaemonSet in `kube-system`, container `plugin`, image
-`registry.k8s.io/dra-example-driver/dra-example-driver:v0.2.1`, with
+`registry.k8s.io/dra-example-driver/dra-example-driver@sha256:728fbb69b99e335cfef2d1b9a3d695d2f502c58dd04f7f81143089a72e4044e3`, with
 `DRIVER_NAME=gpu.example.com` and `NUM_DEVICES=4`. DeviceClass `gpu` must select
 `device.driver == 'gpu.example.com'`. Both objects must carry the run label.
 Set marker data `allow-dra-fixture: CA-020,CA-021,CA-022` only after separately
@@ -187,6 +203,14 @@ The tests create only namespace-owned claim templates and workloads, and check
 generated claim ownership, actual allocations, device uniqueness and matching
 worker ResourceSlices. Missing future-node simulation or an incompatible driver
 is an execution failure/gap, never a reason to mark the scenarios passing.
+`CA-020` adapts the source's twelve one-device Pods to eight, restricted to the
+main pool. It requires actual main/zero `1/0 -> 2/0`, eight Ready Pods and eight
+unique allocations matching four devices per worker. The initial main worker
+must already publish DRA ResourceSlices so the autoscaler can simulate another
+worker in that same group. A fresh zero pool has no such live/cached template,
+and the frozen Azure provider template supplies no ResourceSlices. This case
+does not prove DRA scale-from-zero or three-worker DRA growth and does not warm
+the zero-pool cache or change pool maxima.
 
 | Test ID | Assertions |
 | --- | --- |
@@ -213,7 +237,8 @@ public-source inventory is pinned separately to
 `Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`, a 1.35-line test
 source, not a runtime or Kubernetes support baseline. All 23 registrations are
 mapped with explicit gaps; implementation and live execution are distinct
-Phase 2 gates. No claim covers private/internal AKS product tests. DRA is not deallocate;
+Phase 2 gates. Completion covers the active public-source inventory, not
+comprehensive AKS product compatibility or private/internal tests. DRA is not deallocate;
 deallocate implementation remains Phase 3.
 
 Chart version `9.59.0`, inherited `appVersion: 1.35.0`, official registry and

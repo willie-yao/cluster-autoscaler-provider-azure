@@ -175,7 +175,7 @@ func waitWorkers(ctx context.Context, count int) environment.Snapshot {
 	var snapshot environment.Snapshot
 	Eventually(ctx, func() error {
 		var err error
-		snapshot, err = env.Read(ctx)
+		snapshot, err = readSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -235,7 +235,7 @@ func waitPodEvent(ctx context.Context, pod corev1.Pod, reason string) {
 
 func observeNoGrowth(ctx context.Context, name, pool string, ready, pending int) {
 	Consistently(ctx, func() error {
-		snapshot, err := env.Read(ctx)
+		snapshot, err := readActiveSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -260,7 +260,7 @@ func waitBaselineDeleted(ctx context.Context, before environment.Snapshot, minim
 			Expect(ready).To(BeNumerically(">=", minimumReady), "workload continuity during drain")
 		}
 		var err error
-		after, err = env.Read(ctx)
+		after, err = readSnapshot(ctx)
 		if err != nil {
 			return err
 		}
@@ -321,7 +321,7 @@ func drain(ctx context.Context, podsPerNode, allowed int, workloadNamespace stri
 	Expect(env.K8s.Delete(ctx, growth)).To(Succeed())
 	if allowed == 0 {
 		Consistently(ctx, func(g Gomega) {
-			current, err := env.Read(ctx)
+			current, err := readActiveSnapshot(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(current.Stable(env.Config, 2, 1)).To(Succeed())
 			g.Expect(current.Pools).To(Equal(grown.Pools))

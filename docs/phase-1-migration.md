@@ -22,8 +22,9 @@ Phase 1 preserves upstream Azure functionality: standard pools, explicit VMSS
 groups, discovery, scale-from-zero, existing authentication/configuration paths,
 and ordinary Delete-mode scale-down. Flex and VMs-pool functionality retain
 upstream gates and requirements. Neither is prohibited by deallocate-branch
-restrictions. AKS-fork deallocate parity is excluded. Broader E2E and applicable
-AKS coverage belong to Phase 2; deallocate belongs to Phase 3.
+restrictions. AKS-fork deallocate parity is excluded. Phase 2 covers the active
+public-source E2E inventory, not comprehensive AKS product compatibility;
+deallocate belongs to Phase 3.
 
 Intentional migration differences:
 

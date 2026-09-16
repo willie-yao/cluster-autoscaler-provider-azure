@@ -1,7 +1,7 @@
 # Phase 2 public-source E2E matrix
 
 **Full Phase 2 live completion is not established.** All 22 active public-source
-tests are implemented and reviewed. This campaign records 19 baseline public
+tests are implemented. The reviewed historical campaign records 19 baseline public
 passes and one supplemental pass through September 16, 2026 at 13:31 UTC.
 The three DRA cases were prepared but not installed or executed within the
 approved campaign window. They are unexecuted, not unsupported or Phase 3.
@@ -22,7 +22,8 @@ has an older Azure test layout and 19 generic registrations. The accepted
 release contains one Azure smoke and 22 generic registrations, including three
 optional DRA cases. No separate public AKS product suite or deallocate E2E was
 found. Registration counts are not pass counts and say nothing about private
-AKS product test coverage.
+AKS product test coverage. Phase 2 completion means qualifying the active public
+inventory, not comprehensive AKS product compatibility.
 
 ## Campaign accounting
 
@@ -44,7 +45,11 @@ deallocate dependency and was not found unsupported.
 fixture has `B=1`; across its two owned pools it can reach three workers plus
 one control plane within four VMs/eight vCPUs. No pool maximum is changed by
 tests. Memory-based cases measure worker allocatable memory and existing Pod
-requests rather than using control-plane memory or a blind constant.
+requests rather than using control-plane memory or a blind constant. The
+operator must qualify homogeneous worker SKUs, allocatable resources and
+background requests across both pools and future workers. Cross-pool memory
+geometry is derived from the current baseline main worker, not heterogeneous
+packing simulation.
 
 Every implemented row is independently selectable with `LABEL_FILTER=<ID>`.
 Definitions are in `cloudprovider/azure/test/suites/scaleup/`. Implemented does
@@ -61,18 +66,18 @@ not mean reviewed, executed, or passed.
 | [CA-006][ca006] | A pending Pod with an EmptyDir and anti-affinity triggers growth and runs on a second worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Local-storage scale-down protection remains enabled. |
 | [CA-007][ca007] | Remove three-worker pressure and require physical deletion back to baseline, not just desired-capacity change. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`. |
 | [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
-| [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged throughout five minutes. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Scale-down timings are explicit and at most one minute. |
+| [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged at each observation over five minutes. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Scale-down timings are explicit and at most one minute. |
 | [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, PDB budget must replenish. |
 | [CA-011][ca011] | The multi-Pod PDB drain runs with synthetic test-owned kube-system objects, preserving actual system addons and protections. | `system_test.go` | Passed on `886f31f8d`; see verified live batches. Explicit `allow-kube-system-fixture: CA-011` marker and no overlapping PDB selectors required. |
 | [CA-012][ca012] | Real low-priority demand is created in the test body; one Ready and one Pending expendable Pod do not grow the pool. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Corrects source bug that creates workload only in deferred cleanup. |
 | [CA-013][ca013] | Two high-priority reservations cause growth and become Ready on distinct workers. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Operator-owned PriorityClasses/cutoff required. |
 | [CA-014][ca014] | High-priority demand actually replaces the captured low-priority Pod; low-priority replacement remains Pending without growth. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Real scheduling preemption, not direct test eviction. |
 | [CA-015][ca015] | Three expendable memory reservations do not prevent physical shrink; remaining demand is explicitly one Ready/two Pending. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, source's running expendable workload intent retained. |
-| [CA-016][ca016] | Non-expendable memory reservations keep captured workers and all three Pods Ready throughout five minutes. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Negative window exceeds the required timing profile. |
+| [CA-016][ca016] | Non-expendable memory reservations keep captured workers and all three Pods Ready at each observation over five minutes. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Negative window exceeds the required timing profile. |
 | [CA-017][ca017] | Unprocessed bypassed-scheduler demand that cannot fit triggers actual growth while remaining unprocessed. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile, not Phase 3. |
 | [CA-018][ca018] | Bypassed-scheduler demand measured to fit stays unprocessed without growth. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile. |
 | [CA-019][ca019] | Unprocessed demand under a unique, unconfigured scheduler name does not trigger growth for five minutes. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Can run as a baseline control without the bypass flag. |
-| [CA-020][ca020] | Twelve one-device DRA Pods cause three-worker growth; all are Ready with unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window. DRA API/driver/future-node simulation required, no GPU SKU. |
+| [CA-020][ca020] | Eight main-only one-device DRA Pods cause actual main/zero `1/0 -> 2/0` growth; all are Ready with eight unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Bounded adaptation of the source's twelve Pods/three workers. Requires a DRA-bearing initial main worker and same-group future-node simulation, not DRA scale-from-zero or a GPU SKU. |
 | [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
 | [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
 
@@ -110,6 +115,28 @@ changes are introduced to fill invented source scenarios. VPA tests, GCE
 provisioning wrappers and the Kubernetes dependency's full E2E corpus are
 outside this Azure CA inventory.
 
+## Pre-DRA corrections
+
+The narrow implementation following evidence checkpoint
+`5ee260e240bae74369051d5b859cd1337b411549` changes CA-020 to eight main-only
+one-device Pods and validates the approved immutable driver digest documented
+in the [runner guide](../cloudprovider/azure/test/README.md). The fresh zero pool
+has no DRA-bearing live/cached template, and the frozen provider template
+supplies no ResourceSlices. No provider functionality, pool maxima or runtime
+dependencies change to preserve the source's twelve-Pod count.
+
+Negative windows now check fresh controller Pod/lease/status/scope at each
+observation. Positively observed capacity, instance-count or resource-envelope
+breaches stop polling instead of being retried away; ordinary convergence and
+read errors remain retryable in positive waits. These are sampled checks, not
+a hard cloud-spending interlock or a continuous workload-availability monitor.
+The operator remains responsible for monitoring and cleanup.
+
+These corrections have no live execution evidence yet. The historical 19 public
+passes and one supplemental pass below remain evidence only for the assertions
+performed on `886f31f8d`, not retroactive credit for the new controller-liveness
+or terminal-bounds checks. All timed negative windows remain unchanged.
+
 ## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
@@ -137,14 +164,14 @@ comparison was not repeated as part of this Phase 2 campaign.
 | `CA-006` | 10:41:38.259 to 10:54:47.104 (suite) | 13m14s wall | The EmptyDir/anti-affinity pair became Ready after actual and desired `1/0 -> 2/0` growth; peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, retaining main instance `5`. Local-storage protection remained enabled. This growth case does not separately assert individual NIC deletion. |
 | `CA-007` | 10:55:57.058 to 11:09:15.652 (suite) | 13m23s wall | Three-worker pressure grew actual and desired `1/0 -> 2/1`; peak four VMs/eight vCPUs. Removing pressure restored `1/0` with physical deletion of main instance `6`, zero instance `3`, their Nodes and captured NICs. Main instance `5` survived. |
 | `CA-008` | 11:09:55.826 to 11:23:58.011 (suite) | 14m08s wall | Three movable Pods initially occupied separate workers. The one-disruption PDB drain kept at least two Ready at every observation and all three recovered on main instance `5`. Main instance `7`, zero instance `4`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
-| `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 13m02s wall | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
+| `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 13m02s wall | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload at each observation over five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
 | `CA-010` | 11:37:59.182 to 11:52:00.949 (suite) | 14m07s wall | Six movable Pods initially occupied three workers, two per worker. The one-disruption drain kept at least five Ready at every observation and all six recovered on main instance `5`. Main instance `9`, zero instance `6`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
 | `CA-011` | 11:52:40.531 to 12:06:40.655 (suite) | 14m05s wall | Six run-owned synthetic kube-system Pods initially occupied three workers, two per worker. The PDB drain kept at least five Ready per observation and all six recovered on main instance `10`; system-pod protection was not disabled. Main instance `5`, zero instance `7`, their Nodes and captured NICs were physically deleted. Peak four VMs/eight vCPUs; actual `1/0` restored. Operator also confirmed zero remaining run-owned kube-system Deployments/PDBs. |
 | `CA-012` | 12:07:48.940 to 12:14:05.286 (suite) | 6m22s wall | Real expendable demand remained one Ready/one Pending without growth throughout five minutes. Each reservation requested 5,715,880,755 bytes against measured allocatable 8,165,543,936 and existing requests 52,428,800 bytes. Main instance `10` remained the sole worker, actual `1/0`, total two VMs/four vCPUs. Namespace cleanup passed. |
 | `CA-013` | 12:14:40.658 to 12:27:52.264 (suite) | 13m17s wall | Two non-expendable high-priority reservations became Ready on distinct actual main workers, each using the same measured 5,715,880,755-byte request. Actual and desired `1/0 -> 2/0 -> 1/0`, peak three VMs/six vCPUs. Namespace cleanup retained main instance `11`; this growth case does not separately assert individual NIC deletion. |
-| `CA-014` | 12:28:29.080 to 12:35:24.736 (suite) | 7m01s wall | Scheduler preemption replaced the captured expendable Pod with actual high-priority demand. The high-priority Pod remained Ready and the expendable replacement Pending throughout the no-growth window. Main instance `11` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. |
+| `CA-014` | 12:28:29.080 to 12:35:24.736 (suite) | 7m01s wall | Scheduler preemption replaced the captured expendable Pod with actual high-priority demand. The high-priority workload was Ready before and after the no-growth window, not checked continuously; the expendable replacement was Pending at each observation. Main instance `11` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. |
 | `CA-015` | 12:36:10.234 to 12:50:55.122 (suite) | 14m50s wall | Three running expendable reservations allowed physical shrink, ending with one Ready/two Pending. Main instance `12`, zero instance `8`, their Nodes and captured NICs were physically deleted; main instance `11` survived. Actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs; namespace cleanup passed. |
-| `CA-016` | 12:51:30.988 to 13:04:41.811 (suite) | 13m16s wall | Three non-expendable reservations kept captured main instances `11`/`13`, zero instance `9` and all three Pods Ready throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `11` surviving; no separate individual NIC deletion assertion after cleanup. |
+| `CA-016` | 12:51:30.988 to 13:04:41.811 (suite) | 13m16s wall | Three non-expendable reservations kept captured main instances `11`/`13`, zero instance `9` and all three Pods Ready at each observation over five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `11` surviving; no separate individual NIC deletion assertion after cleanup. |
 | `CA-017` | 13:05:29.458 to 13:18:47.205 (suite) | 13m23s wall | Bypassed-scheduler demand that could not fit the baseline caused actual `1/0 -> 2/0` growth while the Pods remained genuinely unprocessed/Pending. Peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, main instance `14` surviving; this growth case does not separately assert individual NIC deletion. |
 | `CA-018` | 13:19:38.071 to 13:25:02.101 (suite) | 5m30s wall | A measured fitting 4,082,771,968-byte request stayed unprocessed/Pending under the bypassed scheduler without growth throughout five minutes. Main instance `14` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. |
 | `CA-019` | 13:25:53.110 to 13:31:17.872 (suite) | 5m30s wall | Demand under a distinct unconfigured scheduler stayed unprocessed/Pending without growth throughout five minutes. Main instance `14` and actual `1/0` remained, total two VMs/four vCPUs; namespace cleanup passed. The invocation began before the 13:30 UTC launch cutoff and completed before the 14:00 UTC process deadline. |

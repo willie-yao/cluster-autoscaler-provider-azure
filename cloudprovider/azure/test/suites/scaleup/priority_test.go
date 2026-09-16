@@ -92,7 +92,7 @@ var _ = Describe("Public priority scenarios", Serial, Label("public", "priority"
 		assertDistinctNodes(waitWorkload(ctx, workload.Name, "", 3, 0), 3)
 		Expect(env.K8s.Delete(ctx, growth)).To(Succeed())
 		Consistently(ctx, func(g Gomega) {
-			current, err := env.Read(ctx)
+			current, err := readActiveSnapshot(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(current.Stable(env.Config, 2, 1)).To(Succeed())
 			g.Expect(current.Pools).To(Equal(grown.Pools))
