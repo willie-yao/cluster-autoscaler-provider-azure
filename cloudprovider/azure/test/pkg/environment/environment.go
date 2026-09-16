@@ -208,6 +208,9 @@ func CheckControllerArguments(args []string, discoveryValue string) error {
 			}
 		}
 		for key := range timings {
+			if arg == "--"+key {
+				return fmt.Errorf("%s requires --%s=value for explicit fixture validation", key, key)
+			}
 			if strings.HasPrefix(arg, "--"+key+"=") {
 				duration, err := time.ParseDuration(strings.TrimPrefix(arg, "--"+key+"="))
 				if err != nil || duration < 0 || duration > time.Minute || timings[key] {
@@ -216,7 +219,8 @@ func CheckControllerArguments(args []string, discoveryValue string) error {
 				timings[key] = true
 			}
 		}
-		if strings.HasPrefix(arg, "--scale-down-utilization-threshold=") && arg != "--scale-down-utilization-threshold=0.5" {
+		if (arg == "--scale-down-utilization-threshold" || strings.HasPrefix(arg, "--scale-down-utilization-threshold=")) &&
+			arg != "--scale-down-utilization-threshold=0.5" {
 			return fmt.Errorf("this fixture requires the default scale-down utilization threshold")
 		}
 	}

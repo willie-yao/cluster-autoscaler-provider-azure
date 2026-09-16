@@ -154,6 +154,8 @@ func TestCheckControllerArguments(t *testing.T) {
 		{name: "local storage bypass", args: []string{base, "--skip-nodes-with-local-storage=false"}},
 		{name: "system pods bypass", args: []string{base, "--skip-nodes-with-system-pods=false"}},
 		{name: "leader disabled", args: []string{base, "--leader-elect=false"}},
+		{name: "split timing override", args: []string{base, "--scale-down-unneeded-time", "30m"}},
+		{name: "split utilization override", args: []string{base, "--scale-down-utilization-threshold", "0.1"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			args := append(append([]string{}, tt.args...),
