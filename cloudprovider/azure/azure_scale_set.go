@@ -449,7 +449,10 @@ func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) err
 func (scaleSet *ScaleSet) GetScaleSetVms() ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	ctx, cancel := getContextWithTimeout(vmssContextTimeout)
 	defer cancel()
+	return scaleSet.getScaleSetVms(ctx)
+}
 
+func (scaleSet *ScaleSet) getScaleSetVms(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	vmList, err := scaleSet.manager.azClient.virtualMachineScaleSetVMsClient.ListVMInstanceView(ctx, scaleSet.manager.config.ResourceGroup,
 		scaleSet.Name)
 

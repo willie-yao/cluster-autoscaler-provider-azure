@@ -303,12 +303,24 @@ func (s *ScaleSet) deleteProviderOnlyReceiptNode(ctx context.Context, receipt pr
 }
 
 func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
+	return s.parkingInventoryWithList(s.GetScaleSetVms)
+}
+
+func (s *ScaleSet) parkingInventoryWithContext(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
+	return s.parkingInventoryWithList(func() ([]*armcompute.VirtualMachineScaleSetVM, error) {
+		return s.getScaleSetVms(ctx)
+	})
+}
+
+func (s *ScaleSet) parkingInventoryWithList(
+	list func() ([]*armcompute.VirtualMachineScaleSetVM, error),
+) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
 	s.powerMutex.Lock()
 	defer s.powerMutex.Unlock()
 	if err := s.validateParking(); err != nil {
 		return nil, nil, err
 	}
-	vms, err := s.GetScaleSetVms()
+	vms, err := list()
 	if err != nil {
 		return nil, nil, err
 	}
@@ -533,6 +545,10 @@ func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), vmssContextTimeout)
 	defer cancel()
+	return m.reconcileProviderOnlyDeleteReceiptsWithContext(ctx)
+}
+
+func (m *AzureManager) reconcileProviderOnlyDeleteReceiptsWithContext(ctx context.Context) error {
 	nodes, err := m.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
 	if err != nil {
 		return fmt.Errorf("list Nodes for provider-only deletion recovery: %w", err)
@@ -566,6 +582,10 @@ func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
 		byGroup[group] = append(byGroup[group], receipt)
 	}
 	for group, receipts := range byGroup {
+		if err := ctx.Err(); err != nil {
+			errs = append(errs, fmt.Errorf("provider-only deletion recovery deadline: %w", err))
+			break
+		}
 		if !group.parkMutex.TryLock() {
 			klog.V(3).Infof("Deferring provider-only deletion recovery for busy VMSS %s", group.Name)
 			continue
@@ -582,7 +602,7 @@ func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 	ctx context.Context,
 	receipts []providerOnlyDeleteReceipt,
 ) error {
-	vms, _, err := s.parkingInventory()
+	vms, _, err := s.parkingInventoryWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("load VM inventory for provider-only deletion recovery in %s: %w", s.Name, err)
 	}

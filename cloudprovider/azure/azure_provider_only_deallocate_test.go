@@ -661,6 +661,121 @@ func TestProviderOnlyDeallocateBusyGroupDefersReceiptRecovery(t *testing.T) {
 	require.Empty(t, world.history())
 }
 
+func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) {
+	ctx := t.Context()
+	client := fake.NewClientset()
+	ctrl := gomock.NewController(t)
+	poolNames := []string{"pool-a", "pool-b"}
+	vmssByName := make(map[string]*armcompute.VirtualMachineScaleSet, len(poolNames))
+	vmByName := make(map[string]*armcompute.VirtualMachineScaleSetVM, len(poolNames))
+	for _, name := range poolNames {
+		vmss := newTestVMSSList(1, name, "eastus", armcompute.OrchestrationModeUniform)[0]
+		vmss.ID = ptr.To(fmt.Sprintf(
+			"/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/%s",
+			name,
+		))
+		vmss.Properties.VirtualMachineProfile = &armcompute.VirtualMachineScaleSetVMProfile{
+			StorageProfile: &armcompute.VirtualMachineScaleSetStorageProfile{
+				OSDisk: &armcompute.VirtualMachineScaleSetOSDisk{
+					ManagedDisk: &armcompute.VirtualMachineScaleSetManagedDiskParameters{},
+				},
+			},
+		}
+		vm := &armcompute.VirtualMachineScaleSetVM{
+			ID: ptr.To(*vmss.ID + "/virtualMachines/0"), InstanceID: ptr.To("0"),
+			Properties: &armcompute.VirtualMachineScaleSetVMProperties{
+				VMID: ptr.To("vm-" + name), ProvisioningState: ptr.To(provisioningStateSucceeded),
+				OSProfile: &armcompute.OSProfile{ComputerName: ptr.To("node-" + name)},
+				InstanceView: &armcompute.VirtualMachineScaleSetVMInstanceView{
+					Statuses: []*armcompute.InstanceViewStatus{{Code: ptr.To(vmPowerStateDeallocated)}},
+				},
+			},
+		}
+		vmssByName[name] = vmss
+		vmByName[name] = vm
+		node := catest.BuildTestNode("node-"+name, 4000, 8*1024*1024*1024, catest.IsReady(true))
+		node.UID = types.UID("uid-" + name)
+		node.Spec.ProviderID = azurePrefix + *vm.ID
+		addParkingReceipt(t, node, vm)
+		_, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+		require.NoError(t, err)
+	}
+	vmssClient := mock_virtualmachinescalesetclient.NewMockInterface(ctrl)
+	vmssClient.EXPECT().List(gomock.Any(), "rg").DoAndReturn(
+		func(context.Context, string) ([]*armcompute.VirtualMachineScaleSet, error) {
+			return []*armcompute.VirtualMachineScaleSet{vmssByName["pool-a"], vmssByName["pool-b"]}, nil
+		},
+	).AnyTimes()
+	vmClient := mock_virtualmachineclient.NewMockInterface(ctrl)
+	vmClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil).AnyTimes()
+	instanceClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
+	inventoryCalls := 0
+	var firstDeadline time.Time
+	deadlineTestActive := false
+	instanceClient.EXPECT().ListVMInstanceView(gomock.Any(), "rg", gomock.Any()).DoAndReturn(
+		func(callCtx context.Context, _, name string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
+			if !deadlineTestActive {
+				return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
+			}
+			inventoryCalls++
+			if inventoryCalls == 1 {
+				var found bool
+				firstDeadline, found = callCtx.Deadline()
+				require.True(t, found)
+				<-callCtx.Done()
+				return nil, callCtx.Err()
+			}
+			return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
+		},
+	).AnyTimes()
+	manager := &AzureManager{
+		config: &Config{
+			Config:                 providerconfig.Config{VMType: "vmss", ResourceGroup: "rg", Location: "eastus"},
+			ProviderOnlyDeallocate: true,
+		},
+		env: azure.PublicCloud, kubeClient: client,
+		explicitlyConfigured: map[string]bool{"pool-a": true, "pool-b": true},
+		azClient: &azClient{
+			virtualMachineScaleSetsClient:   vmssClient,
+			virtualMachineScaleSetVMsClient: instanceClient,
+			virtualMachinesClient:           vmClient,
+		},
+	}
+	var err error
+	manager.azureCache, err = newAzureCache(manager.azClient, time.Minute, *manager.config)
+	require.NoError(t, err)
+	t.Cleanup(manager.Cleanup)
+	for _, name := range poolNames {
+		group, err := NewScaleSet(&dynamic.NodeGroupSpec{Name: name, MinSize: 0, MaxSize: 1}, manager, 1, false)
+		require.NoError(t, err)
+		manager.RegisterNodeGroup(group)
+	}
+	require.NoError(t, manager.forceRefresh())
+
+	deadlineTestActive = true
+	deadlineCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	expectedDeadline, found := deadlineCtx.Deadline()
+	require.True(t, found)
+	err = manager.reconcileProviderOnlyDeleteReceiptsWithContext(deadlineCtx)
+	cancel()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, 1, inventoryCalls, "an expired reconciliation must not start another inventory request")
+	require.True(t, firstDeadline.Equal(expectedDeadline), "inventory must inherit the remaining reconciliation deadline")
+	for _, name := range poolNames {
+		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
+		require.NoError(t, err)
+	}
+
+	retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Second)
+	defer retryCancel()
+	require.NoError(t, manager.reconcileProviderOnlyDeleteReceiptsWithContext(retryCtx))
+	require.Equal(t, 3, inventoryCalls)
+	for _, name := range poolNames {
+		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
+		require.True(t, apierrors.IsNotFound(err))
+	}
+}
+
 func TestProviderOnlyDeallocateReceiptDeleteFailureDoesNotBlockCore(t *testing.T) {
 	infra := integration.SetupInfrastructure(t)
 	synctest.Test(t, func(t *testing.T) {
