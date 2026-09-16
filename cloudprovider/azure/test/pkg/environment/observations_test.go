@@ -24,6 +24,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 )
 
 func testNode(c Config) corev1.Node {
@@ -100,6 +101,41 @@ func TestValidateDemand(t *testing.T) {
 			err := ValidateDemand(node, pods, tt.demand)
 			if (err == nil) != tt.valid {
 				t.Fatalf("ValidateDemand = %v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestNodeRequests(t *testing.T) {
+	t.Parallel()
+	container := func(cpu string) corev1.Container {
+		return corev1.Container{Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse(cpu)}}}
+	}
+	sidecar := container("100m")
+	sidecar.RestartPolicy = ptr.To(corev1.ContainerRestartPolicyAlways)
+	for _, tt := range []struct {
+		name string
+		init []corev1.Container
+		want int64
+	}{
+		{name: "Calico unrequested install init", init: []corev1.Container{{Name: "install-cni"}}, want: 250},
+		{name: "larger regular init", init: []corev1.Container{container("500m")}, want: 550},
+		{name: "regular init max not sum", init: []corev1.Container{container("500m"), container("300m")}, want: 550},
+		{name: "restartable sidecar with later init", init: []corev1.Container{sidecar, container("500m")}, want: 650},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			node := testNode(testConfig())
+			pod := corev1.Pod{Spec: corev1.PodSpec{
+				NodeName: node.Name, Containers: []corev1.Container{container("200m")}, InitContainers: tt.init,
+				Overhead: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("50m")},
+			}}
+			requests, err := NodeRequests(node, []corev1.Pod{pod})
+			if err != nil || requests.Cpu().MilliValue() != tt.want {
+				t.Fatalf("requests=%v err=%v, want %dm", requests, err, tt.want)
+			}
+			pod.Spec.Resources = &corev1.ResourceRequirements{}
+			if _, err := NodeRequests(node, []corev1.Pod{pod}); err == nil {
+				t.Fatal("retained helper cannot attest Pod-level requests")
 			}
 		})
 	}

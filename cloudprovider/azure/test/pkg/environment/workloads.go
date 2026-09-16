@@ -31,7 +31,7 @@ import (
 // Deployment pins workloads to an eligible pool without tolerating control-plane taints.
 func (e *Environment) Deployment(namespace, name, poolLabel, cpu string, replicas int32) *appsv1.Deployment {
 	labels := map[string]string{RunLabel: e.Config.RunID, "app": name}
-	return &appsv1.Deployment{
+	deployment := &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace, Labels: labels},
 		Spec: appsv1.DeploymentSpec{
 			Replicas: ptr.To(replicas),
@@ -57,6 +57,17 @@ func (e *Environment) Deployment(namespace, name, poolLabel, cpu string, replica
 			},
 		},
 	}
+	if poolLabel == "" {
+		delete(deployment.Spec.Template.Spec.NodeSelector, e.Config.PoolLabel)
+		deployment.Spec.Template.Spec.Affinity = &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+			RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{NodeSelectorTerms: []corev1.NodeSelectorTerm{{
+				MatchExpressions: []corev1.NodeSelectorRequirement{{
+					Key: e.Config.PoolLabel, Operator: corev1.NodeSelectorOpIn, Values: []string{e.Config.MainLabel, e.Config.ZeroLabel},
+				}},
+			}}},
+		}}
+	}
+	return deployment
 }
 
 // WorkloadState requires the expected Pod count, readiness and worker placement.
@@ -71,7 +82,11 @@ func (e *Environment) WorkloadState(ctx context.Context, namespace, name, pool s
 		return nil, err
 	}
 	allowed := map[string]bool{}
-	for _, node := range PoolNodes(nodes.Items, e.Config.PoolID(pool)) {
+	workers := PoolNodes(nodes.Items, e.Config.PoolID(pool))
+	if pool == "" {
+		workers = WorkerNodes(nodes.Items, e.Config)
+	}
+	for _, node := range workers {
 		allowed[node.Name] = true
 	}
 	for _, pod := range pods.Items {

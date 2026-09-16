@@ -70,41 +70,41 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 	Expect(err).NotTo(HaveOccurred())
 }, NodeTimeout(10*time.Minute))
 
-var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
-	BeforeEach(func(ctx SpecContext) {
+var _ = BeforeEach(func(ctx SpecContext) {
+	Expect(env.Authorize(ctx)).To(Succeed())
+	Expect(env.Controller(ctx)).To(Succeed())
+	baseline := waitStable(ctx, 1, 0)
+	Expect(env.CheckWorkerIsolation(ctx, baseline, "")).To(Succeed())
+	namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		GenerateName: "azure-e2e-", Labels: map[string]string{environment.RunLabel: env.Config.RunID},
+	}}
+	Expect(env.K8s.Create(ctx, namespace)).To(Succeed())
+	ownedNamespace := namespace.DeepCopy()
+	DeferCleanup(func(ctx SpecContext) {
 		Expect(env.Authorize(ctx)).To(Succeed())
-		Expect(env.Controller(ctx)).To(Succeed())
-		baseline := waitStable(ctx, 1, 0)
-		Expect(env.CheckWorkerIsolation(ctx, baseline, "")).To(Succeed())
-		namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
-			GenerateName: "azure-e2e-", Labels: map[string]string{environment.RunLabel: env.Config.RunID},
-		}}
-		Expect(env.K8s.Create(ctx, namespace)).To(Succeed())
-		ownedNamespace := namespace.DeepCopy()
-		DeferCleanup(func(ctx SpecContext) {
-			Expect(env.Authorize(ctx)).To(Succeed())
-			var current corev1.Namespace
-			err := env.K8s.Get(ctx, client.ObjectKeyFromObject(ownedNamespace), &current)
-			if !apierrors.IsNotFound(err) {
-				Expect(err).NotTo(HaveOccurred())
-				Expect(current.UID).To(Equal(ownedNamespace.UID))
-				Expect(current.Labels[environment.RunLabel]).To(Equal(env.Config.RunID))
-				Expect(env.K8s.Delete(ctx, &current, client.Preconditions{UID: &ownedNamespace.UID})).To(Succeed())
+		var current corev1.Namespace
+		err := env.K8s.Get(ctx, client.ObjectKeyFromObject(ownedNamespace), &current)
+		if !apierrors.IsNotFound(err) {
+			Expect(err).NotTo(HaveOccurred())
+			Expect(current.UID).To(Equal(ownedNamespace.UID))
+			Expect(current.Labels[environment.RunLabel]).To(Equal(env.Config.RunID))
+			Expect(env.K8s.Delete(ctx, &current, client.Preconditions{UID: &ownedNamespace.UID})).To(Succeed())
+		}
+		Eventually(ctx, func() error {
+			err := env.K8s.Get(ctx, client.ObjectKeyFromObject(ownedNamespace), &corev1.Namespace{})
+			if apierrors.IsNotFound(err) {
+				return nil
 			}
-			Eventually(ctx, func() error {
-				err := env.K8s.Get(ctx, client.ObjectKeyFromObject(ownedNamespace), &corev1.Namespace{})
-				if apierrors.IsNotFound(err) {
-					return nil
-				}
-				if err != nil {
-					return err
-				}
-				return fmt.Errorf("test namespace is still terminating")
-			}, 4*time.Minute, pollInterval).Should(Succeed())
-			waitStable(ctx, 1, 0)
-		}, NodeTimeout(20*time.Minute))
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("test namespace is still terminating")
+		}, 4*time.Minute, pollInterval).Should(Succeed())
+		waitStable(ctx, 1, 0)
 	}, NodeTimeout(20*time.Minute))
+}, NodeTimeout(20*time.Minute))
 
+var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 	It("AZ-P1-001 discovers only owned groups and remains idle for five minutes", Label("AZ-P1-001", "idle"), func(ctx SpecContext) {
 		Consistently(ctx, func() error {
 			if err := env.Controller(ctx); err != nil {
@@ -131,7 +131,7 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 		waitDeleted(ctx, grown, env.Config.ZeroPool, 1, 1, 0)
 	}, NodeTimeout(40*time.Minute))
 
-	It("AZ-P1-004 honors a blocking PDB then drains and reschedules with one disruption allowed", Label("AZ-P1-004", "CA-008", "CA-009", "pdb", "delete"), func(ctx SpecContext) {
+	It("AZ-P1-004 honors a blocking PDB then drains and reschedules with one disruption allowed", Label("AZ-P1-004", "pdb", "delete"), func(ctx SpecContext) {
 		grow := env.Deployment(namespace.Name, "grow", env.Config.MainLabel, env.Config.DemandCPU, 2)
 		Expect(env.DemandFits(ctx, waitStable(ctx, 1, 0), env.Config.MainPool)).To(Succeed())
 		Expect(env.K8s.Create(ctx, grow)).To(Succeed())
@@ -219,10 +219,14 @@ func waitStable(ctx context.Context, main, zero int) environment.Snapshot {
 }
 
 func waitWorkload(ctx context.Context, name, pool string, ready, pending int) []corev1.Pod {
+	return waitWorkloadIn(ctx, namespace.Name, name, pool, ready, pending)
+}
+
+func waitWorkloadIn(ctx context.Context, workloadNamespace, name, pool string, ready, pending int) []corev1.Pod {
 	var pods []corev1.Pod
 	Eventually(ctx, func() error {
 		var err error
-		pods, err = env.WorkloadState(ctx, namespace.Name, name, pool, ready, pending)
+		pods, err = env.WorkloadState(ctx, workloadNamespace, name, pool, ready, pending)
 		return err
 	}, settleTimeout, pollInterval).Should(Succeed())
 	return pods

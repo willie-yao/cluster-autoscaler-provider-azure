@@ -73,8 +73,11 @@ contain bootstrap data.
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested
 CPU. `demandCPU` is measured against actual worker allocatable CPU and existing
-Pod requests: one Pod must fit, two must not. Unknown init-container or
-Pod-level request accounting fails instead of making a guessed calculation.
+Pod requests: one Pod must fit, two must not. The retained kubectl request
+helper accounts for init containers, restartable sidecars and overhead.
+Pod-level requests, which this helper predates, fail instead of using a guessed
+calculation. The helper's existing selected `v0.33.1` dependency has only the
+needed direct/indirect declarations and checksums added; no version was upgraded.
 
 ## Focused execution
 
@@ -93,6 +96,31 @@ make -C cloudprovider/azure/test e2etests \
 The original `FOCUS` selector is also supported. Ginkgo parallel execution is
 rejected. JUnit and report entries record outcomes and redacted count/deletion
 observations. Do not treat a filtered-out or unexecuted spec as passing.
+
+Public-source cases use their own `AZ-001` or `CA-NNN` label. See the complete
+[source-to-test matrix](../../../docs/phase-2-e2e-matrix.md) for each scenario's
+status, prerequisites and pinned source. Public tests spanning three workers
+select only the two owned pools, so `B=1` grows to main/zero `2/1`, still within
+four VMs including the control plane.
+
+Priority cases require operator-created `<runID>-expendable` and `<runID>-high`
+PriorityClasses with values `-15` and `1000`, `globalDefault: false`, ordinary
+preemption, and the `autoscaler-e2e-run=<runID>` label. The candidate must use
+`--expendable-pods-priority-cutoff=-10`. The suite never creates or deletes
+these cluster-scoped classes.
+
+`CA-017` and `CA-018` require
+`--bypassed-scheduler-names=non-existing-bypassed-scheduler` with no scheduler
+installed under that name. `CA-019` uses a distinct unconfigured name and can
+run without the optional flag. These Pods intentionally remain unprocessed;
+Ready is not the expected result.
+
+`CA-011` is the only exception to generated-namespace-only workloads. It
+requires `allow-kube-system-fixture: CA-011` in the operator marker and creates
+only uniquely named, run-labeled synthetic Deployment/PDB objects in
+`kube-system`. It rejects existing PDB selectors overlapping its labels and
+cleans up only the captured object names/UIDs. It never modifies actual system
+addons or global system-pod protections.
 
 | Test ID | Assertions |
 | --- | --- |
@@ -117,9 +145,9 @@ Infrastructure cleanup remains operator-owned even after a test failure.
 These Phase 1-derived tests are supplemental acceptance cases. The Phase 2
 public-source inventory is pinned separately to
 `Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`, a 1.35-line test
-source, not a runtime or Kubernetes support baseline. Mapping all 23 discovered
-registrations and their feature/resource requirements is an ongoing Phase 2
-gate. No claim covers private/internal AKS product tests. DRA is not deallocate;
+source, not a runtime or Kubernetes support baseline. All 23 registrations are
+mapped with explicit gaps; implementation and live execution are distinct
+Phase 2 gates. No claim covers private/internal AKS product tests. DRA is not deallocate;
 deallocate implementation remains Phase 3.
 
 Chart version `9.59.0`, inherited `appVersion: 1.35.0`, official registry and

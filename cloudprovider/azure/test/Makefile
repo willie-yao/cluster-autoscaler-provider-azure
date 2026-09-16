@@ -68,6 +68,7 @@ e2etests: ## Run e2e tests (CAS must already be deployed)
 test-local: ## Validate harness logic and compile E2E without cloud credentials
 	go test -mod=readonly -race ./pkg/...
 	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
+	go test -mod=readonly -tags=e2e ./suites/... -count=1 -args -ginkgo.dry-run
 
 ##@ Utilities
 

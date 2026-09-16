@@ -22,6 +22,7 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	resourcehelper "k8s.io/kubectl/pkg/util/resource"
 	"sigs.k8s.io/yaml"
 )
 
@@ -67,6 +68,11 @@ func PoolNodes(nodes []corev1.Node, poolID string) []corev1.Node {
 	return result
 }
 
+// WorkerNodes returns only instances of the two explicitly bound pools.
+func WorkerNodes(nodes []corev1.Node, c Config) []corev1.Node {
+	return append(PoolNodes(nodes, c.PoolID(c.MainPool)), PoolNodes(nodes, c.PoolID(c.ZeroPool))...)
+}
+
 // Stable requires a one-to-one mapping between Azure instances and Ready Nodes.
 func (s Snapshot) Stable(c Config, main, zero int) error {
 	if s.VMs > MaxVMs || s.VCPUs > MaxVCPUs {
@@ -100,25 +106,36 @@ func (s Snapshot) Stable(c Config, main, zero int) error {
 
 // ValidateDemand proves that one demand Pod fits, but two cannot share a worker.
 func ValidateDemand(node corev1.Node, pods []corev1.Pod, demandMilliCPU int64) error {
-	var occupied int64
-	for _, pod := range pods {
-		if pod.Spec.NodeName != node.Name || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
-			continue
-		}
-		// Reject scheduling features this deliberately small demand model cannot calculate.
-		if len(pod.Spec.InitContainers) != 0 || pod.Spec.Resources != nil {
-			return fmt.Errorf("Node %s has Pod %s/%s with unsupported request accounting", node.Name, pod.Namespace, pod.Name)
-		}
-		for _, container := range pod.Spec.Containers {
-			occupied += container.Resources.Requests.Cpu().MilliValue()
-		}
-		occupied += pod.Spec.Overhead.Cpu().MilliValue()
+	occupied, err := NodeRequests(node, pods)
+	if err != nil {
+		return err
 	}
-	available := node.Status.Allocatable.Cpu().MilliValue() - occupied
+	available := node.Status.Allocatable.Cpu().MilliValue() - occupied.Cpu().MilliValue()
 	if available < demandMilliCPU || available >= 2*demandMilliCPU {
 		return fmt.Errorf("Node %s has %dm free CPU; require demand <= free < 2*demand (%dm)", node.Name, available, demandMilliCPU)
 	}
 	return nil
+}
+
+// NodeRequests includes Kubernetes init-container, sidecar and overhead accounting.
+func NodeRequests(node corev1.Node, pods []corev1.Pod) (corev1.ResourceList, error) {
+	occupied := corev1.ResourceList{}
+	for _, pod := range pods {
+		if pod.Spec.NodeName != node.Name || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		// The retained kubectl helper predates Pod-level request accounting.
+		if pod.Spec.Resources != nil {
+			return nil, fmt.Errorf("Node %s has Pod %s/%s with unsupported Pod-level requests", node.Name, pod.Namespace, pod.Name)
+		}
+		requests, _ := resourcehelper.PodRequestsAndLimits(&pod)
+		for name, request := range requests {
+			sum := occupied[name]
+			sum.Add(request)
+			occupied[name] = sum
+		}
+	}
+	return occupied, nil
 }
 
 // CheckStatus reads the controller's reported group inventory, not just Azure tags.
