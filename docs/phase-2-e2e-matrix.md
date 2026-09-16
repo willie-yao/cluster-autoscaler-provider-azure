@@ -1,8 +1,8 @@
 # Phase 2 public-source E2E matrix
 
 **Phase 2 is not complete.** Runnable tests, required review and live execution
-are separate gates. The initial live batch records two public-source passes
-and one supplemental pass through September 16, 2026 at 09:56 UTC. Remaining
+are separate gates. Verified live batches record five public-source passes
+and one supplemental pass through September 16, 2026 at 10:40 UTC. Remaining
 rows are not implied to pass. Phase 1 evidence does not substitute for running
 these new tests.
 
@@ -35,12 +35,12 @@ not mean reviewed, executed, or passed.
 
 | ID and pinned source | Intent and semantic assertions | Test file | Fixture / status |
 | --- | --- | --- | --- |
-| [AZ-001][az] | 100 Pods at 200m CPU cause actual owned-worker growth, Ready test Pods use all three workers, excess demand remains Pending, deletion restores baseline with VM/Node/NIC evidence. Full 100-Pod readiness is not a source assertion and would exceed this budget. | `public_test.go` | Implemented; unexecuted. Bounded adaptation of original 20-core pressure. |
-| [CA-001][ca001] | A 1.1x worker-memory Pod stays scheduler-rejected, emits `NotTriggerScaleUp` for its exact UID and does not grow the eligible pool for five minutes. | `public_test.go` | Passed on `886f31f8d`; see initial live batch. Main-pool selector restricts candidate size. |
-| [CA-002][ca002] | 100 small Pods totaling worker allocatable memory cause growth; all 100 are Ready on real workers; cleanup physically shrinks. | `public_test.go` | Implemented; unexecuted. Measured background requests must make the baseline insufficient. |
+| [AZ-001][az] | 100 Pods at 200m CPU cause actual owned-worker growth, Ready test Pods use all three workers, excess demand remains Pending, deletion restores baseline with VM/Node/NIC evidence. Full 100-Pod readiness is not a source assertion and would exceed this budget. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Bounded adaptation of original 20-core pressure. |
+| [CA-001][ca001] | A 1.1x worker-memory Pod stays scheduler-rejected, emits `NotTriggerScaleUp` for its exact UID and does not grow the eligible pool for five minutes. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Main-pool selector restricts candidate size. |
+| [CA-002][ca002] | 100 small Pods totaling worker allocatable memory cause growth; all 100 are Ready on real workers; cleanup physically shrinks. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Measured background requests make the baseline insufficient. |
 | [CA-003][ca003] | Avoid duplicate scale-ups while an operation is processing. | None | Explicit source gap: unconditionally disabled as flaky. An idle/status check is not a replacement. No passing empty/skip test added. |
-| [CA-004][ca004] | Three Pods reserve the same host port 4321, require three distinct actual Ready workers, and all become Ready. | `public_test.go` | Implemented; unexecuted. `B+2` across both owned pools, host-port admission required. |
-| [CA-005][ca005] | Required hostname anti-affinity grows from one to three Pods on three distinct workers. | `public_test.go` | Passed on `886f31f8d`; see initial live batch. `B+2`, namespace-owned constraints only. |
+| [CA-004][ca004] | Three Pods reserve the same host port 4321, require three distinct actual Ready workers, and all become Ready. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2` across both owned pools, host-port admission required. |
+| [CA-005][ca005] | Required hostname anti-affinity grows from one to three Pods on three distinct workers. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, namespace-owned constraints only. |
 | [CA-006][ca006] | A pending Pod with an EmptyDir and anti-affinity triggers growth and runs on a second worker. | `public_test.go` | Implemented; unexecuted. Local-storage scale-down protection remains enabled. |
 | [CA-007][ca007] | Remove three-worker pressure and require physical deletion back to baseline, not just desired-capacity change. | `public_test.go` | Implemented; unexecuted. `B+2`. |
 | [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Implemented; unexecuted. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
@@ -88,10 +88,10 @@ changes are introduced to fill invented source scenarios. VPA tests, GCE
 provisioning wrappers and the Kubernetes dependency's full E2E corpus are
 outside this Azure CA inventory.
 
-## Initial live batch
+## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
-dry-runs, filtered specs or passing setup hooks. All three JSON reports declare
+dry-runs, filtered specs or passing setup hooks. All six JSON reports declare
 the suite and selected scenario passed; their JUnit reports have zero failures
 and errors. Each invocation removed its test namespace and returned to actual
 main/zero `1/0` before the next case.
@@ -102,11 +102,14 @@ remained `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, image
 `localhost/cluster-autoscaler-azure:candidate-48f997f`. This is private local
 campaign identity, not an official image publication or release decision.
 
-| ID | Recorded interval, UTC | Operator wall duration | Observed result |
+| ID | Recorded interval, UTC | Recorded duration | Observed result |
 | --- | --- | --- | --- |
-| `AZ-P1-001` | 09:30:24 to 09:35:55 | 5m31s | Supplemental discovery/leadership/idle pass. Captured main VM/Node/NIC identities unchanged, actual main/zero `1/0`, two total VMs/four vCPUs. Does not cover public `AZ-001`. |
-| `CA-005` | 09:36:40.118 to 09:50:06.878 (suite) | 13m32s | Three Ready anti-affinity Pods on distinct workers, actual and desired pool counts `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Suite duration was 13m26.76s including cleanup. This growth case does not assert individual NIC deletion. |
-| `CA-001` | 09:50:41 to 09:56:12 | 5m31s | Exact-Pod rejection and five-minute no-growth pass. Measured worker allocatable memory 8,165,543,936 bytes, existing requests 52,428,800 bytes, oversized request 8,982,098,329 bytes. Actual main/zero remained `1/0`. |
+| `AZ-P1-001` | 09:30:24 to 09:35:55 | 5m31s wall | Supplemental discovery/leadership/idle pass. Captured main VM/Node/NIC identities unchanged, actual main/zero `1/0`, two total VMs/four vCPUs. Does not cover public `AZ-001`. |
+| `CA-005` | 09:36:40.118 to 09:50:06.878 (suite) | 13m32s wall | Three Ready anti-affinity Pods on distinct workers, actual and desired pool counts `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Suite duration was 13m26.76s including cleanup. This growth case does not assert individual NIC deletion. |
+| `CA-001` | 09:50:41 to 09:56:12 | 5m31s wall | Exact-Pod rejection and five-minute no-growth pass. Measured worker allocatable memory 8,165,543,936 bytes, existing requests 52,428,800 bytes, oversized request 8,982,098,329 bytes. Actual main/zero remained `1/0`. |
+| `CA-004` | 09:59:38.886 to 10:12:42.774 (suite) | 13m03.89s suite | Three Ready host-port Pods on distinct workers, actual and desired `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Cleanup restored actual baseline; this growth case does not assert individual NIC deletion. |
+| `CA-002` | 10:13:35.221 to 10:26:55.088 (suite) | 13m19.87s suite | All 100 small-memory Pods became Ready on main workers, actual and desired `1/0 -> 2/0 -> 1/0`; peak three VMs/six vCPUs. Added main instance `3`, its Node and captured NIC were physically deleted; main instance `0` survived. |
+| `AZ-001` | 10:27:31.947 to 10:40:50.644 (suite) | 13m18.70s suite | 100 CPU-requesting Pods caused actual and desired `1/0 -> 2/1 -> 1/0`; Ready test Pods used all three workers and excess demand remained Pending. Peak four VMs/eight vCPUs. Main instance `0` and zero instance `2`, their Nodes and captured NICs were physically deleted; main instance `4` survived. This is not a claim that all 100 Pods became Ready. |
 
 The sole operator preserves each run's non-secret runner log, JSON and JUnit
 under the run name below. Verified SHA-256 digests:
@@ -116,6 +119,9 @@ under the run name below. Verified SHA-256 digests:
 | `AZ-P1-001-886f31f` | `29a812fd4bc3094778e64365febbac8a8fea43158102bcd50b38247083215061` | `0e47c4485fb3e33b416122372137c9dae21766479063ac8cb55a87e410b3a4b5` | `a22d6c015f253590402adfdd28cc5fb04d02aca5de455f951d85e715751135ed` |
 | `CA-005-886f31f` | `9cda017ac0462653f09c884657deb699e64ab59912dbdd2967ca659ac8605698` | `b5eefe3a4e02207b51f2df9c95a10a3f0a90252827d474a6f0712a4535c3d56e` | `0a845290a45a89099df47818e9ee5e5f1132dd413aae7aad812ac676cebe7ca7` |
 | `CA-001-886f31f` | `4211b62753d66e627ccb9393dd7babd16eaa1664321b849c962a8d61ef54a996` | `1a2207e002c814a8840146faef5c88e962c3bce1816948893c5d371c8ef974fe` | `6b0efa724c4aeaa18653059697cc6b22459b859482179dec68df95a6d61ab229` |
+| `CA-004-886f31f` | `049bdd8eef70aaad59c4d4458f2d4a2c8a0e88fe2f5c23d02824a8cb53f7369c` | `84c8cbece41e24e486ea7e0a5a89e42c3b12b5a19e454514b1570cbb430cf3ca` | `c070863d787560b1109220ad69ac91fa7e4beda3818c58ecb35cd38b6ff3036e` |
+| `CA-002-886f31f` | `2608133d8109ff14c7664a2bd74307f36895280ba18d0eb395ac8a31d456a23f` | `26ab860cb1ddf656e0e1dab6e9420af79ad74edfcc9af057a6625f1f498e1e4c` | `9f72c43a05b7671a68b80f2c007d222cc468d91ff35b23b016b6854880df1d4a` |
+| `AZ-001-886f31f` | `de8c6773d711170abf120a31c1ef09053db3f4dcfd512627bc4322c8bd7faa88` | `18455b5c53988a67f98a75dca551ed076e2dee6032ee1f286df503331a7dc34e` | `3fa7957f76ebc89d500e5e736852f176dad876df947f61c8c70205f9d0c800be` |
 
 ## Evidence gates
 
