@@ -108,6 +108,9 @@ func (e *Environment) Controller(ctx context.Context) error {
 		if container.Image != c.ExpectedImage {
 			return fmt.Errorf("autoscaler image differs from the frozen candidate")
 		}
+		if err := checkControllerScope(container.Env, c); err != nil {
+			return err
+		}
 		if err := CheckControllerArguments(append(append([]string{}, container.Command...), container.Args...), c.DiscoveryValue); err != nil {
 			return err
 		}
@@ -127,10 +130,21 @@ func (e *Environment) Controller(ctx context.Context) error {
 		return fmt.Errorf("autoscaler must have one Ready Pod, without overlapping rollout")
 	}
 	pod := pods.Items[0]
+	found = false
 	for _, container := range pod.Spec.Containers {
-		if container.Name == c.AutoscalerContainer && container.Image != c.ExpectedImage {
+		if container.Name != c.AutoscalerContainer {
+			continue
+		}
+		found = true
+		if container.Image != c.ExpectedImage {
 			return fmt.Errorf("running autoscaler image differs from the frozen candidate")
 		}
+		if err := checkControllerScope(container.Env, c); err != nil {
+			return err
+		}
+	}
+	if !found {
+		return fmt.Errorf("running autoscaler container is missing")
 	}
 	var lease coordinationv1.Lease
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.LeaseName}, &lease); err != nil {
@@ -145,6 +159,29 @@ func (e *Environment) Controller(ctx context.Context) error {
 		return err
 	}
 	return CheckStatus(status.Data["status"], []string{c.MainPool, c.ZeroPool}, time.Now())
+}
+
+// These non-secret environment values override the provider's cloud-config file.
+func checkControllerScope(variables []corev1.EnvVar, c Config) error {
+	for name, expected := range map[string]string{
+		"ARM_SUBSCRIPTION_ID": c.SubscriptionID,
+		"ARM_RESOURCE_GROUP":  c.ResourceGroup,
+	} {
+		count := 0
+		for _, variable := range variables {
+			if variable.Name != name {
+				continue
+			}
+			count++
+			if variable.ValueFrom != nil || variable.Value != expected {
+				return fmt.Errorf("controller %s must be a literal matching the authorized scope", name)
+			}
+		}
+		if count != 1 {
+			return fmt.Errorf("controller requires exactly one literal %s", name)
+		}
+	}
+	return nil
 }
 
 // CheckControllerArguments rejects alternate discovery and weakened scale-down protections.

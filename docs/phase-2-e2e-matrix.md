@@ -88,6 +88,21 @@ outside this Azure CA inventory.
 
 ## Evidence gates
 
+The first actual rubber-duck review covered `49f159421` against the Phase 1
+base. Three concrete guard findings were accepted: bind both controller
+template and running Pod to the authorized ARM subscription/resource group,
+check effective per-pool timing/utilization overrides, and reject an oversized
+peak SKU envelope even when the zero pool is empty. These now have focused
+local regression checks. The earlier Calico init-container accounting issue
+was already repaired separately.
+
+The suggested predetermined-victim requirement was declined: public generic
+scale-down cases permit choosing any eligible worker. The assertions verify
+the actual removed, previously captured instance/Node/NIC identities, not a
+promise to delete a preselected worker. No survivor-pinning machinery was added.
+Full-diff follow-up review remains required; these dispositions are not a
+completed review cycle.
+
 Local race tests, tagged compilation and Ginkgo registration dry-runs cover
 harness logic only. Required
 custom review is coordinated separately and not yet complete. The sole live

@@ -12,6 +12,9 @@ four VMs and eight vCPUs, counted using Azure instances, requested capacity and
 SKU core counts. This fixture limitation is not a provider support restriction:
 standard pools, Flex, VMs-pool, AKS and optional scheduler/DRA configurations
 need their own qualified fixtures and execution evidence.
+Before any workload, the configured maximum of two main workers, one zero-pool
+worker and the control plane must also fit eight vCPUs. A zero-capacity pool
+with an oversized SKU is rejected before it can scale.
 
 ## Local validation
 
@@ -50,6 +53,14 @@ controller Pod. It does not read cloud Secrets or claim to detect every
 possible external controller. The operator must disable any managed or other
 autoscaler that could share these pools.
 
+Both the Deployment template and its running autoscaler container must contain
+exactly one literal `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` matching the
+environment binding. These non-secret values override the provider's cloud
+configuration file. Secret/ConfigMap references for these two values are not
+resolved by the runner: replace those entries with explicit literals when
+preparing the fixture. Credential references and identity configuration remain
+operator-owned and unchanged.
+
 Use ordinary Delete mode, preserve PDB, system-pod and local-storage
 protections, and configure scale-down delays externally to fit the test:
 `scale-down-delay-after-add`, `scale-down-unneeded-time` and
@@ -57,6 +68,11 @@ protections, and configure scale-down delays externally to fit the test:
 `scale-down-utilization-threshold` at its default `0.5`. Five-minute negative
 observations are not meaningful with longer delays. Nothing in the runner
 changes these settings or installs a Helm release.
+VMSS tags under
+`k8s.io_cluster-autoscaler_node-template_autoscaling-options_` can override
+global flags. If present, `scaledownunneededtime` must remain between zero and
+one minute and `scaledownutilizationthreshold` must equal `0.5`. Conflicting
+overrides fail preflight and subsequent observations.
 
 Create `kube-system/autoscaler-e2e-authorization` yourself. Its data must contain
 exact matching `run-id`, `subscription-id`, `resource-group` and `cluster-uid`

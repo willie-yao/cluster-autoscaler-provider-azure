@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -96,6 +97,7 @@ func newAzureCloud(ctx context.Context, cfg Config, credential azcore.TokenCrede
 func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	c := a.config
 	result := Snapshot{Pools: map[string]PoolState{}}
+	poolCores := map[string]int{}
 	pager := a.sets.NewListPager(c.ResourceGroup, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
@@ -117,6 +119,9 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
 				value(set.Tags["min"]) != min || value(set.Tags["max"]) != max {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization", name)
+			}
+			if err := checkScaleDownTags(set.Tags); err != nil {
+				return result, fmt.Errorf("VMSS %s: %w", name, err)
 			}
 			// Flex uses standalone VM resource IDs and needs a separate observation adapter.
 			if set.Properties.OrchestrationMode != nil && *set.Properties.OrchestrationMode != armcompute.OrchestrationModeUniform {
@@ -154,6 +159,7 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			}
 			result.VMs += n
 			result.VCPUs += n * cores
+			poolCores[name] = cores
 			result.Pools[name] = pool
 		}
 	}
@@ -186,10 +192,42 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	}
 	result.VMs++
 	result.VCPUs += cores
+	if err := checkPeakEnvelope(poolCores[c.MainPool], poolCores[c.ZeroPool], cores); err != nil {
+		return result, err
+	}
 	if result.VMs > MaxVMs || result.VCPUs > MaxVCPUs {
 		return result, fmt.Errorf("resource envelope exceeded: %d VMs, %d vCPUs", result.VMs, result.VCPUs)
 	}
 	return result, nil
+}
+
+func checkScaleDownTags(tags map[string]*string) error {
+	const prefix = "k8s.io_cluster-autoscaler_node-template_autoscaling-options_"
+	if raw := tags[prefix+"scaledownunneededtime"]; raw != nil {
+		duration, err := time.ParseDuration(strings.ToLower(*raw))
+		if err != nil || duration < 0 || duration > time.Minute {
+			return fmt.Errorf("per-pool scale-down unneeded time must be between zero and one minute")
+		}
+	}
+	if raw := tags[prefix+"scaledownutilizationthreshold"]; raw != nil {
+		threshold, err := strconv.ParseFloat(strings.ToLower(*raw), 64)
+		if err != nil || threshold != 0.5 {
+			return fmt.Errorf("per-pool scale-down utilization threshold must be 0.5")
+		}
+	}
+	return nil
+}
+
+func checkPeakEnvelope(mainCores, zeroCores, controlPlaneCores int) error {
+	if mainCores <= 0 || zeroCores <= 0 || controlPlaneCores <= 0 {
+		return fmt.Errorf("peak resource envelope requires each VM SKU core count")
+	}
+	// The authorized pool maxima are two main workers and one zero-pool worker.
+	peak := 2*mainCores + zeroCores + controlPlaneCores
+	if peak > MaxVCPUs {
+		return fmt.Errorf("configured pool maxima and control plane require %d vCPUs, exceeding %d", peak, MaxVCPUs)
+	}
+	return nil
 }
 
 func (a *azureCloud) NICExists(ctx context.Context, id string) (bool, error) {

@@ -19,14 +19,99 @@ package environment
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
+	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func TestCheckControllerScope(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	for _, tt := range []struct {
+		name   string
+		change func([]corev1.EnvVar) []corev1.EnvVar
+		valid  bool
+	}{
+		{name: "exact literal scope", valid: true},
+		{name: "same pool names in foreign resource group", change: func(env []corev1.EnvVar) []corev1.EnvVar {
+			env[1].Value = "foreign-workers"
+			return env
+		}},
+		{name: "foreign subscription", change: func(env []corev1.EnvVar) []corev1.EnvVar {
+			env[0].Value = "00000000-0000-0000-0000-000000000002"
+			return env
+		}},
+		{name: "unresolved secret reference", change: func(env []corev1.EnvVar) []corev1.EnvVar {
+			env[1].Value = ""
+			env[1].ValueFrom = &corev1.EnvVarSource{SecretKeyRef: &corev1.SecretKeySelector{
+				LocalObjectReference: corev1.LocalObjectReference{Name: "cloud-config"}, Key: "resourceGroup",
+			}}
+			return env
+		}},
+		{name: "missing scope", change: func(env []corev1.EnvVar) []corev1.EnvVar { return env[:1] }},
+		{name: "duplicate scope", change: func(env []corev1.EnvVar) []corev1.EnvVar { return append(env, env[1]) }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			env := []corev1.EnvVar{{Name: "ARM_SUBSCRIPTION_ID", Value: c.SubscriptionID}, {Name: "ARM_RESOURCE_GROUP", Value: c.ResourceGroup}}
+			if tt.change != nil {
+				env = tt.change(env)
+			}
+			if err := checkControllerScope(env, c); (err == nil) != tt.valid {
+				t.Fatalf("scope error=%v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestControllerChecksTemplateAndRunningPodScope(t *testing.T) {
+	t.Parallel()
+	for _, invalid := range []string{"", "template", "running Pod"} {
+		t.Run("invalid "+invalid, func(t *testing.T) {
+			c := testConfig()
+			container := corev1.Container{Name: c.AutoscalerContainer, Image: c.ExpectedImage,
+				Env: []corev1.EnvVar{{Name: "ARM_SUBSCRIPTION_ID", Value: c.SubscriptionID}, {Name: "ARM_RESOURCE_GROUP", Value: c.ResourceGroup}},
+				Args: []string{"--node-group-auto-discovery=label:cluster-autoscaler-name=" + c.DiscoveryValue,
+					"--scale-down-delay-after-add=10s", "--scale-down-unneeded-time=10s", "--unremovable-node-recheck-timeout=10s"},
+			}
+			labels := map[string]string{"app": "autoscaler"}
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: c.AutoscalerDeployment, Namespace: c.AutoscalerNamespace},
+				Spec: appsv1.DeploymentSpec{Replicas: ptr.To(int32(1)), Selector: &metav1.LabelSelector{MatchLabels: labels},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{*container.DeepCopy()}}}},
+				Status: appsv1.DeploymentStatus{ReadyReplicas: 1, UpdatedReplicas: 1},
+			}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "autoscaler-0", Namespace: c.AutoscalerNamespace, Labels: labels},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{*container.DeepCopy()}},
+				Status: corev1.PodStatus{Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}}},
+			}
+			if invalid == "template" {
+				deployment.Spec.Template.Spec.Containers[0].Env[1].Value = "foreign-workers"
+			}
+			if invalid == "running Pod" {
+				pod.Spec.Containers[0].Env[1].Value = "foreign-workers"
+			}
+			lease := &coordinationv1.Lease{ObjectMeta: metav1.ObjectMeta{Name: c.LeaseName, Namespace: c.AutoscalerNamespace},
+				Spec: coordinationv1.LeaseSpec{HolderIdentity: ptr.To(pod.Name + "_leader"), RenewTime: &metav1.MicroTime{Time: time.Now()}}}
+			status := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: "cluster-autoscaler-status", Namespace: c.AutoscalerNamespace},
+				Data: map[string]string{"status": fmt.Sprintf("time: %s\nautoscalerStatus: Running\nnodeGroups:\n- name: %s\n- name: %s\n",
+					time.Now().UTC().Format(time.RFC3339), c.MainPool, c.ZeroPool)}}
+			e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(deployment, pod, lease, status).Build()}
+			if err := e.Controller(context.Background()); (err == nil) != (invalid == "") {
+				t.Fatalf("invalid %q scope: %v", invalid, err)
+			}
+		})
+	}
+}
 
 func TestEnvironmentAuthorize(t *testing.T) {
 	t.Parallel()
