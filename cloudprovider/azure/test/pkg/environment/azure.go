@@ -104,6 +104,22 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 		if err != nil {
 			return result, azureError("list scale sets", err)
 		}
+		// Check received capacities before any per-set convergence failure.
+		for _, set := range page.Value {
+			if set == nil || set.Name == nil || set.SKU == nil || set.SKU.Capacity == nil ||
+				value(set.Tags[RunLabel]) != c.RunID || value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue {
+				continue
+			}
+			minimum, maximum := 1, 2
+			if *set.Name == c.ZeroPool {
+				minimum, maximum = 0, 1
+			} else if *set.Name != c.MainPool {
+				continue
+			}
+			if err := checkCapacity(*set.Name, int(*set.SKU.Capacity), minimum, maximum); err != nil {
+				return result, err
+			}
+		}
 		for _, set := range page.Value {
 			if set == nil || set.Name == nil || set.SKU == nil || set.SKU.Capacity == nil || set.Properties == nil {
 				return result, fmt.Errorf("incomplete VMSS observation")
@@ -119,9 +135,6 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
 				value(set.Tags["min"]) != strconv.Itoa(minimum) || value(set.Tags["max"]) != strconv.Itoa(maximum) {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization", name)
-			}
-			if err := checkCapacity(name, int(*set.SKU.Capacity), minimum, maximum); err != nil {
-				return result, err
 			}
 			if err := checkScaleDownTags(set.Tags); err != nil {
 				return result, fmt.Errorf("VMSS %s: %w", name, err)

@@ -17,11 +17,82 @@ limitations under the License.
 package environment
 
 import (
+	"bytes"
+	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
 	"testing"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/fake"
+	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"k8s.io/utils/ptr"
 )
+
+type sdkTransport func(*http.Request) (*http.Response, error)
+
+func (f sdkTransport) Do(request *http.Request) (*http.Response, error) { return f(request) }
+
+func TestAzureReadChecksReceivedPageBounds(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name         string
+		zeroCapacity int64
+		bounds       bool
+	}{
+		{name: "Updating main before over-max zero", zeroCapacity: 2, bounds: true},
+		{name: "Updating main with valid zero capacity", zeroCapacity: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			page := armcompute.VirtualMachineScaleSetListResult{
+				Value: []*armcompute.VirtualMachineScaleSet{
+					{Name: ptr.To(c.MainPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(2))},
+						Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+							"min": ptr.To("1"), "max": ptr.To("2")},
+						Properties: &armcompute.VirtualMachineScaleSetProperties{ProvisioningState: ptr.To("Updating"), Overprovision: ptr.To(false)}},
+					{Name: ptr.To(c.ZeroPool), SKU: &armcompute.SKU{Capacity: ptr.To(tt.zeroCapacity)},
+						Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+							"min": ptr.To("0"), "max": ptr.To("1")},
+						Properties: &armcompute.VirtualMachineScaleSetProperties{ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false)}},
+				},
+				NextLink: ptr.To("https://example.invalid/unread-page"),
+			}
+			body, err := json.Marshal(page)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					if requests != 1 || request.Method != http.MethodGet ||
+						request.URL.Path != c.resourcePrefix()+"/providers/Microsoft.Compute/virtualMachineScaleSets" {
+						return nil, fmt.Errorf("unexpected SDK request")
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, sets: sets}
+			_, err = cloud.Read(context.Background())
+			if err == nil || errors.Is(err, ErrBounds) != tt.bounds || requests != 1 {
+				t.Fatalf("Read error=%v, bounds=%t, SDK requests=%d", err, tt.bounds, requests)
+			}
+			if !tt.bounds && !strings.Contains(err.Error(), "VMSS main must be Succeeded") {
+				t.Fatalf("expected ordinary Updating convergence error, got %v", err)
+			}
+		})
+	}
+}
 
 func TestCheckScaleDownTags(t *testing.T) {
 	t.Parallel()
