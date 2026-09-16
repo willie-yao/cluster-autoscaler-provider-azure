@@ -1,7 +1,8 @@
 # Phase 1 migration acceptance
 
 **Phase 1 is not complete.** Local compatibility evidence does not establish
-functional acceptance on a live Kubernetes 1.37 cluster or authorize cutover.
+functional acceptance on a live stable Kubernetes v1.37.0 cluster or authorize
+cutover.
 
 ## Baseline and scope
 
@@ -14,7 +15,7 @@ functional acceptance on a live Kubernetes 1.37 cluster or authorize cutover.
 | Application module | `k8s.io/autoscaler/cluster-autoscaler` |
 | API replacement | `replace k8s.io/autoscaler/cluster-autoscaler/apis => ./apis` |
 | Kubernetes dependencies | `v1.37.0-rc.1`, with staging modules at `v0.37.0-rc.1` |
-| Exact live acceptance target | Unresolved. Agree the exact Kubernetes 1.37 version and environment before version changes or live testing. |
+| Exact live acceptance target | Stable Kubernetes `v1.37.0`; the self-managed environment, bootstrap artifacts and live-test authorization remain unresolved. |
 
 Phase 1 preserves upstream Azure functionality: standard pools, explicit VMSS
 groups, discovery, scale-from-zero, existing authentication/configuration paths,
@@ -72,8 +73,9 @@ remains unknown. This change does not redesign clients or change dependency vers
    controller's restart/reconciliation path, stop it, and settle outstanding
    operations before enabling the replacement. Different leader-election locks
    do not prevent controllers from managing the same pool.
-4. On the agreed live target, verify authentication and authorization, discovery
-   includes only intended pools, and no unexpected capacity changes occur.
+4. On stable Kubernetes `v1.37.0`, verify authentication and authorization,
+   discovery includes only intended pools, and no unexpected capacity changes
+   occur.
 5. Demonstrate bounded demand-driven growth, node registration/readiness and
    workload scheduling; repeat from zero for a VMSS pool. Demonstrate ordinary
    safe Delete-mode scale-down with eviction/PDB protections and min limits.
@@ -97,7 +99,7 @@ speed up rollback.
 | Image registry | Registry owner, image naming, signing/provenance and publishing authority |
 | Module and APIs | Downstream publication policy while retaining current identities until approved |
 | Versioning | First application/chart release, tag policy, Kubernetes support policy and upgrade guarantees |
-| Kubernetes 1.37 acceptance | Exact version, environment, credential mode, pool scope and live-test authorization |
+| Kubernetes 1.37 acceptance | Self-managed environment, bootstrap/component pins, credential mode, pool scope and live-test authorization |
 
 Changing these decisions, publishing artifacts, and performing cloud or cluster
 mutations require separate authorization.
