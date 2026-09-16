@@ -406,6 +406,7 @@ func advanceSlowStartLoop(
 	returned := <-driver.returned
 	require.Equal(t, iteration, started.iteration)
 	require.Equal(t, started.at, returned.at)
+	synctest.Wait()
 	return returned
 }
 
@@ -550,6 +551,111 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 			t.Logf(
 				"accepted failed Start timeline: terminal failure visible before iteration 2, ordinary cleanup deleted VM 1, later demand grew replacement VM 2 at %s",
 				time.Now().Sub(acceptedAt.at),
+			)
+		})
+	})
+
+	t.Run("baseline expiry removes failed charge before later scale-up", func(t *testing.T) {
+		infra := integration.SetupInfrastructure(t)
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer synctestutils.TearDown(cancel)
+
+			fixture := newSlowStartFixture(t, ctx, infra)
+			require.False(t, fixture.group.enableFastDeleteOnFailedProvisioning)
+			driver, acceptedAt := startAcceptedSlowStart(t, ctx, fixture, 24)
+			addSlowStartLateDemand(t, ctx, infra, fixture)
+
+			fixture.transport.setCompletion("Failed")
+			<-fixture.transport.terminal
+			synctest.Wait()
+			instances, err := fixture.group.Nodes(ctx)
+			require.NoError(t, err)
+			require.Len(t, instances, 2)
+			require.Equal(t, cloudprovider.InstanceRunning, instances[1].Status.State)
+			require.Nil(t, instances[1].Status.ErrorInfo)
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
+
+			for iteration := 2; iteration <= 15; iteration++ {
+				advanceSlowStartLoop(t, driver, time.Minute, iteration)
+				require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+				require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+				upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+				require.Equal(t, 1, upcoming[fixture.group.Id()])
+			}
+
+			expiredAt := advanceSlowStartLoop(t, driver, time.Minute, 16)
+			require.Equal(t, 15*time.Minute+37*time.Second, expiredAt.at.Sub(acceptedAt.at))
+			require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-1"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
+			require.False(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			require.True(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+			upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Zero(t, upcoming[fixture.group.Id()])
+
+			history := fixture.world.history()
+			nextIteration := 17
+			var deletedAt time.Time
+			for ; nextIteration <= 19 && !slices.Contains(history, "physical-delete:1"); nextIteration++ {
+				returned := advanceSlowStartLoop(t, driver, time.Minute, nextIteration)
+				history = fixture.world.history()
+				if slices.Contains(history, "physical-delete:1") {
+					deletedAt = returned.at
+				}
+			}
+			require.Equal(t, []string{"start-accepted:1", "physical-delete:1"}, history)
+			require.False(t, deletedAt.IsZero())
+			require.Len(t, fixture.world.vms(), 1)
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group), "size cache updates on the next ordinary refresh")
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+			require.True(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+
+			advanceSlowStartLoop(t, driver, time.Minute, nextIteration)
+			nextIteration++
+			history = fixture.world.history()
+			require.Equal(t, []string{"start-accepted:1", "physical-delete:1"}, history)
+			require.Equal(t, 1, slowStartTargetSize(t, fixture.group))
+			require.True(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+
+			var replacementAt time.Time
+			for ; nextIteration <= 24 && !slices.Contains(history, "grow:2"); nextIteration++ {
+				returned := advanceSlowStartLoop(t, driver, time.Minute, nextIteration)
+				history = fixture.world.history()
+				if slices.Contains(history, "grow:2") {
+					replacementAt = returned.at
+				}
+			}
+			require.Equal(t, []string{"start-accepted:1", "physical-delete:1", "grow:2"}, history)
+			require.False(t, replacementAt.IsZero())
+			require.True(t, deletedAt.Before(replacementAt))
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-2"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 1, upcoming[fixture.group.Id()])
+			statusCode, body := slowStartHealthStatus(fixture.health)
+			require.Equal(t, http.StatusOK, statusCode)
+			require.Equal(t, "OK", body)
+
+			trace, accepted := fixture.transport.snapshot()
+			require.True(t, accepted)
+			slowStartValidateTrace(t, trace, acceptedAt.at)
+			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
+			t.Logf(
+				"baseline accepted failure timeline: request expired with VM 1 still charged at %s, ordinary cleanup deleted it at %s, replacement VM 2 grew at %s",
+				expiredAt.at.Sub(acceptedAt.at),
+				deletedAt.Sub(acceptedAt.at),
+				replacementAt.Sub(acceptedAt.at),
 			)
 		})
 	})
