@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"time"
 
 	_ "go.uber.org/mock/mockgen/model" // for go:generate
@@ -41,6 +42,7 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/accountclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/diskclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/interfaceclient"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/utils"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetvmclient"
@@ -214,6 +216,29 @@ func newARMClientConfig(cfg *Config, env *azure.Environment) *azclient.ARMClient
 	return armConfig
 }
 
+func newVMSSPowerClient(
+	subscriptionID string,
+	cred azcore.TokenCredential,
+	armConfig *azclient.ARMClientConfig,
+	cloudConfig cloud.Configuration,
+	clientOptionsMutFns ...func(*policy.ClientOptions),
+) (vmssPowerClient, error) {
+	options, err := azclient.GetDefaultResourceClientOption(armConfig)
+	if err != nil {
+		return nil, err
+	}
+	options.Cloud = cloudConfig
+	if armConfig != nil && strings.EqualFold(armConfig.Cloud, utils.AzureStackCloudName) && !armConfig.DisableAzureStackCloud {
+		options.ClientOptions.APIVersion = virtualmachinescalesetvmclient.AzureStackCloudAPIVersion
+	}
+	for _, clientOptionsMutFn := range clientOptionsMutFns {
+		if clientOptionsMutFn != nil {
+			clientOptionsMutFn(options)
+		}
+	}
+	return armcomputev7.NewVirtualMachineScaleSetVMsClient(subscriptionID, cred, options)
+}
+
 func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
 	armConfig := newARMClientConfig(cfg, env)
 
@@ -314,11 +339,10 @@ func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
 	}
 	var powerClient vmssPowerClient
 	if cfg.ProviderOnlyDeallocate {
-		client, ok := clientFactory.GetVirtualMachineScaleSetVMClient().(*virtualmachinescalesetvmclient.Client)
-		if !ok {
-			return nil, fmt.Errorf("failed to access VMSS power client")
+		powerClient, err = newVMSSPowerClient(cfg.SubscriptionID, cred, armConfig, cloudConfig)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create VMSS power client: %w", err)
 		}
-		powerClient = client.VirtualMachineScaleSetVMsClient
 	}
 
 	return &azClient{
