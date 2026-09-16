@@ -101,7 +101,7 @@ type ScaleSet struct {
 
 	parkMutex  sync.Mutex
 	powerMutex sync.Mutex
-	// powerOverrides bridge accepted operations until instance view catches up.
+	// powerOverrides bridge accepted operations by VMID until instance view catches up.
 	powerOverrides map[string]bool
 }
 

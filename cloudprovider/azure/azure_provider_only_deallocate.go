@@ -18,17 +18,127 @@ package azure
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"strings"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
+	azcorepolicy "github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	apiv1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/util/retry"
+	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 )
+
+const (
+	providerOnlyDeleteReceiptAnnotation = "cluster-autoscaler.kubernetes.io/azure-provider-only-delete"
+	providerOnlyDeleteReceiptVersion    = 1
+)
+
+type providerOnlyDeleteReceipt struct {
+	Version    int    `json:"version"`
+	NodeName   string `json:"nodeName"`
+	NodeUID    string `json:"nodeUID"`
+	ProviderID string `json:"providerID"`
+	VMID       string `json:"vmID"`
+}
+
+func normalizeProviderID(providerID string) string {
+	return strings.ToLower(strings.TrimSpace(providerID))
+}
+
+func newProviderOnlyDeleteReceipt(node *apiv1.Node, vm *armcompute.VirtualMachineScaleSetVM) (providerOnlyDeleteReceipt, error) {
+	if node == nil || node.Name == "" || node.UID == "" || node.Spec.ProviderID == "" {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("incomplete Node identity for provider-only deletion")
+	}
+	if vm == nil || vm.ID == nil || vm.Properties == nil || vm.Properties.VMID == nil || *vm.Properties.VMID == "" {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("incomplete VM identity for Node %s", node.Name)
+	}
+	providerID := normalizeProviderID(node.Spec.ProviderID)
+	if providerID != normalizeProviderID(azurePrefix+*vm.ID) {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("Node %s provider ID does not match VM %s", node.Name, *vm.ID)
+	}
+	return providerOnlyDeleteReceipt{
+		Version:    providerOnlyDeleteReceiptVersion,
+		NodeName:   node.Name,
+		NodeUID:    string(node.UID),
+		ProviderID: providerID,
+		VMID:       *vm.Properties.VMID,
+	}, nil
+}
+
+func parseProviderOnlyDeleteReceipt(value string) (providerOnlyDeleteReceipt, error) {
+	var receipt providerOnlyDeleteReceipt
+	if err := json.Unmarshal([]byte(value), &receipt); err != nil {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("invalid provider-only deletion receipt: %w", err)
+	}
+	if receipt.Version != providerOnlyDeleteReceiptVersion {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("unsupported provider-only deletion receipt version %d", receipt.Version)
+	}
+	if receipt.NodeName == "" || receipt.NodeUID == "" || receipt.ProviderID == "" || receipt.VMID == "" {
+		return providerOnlyDeleteReceipt{}, fmt.Errorf("incomplete provider-only deletion receipt")
+	}
+	receipt.ProviderID = normalizeProviderID(receipt.ProviderID)
+	return receipt, nil
+}
+
+func providerOnlyDeleteReceiptValue(receipt providerOnlyDeleteReceipt) (string, error) {
+	value, err := json.Marshal(receipt)
+	if err != nil {
+		return "", fmt.Errorf("marshal provider-only deletion receipt: %w", err)
+	}
+	return string(value), nil
+}
+
+func validateProviderOnlyDeleteReceiptNode(node *apiv1.Node, receipt providerOnlyDeleteReceipt) error {
+	if node.Name != receipt.NodeName || string(node.UID) != receipt.NodeUID ||
+		normalizeProviderID(node.Spec.ProviderID) != receipt.ProviderID {
+		return fmt.Errorf("Node %s does not match provider-only deletion receipt", node.Name)
+	}
+	value, found := node.Annotations[providerOnlyDeleteReceiptAnnotation]
+	if !found {
+		return fmt.Errorf("Node %s no longer has provider-only deletion receipt", node.Name)
+	}
+	current, err := parseProviderOnlyDeleteReceipt(value)
+	if err != nil {
+		return fmt.Errorf("Node %s: %w", node.Name, err)
+	}
+	if current != receipt {
+		return fmt.Errorf("Node %s provider-only deletion receipt changed", node.Name)
+	}
+	return nil
+}
+
+func isAuthoritativelyParked(vm *armcompute.VirtualMachineScaleSetVM) bool {
+	if vm == nil || vm.Properties == nil {
+		return false
+	}
+	state := vmPowerStateUnknown
+	if vm.Properties.InstanceView != nil {
+		state = vmPowerStateFromStatuses(vm.Properties.InstanceView.Statuses)
+	}
+	return state == vmPowerStateDeallocated &&
+		ptr.Deref(vm.Properties.ProvisioningState, "") == provisioningStateSucceeded
+}
+
+func isDefiniteDeallocateRejection(err error) bool {
+	var responseError *azcore.ResponseError
+	if !errors.As(err, &responseError) {
+		return false
+	}
+	return responseError.StatusCode >= http.StatusBadRequest &&
+		responseError.StatusCode < http.StatusInternalServerError &&
+		responseError.StatusCode != http.StatusRequestTimeout &&
+		responseError.StatusCode != http.StatusConflict &&
+		responseError.StatusCode != http.StatusTooManyRequests
+}
 
 type vmssPowerClient interface {
 	BeginDeallocate(context.Context, string, string, string, *armcompute.VirtualMachineScaleSetVMsClientBeginDeallocateOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse], error)
@@ -93,6 +203,105 @@ func (s *ScaleSet) validateParking() error {
 	return nil
 }
 
+func (s *ScaleSet) ensureProviderOnlyDeleteReceipt(
+	ctx context.Context,
+	node *apiv1.Node,
+	receipt providerOnlyDeleteReceipt,
+) (bool, error) {
+	value, err := providerOnlyDeleteReceiptValue(receipt)
+	if err != nil {
+		return false, err
+	}
+	existed := false
+	err = retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.manager.kubeClient.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if current.Name != receipt.NodeName || string(current.UID) != receipt.NodeUID ||
+			normalizeProviderID(current.Spec.ProviderID) != receipt.ProviderID {
+			return fmt.Errorf("Node %s changed identity before provider-only deletion receipt", node.Name)
+		}
+		if current.Annotations != nil {
+			if existing, found := current.Annotations[providerOnlyDeleteReceiptAnnotation]; found {
+				parsed, err := parseProviderOnlyDeleteReceipt(existing)
+				if err != nil {
+					return fmt.Errorf("Node %s: %w", node.Name, err)
+				}
+				if parsed != receipt {
+					return fmt.Errorf("Node %s has a different provider-only deletion receipt", node.Name)
+				}
+				existed = true
+				return nil
+			}
+		}
+		updated := current.DeepCopy()
+		if updated.Annotations == nil {
+			updated.Annotations = make(map[string]string)
+		}
+		updated.Annotations[providerOnlyDeleteReceiptAnnotation] = value
+		_, err = s.manager.kubeClient.CoreV1().Nodes().Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+	if err != nil {
+		return false, err
+	}
+	return existed, nil
+}
+
+func (s *ScaleSet) removeProviderOnlyDeleteReceipt(ctx context.Context, receipt providerOnlyDeleteReceipt) error {
+	value, err := providerOnlyDeleteReceiptValue(receipt)
+	if err != nil {
+		return err
+	}
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current, err := s.manager.kubeClient.CoreV1().Nodes().Get(ctx, receipt.NodeName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if current.Name != receipt.NodeName || string(current.UID) != receipt.NodeUID {
+			return fmt.Errorf("Node %s changed identity before provider-only deletion receipt cleanup", receipt.NodeName)
+		}
+		existing, found := current.Annotations[providerOnlyDeleteReceiptAnnotation]
+		if !found {
+			return nil
+		}
+		if existing != value {
+			return fmt.Errorf("Node %s provider-only deletion receipt changed before cleanup", receipt.NodeName)
+		}
+		updated := current.DeepCopy()
+		delete(updated.Annotations, providerOnlyDeleteReceiptAnnotation)
+		_, err = s.manager.kubeClient.CoreV1().Nodes().Update(ctx, updated, metav1.UpdateOptions{})
+		return err
+	})
+}
+
+func (s *ScaleSet) deleteProviderOnlyReceiptNode(ctx context.Context, receipt providerOnlyDeleteReceipt) error {
+	current, err := s.manager.kubeClient.CoreV1().Nodes().Get(ctx, receipt.NodeName, metav1.GetOptions{})
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if err := validateProviderOnlyDeleteReceiptNode(current, receipt); err != nil {
+		return err
+	}
+	if current.DeletionTimestamp != nil {
+		return nil
+	}
+	err = s.manager.kubeClient.CoreV1().Nodes().Delete(ctx, current.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: ptr.To(current.UID)},
+	})
+	if err != nil && !apierrors.IsNotFound(err) {
+		return fmt.Errorf("delete stopped Node %s: %w", current.Name, err)
+	}
+	return nil
+}
+
 func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
 	s.powerMutex.Lock()
 	defer s.powerMutex.Unlock()
@@ -104,8 +313,10 @@ func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, m
 		return nil, nil, err
 	}
 	parked := make(map[string]bool, len(vms))
+	observedVMIDs := make(map[string]bool, len(vms))
 	for _, vm := range vms {
-		if vm == nil || vm.ID == nil || vm.InstanceID == nil || vm.Properties == nil {
+		if vm == nil || vm.ID == nil || vm.InstanceID == nil || vm.Properties == nil ||
+			vm.Properties.VMID == nil || *vm.Properties.VMID == "" {
 			return nil, nil, fmt.Errorf("incomplete VM instance view for %s", s.Name)
 		}
 		state := vmPowerStateUnknown
@@ -117,20 +328,21 @@ func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, m
 			provisioning != VMProvisioningStateFailed && provisioning != VMProvisioningStateDeleting {
 			return nil, nil, fmt.Errorf("unknown VM power state for %s", *vm.ID)
 		}
-		isParked := state == vmPowerStateDeallocated && provisioning == provisioningStateSucceeded
-		id := *vm.InstanceID
-		if override, ok := s.powerOverrides[id]; ok {
+		isParked := isAuthoritativelyParked(vm)
+		vmID := *vm.Properties.VMID
+		observedVMIDs[vmID] = true
+		if override, ok := s.powerOverrides[vmID]; ok {
 			if (override && isParked) || (!override && state == vmPowerStateRunning) {
-				delete(s.powerOverrides, id)
+				delete(s.powerOverrides, vmID)
 			} else {
 				isParked = override
 			}
 		}
-		parked[id] = isParked
+		parked[*vm.InstanceID] = isParked
 	}
-	for id := range s.powerOverrides {
-		if _, found := parked[id]; !found {
-			delete(s.powerOverrides, id)
+	for vmID := range s.powerOverrides {
+		if !observedVMIDs[vmID] {
+			delete(s.powerOverrides, vmID)
 		}
 	}
 	return vms, parked, nil
@@ -190,13 +402,13 @@ func (s *ScaleSet) activeTarget(parked map[string]bool) (int64, error) {
 	return physical, nil
 }
 
-func (s *ScaleSet) setPowerOverride(id string, parked bool) {
+func (s *ScaleSet) setPowerOverride(vmID string, parked bool) {
 	s.powerMutex.Lock()
 	defer s.powerMutex.Unlock()
 	if s.powerOverrides == nil {
 		s.powerOverrides = make(map[string]bool)
 	}
-	s.powerOverrides[id] = parked
+	s.powerOverrides[vmID] = parked
 }
 
 func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
@@ -217,15 +429,20 @@ func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
 	}
 	byProviderID := make(map[string]*armcompute.VirtualMachineScaleSetVM, len(vms))
 	for _, vm := range vms {
-		byProviderID[strings.ToLower(azurePrefix+*vm.ID)] = vm
+		byProviderID[normalizeProviderID(azurePrefix+*vm.ID)] = vm
 	}
-	if active-int64(len(nodes)) < int64(s.minSize) {
-		return fmt.Errorf("parking %d nodes would fall below minimum %d", len(nodes), s.minSize)
+	type parkingCandidate struct {
+		node           *apiv1.Node
+		vm             *armcompute.VirtualMachineScaleSetVM
+		receipt        providerOnlyDeleteReceipt
+		resumeDeletion bool
 	}
+	candidates := make([]parkingCandidate, 0, len(nodes))
 	seen := make(map[string]bool, len(nodes))
+	newStops := 0
 	for _, node := range nodes {
-		vm := byProviderID[strings.ToLower(node.Spec.ProviderID)]
-		if vm == nil || node.UID == "" || seen[*vm.InstanceID] || parked[*vm.InstanceID] {
+		vm := byProviderID[normalizeProviderID(node.Spec.ProviderID)]
+		if vm == nil || node.UID == "" || seen[*vm.InstanceID] {
 			return fmt.Errorf("node %s is not a unique active VM in %s", node.Name, s.Name)
 		}
 		seen[*vm.InstanceID] = true
@@ -236,29 +453,174 @@ func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
 		if current.UID != node.UID || current.Spec.ProviderID != node.Spec.ProviderID {
 			return fmt.Errorf("node %s changed identity before parking", node.Name)
 		}
-	}
-	for _, node := range nodes {
-		vm := byProviderID[strings.ToLower(node.Spec.ProviderID)]
-		poller, err := s.manager.azClient.vmssPowerClient.BeginDeallocate(ctx, s.manager.config.ResourceGroup, s.Name, *vm.InstanceID, nil)
+		receipt, err := newProviderOnlyDeleteReceipt(current, vm)
 		if err != nil {
-			return fmt.Errorf("deallocate %s: %w", node.Name, err)
+			return err
+		}
+		if value, found := current.Annotations[providerOnlyDeleteReceiptAnnotation]; found {
+			existing, err := parseProviderOnlyDeleteReceipt(value)
+			if err != nil {
+				return fmt.Errorf("Node %s: %w", current.Name, err)
+			}
+			if existing != receipt {
+				return fmt.Errorf("Node %s has a different provider-only deletion receipt", current.Name)
+			}
+			if !isAuthoritativelyParked(vm) {
+				return fmt.Errorf("Node %s has unresolved provider-only deletion receipt for running VM %s", current.Name, *vm.ID)
+			}
+			candidates = append(candidates, parkingCandidate{
+				node: current, vm: vm, receipt: receipt, resumeDeletion: true,
+			})
+			continue
+		}
+		if parked[*vm.InstanceID] {
+			return fmt.Errorf("node %s is not a unique active VM in %s", node.Name, s.Name)
+		}
+		newStops++
+		candidates = append(candidates, parkingCandidate{node: current, vm: vm, receipt: receipt})
+	}
+	if active-int64(newStops) < int64(s.minSize) {
+		return fmt.Errorf("parking %d nodes would fall below minimum %d", newStops, s.minSize)
+	}
+	for _, candidate := range candidates {
+		if candidate.resumeDeletion {
+			if err := s.deleteProviderOnlyReceiptNode(ctx, candidate.receipt); err != nil {
+				return err
+			}
+			continue
+		}
+		existed, err := s.ensureProviderOnlyDeleteReceipt(ctx, candidate.node, candidate.receipt)
+		if err != nil {
+			cleanupErr := s.removeProviderOnlyDeleteReceipt(ctx, candidate.receipt)
+			return errors.Join(fmt.Errorf("record deletion receipt for Node %s: %w", candidate.node.Name, err), cleanupErr)
+		}
+		if existed {
+			return fmt.Errorf("Node %s deletion receipt appeared before Deallocate; refusing repeated operation", candidate.node.Name)
+		}
+		beginCtx := azcorepolicy.WithRetryOptions(ctx, azcorepolicy.RetryOptions{MaxRetries: -1})
+		poller, err := s.manager.azClient.vmssPowerClient.BeginDeallocate(
+			beginCtx,
+			s.manager.config.ResourceGroup,
+			s.Name,
+			*candidate.vm.InstanceID,
+			nil,
+		)
+		if err != nil {
+			var cleanupErr error
+			if isDefiniteDeallocateRejection(err) {
+				cleanupErr = s.removeProviderOnlyDeleteReceipt(ctx, candidate.receipt)
+			}
+			return errors.Join(fmt.Errorf("deallocate %s: %w", candidate.node.Name, err), cleanupErr)
 		}
 		if poller == nil {
-			return fmt.Errorf("deallocate %s returned no operation", node.Name)
+			return fmt.Errorf("deallocate %s returned no operation", candidate.node.Name)
 		}
 		if _, err := poller.PollUntilDone(ctx, nil); err != nil {
-			return fmt.Errorf("waiting for deallocate %s: %w", node.Name, err)
+			return fmt.Errorf("waiting for deallocate %s: %w", candidate.node.Name, err)
 		}
-		s.setPowerOverride(*vm.InstanceID, true)
+		s.setPowerOverride(candidate.receipt.VMID, true)
 		// The stopped kubelet cannot race this deletion with re-registration.
-		err = s.manager.kubeClient.CoreV1().Nodes().Delete(ctx, node.Name, metav1.DeleteOptions{
-			Preconditions: &metav1.Preconditions{UID: ptr.To(node.UID)},
-		})
-		if err != nil && !apierrors.IsNotFound(err) {
-			return fmt.Errorf("delete stopped Node %s: %w", node.Name, err)
+		if err := s.deleteProviderOnlyReceiptNode(ctx, candidate.receipt); err != nil {
+			return err
 		}
 	}
 	return nil
+}
+
+func (m *AzureManager) reconcileProviderOnlyDeleteReceipts() error {
+	if m.kubeClient == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), asyncContextTimeout)
+	defer cancel()
+	nodes, err := m.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return fmt.Errorf("list Nodes for provider-only deletion recovery: %w", err)
+	}
+	byGroup := make(map[*ScaleSet][]providerOnlyDeleteReceipt)
+	var errs []error
+	for i := range nodes.Items {
+		node := &nodes.Items[i]
+		value, found := node.Annotations[providerOnlyDeleteReceiptAnnotation]
+		if !found {
+			continue
+		}
+		receipt, err := parseProviderOnlyDeleteReceipt(value)
+		if err != nil {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: %v", node.Name, err)
+			continue
+		}
+		if err := validateProviderOnlyDeleteReceiptNode(node, receipt); err != nil {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: %v", node.Name, err)
+			continue
+		}
+		group, err := m.providerOnlyGroup(receipt.ProviderID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("resolve deletion receipt for Node %s: %w", node.Name, err))
+			continue
+		}
+		if group == nil {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: no matching provider-only VMSS", node.Name)
+			continue
+		}
+		byGroup[group] = append(byGroup[group], receipt)
+	}
+	for group, receipts := range byGroup {
+		group.parkMutex.Lock()
+		errs = append(errs, group.reconcileProviderOnlyDeleteReceipts(ctx, receipts)...)
+		group.parkMutex.Unlock()
+	}
+	return errors.Join(errs...)
+}
+
+func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
+	ctx context.Context,
+	receipts []providerOnlyDeleteReceipt,
+) []error {
+	vms, _, err := s.parkingInventory()
+	if err != nil {
+		return []error{fmt.Errorf("load VM inventory for provider-only deletion recovery in %s: %w", s.Name, err)}
+	}
+	byProviderID := make(map[string]*armcompute.VirtualMachineScaleSetVM, len(vms))
+	for _, vm := range vms {
+		byProviderID[normalizeProviderID(azurePrefix+*vm.ID)] = vm
+	}
+	var errs []error
+	for _, receipt := range receipts {
+		current, err := s.manager.kubeClient.CoreV1().Nodes().Get(ctx, receipt.NodeName, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			errs = append(errs, fmt.Errorf("get Node %s for provider-only deletion recovery: %w", receipt.NodeName, err))
+			continue
+		}
+		if err := validateProviderOnlyDeleteReceiptNode(current, receipt); err != nil {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: %v", current.Name, err)
+			continue
+		}
+		if current.DeletionTimestamp != nil {
+			klog.V(3).Infof("Waiting for stopped Node %s finalizers before provider-only reuse", current.Name)
+			continue
+		}
+		vm := byProviderID[receipt.ProviderID]
+		if vm == nil {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: VM is absent from %s", current.Name, s.Name)
+			continue
+		}
+		if ptr.Deref(vm.Properties.VMID, "") != receipt.VMID {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: VM incarnation changed", current.Name)
+			continue
+		}
+		if !isAuthoritativelyParked(vm) {
+			klog.Errorf("Provider-only deletion receipt for Node %s is blocked: VM is not authoritatively deallocated", current.Name)
+			continue
+		}
+		if err := s.deleteProviderOnlyReceiptNode(ctx, receipt); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errs
 }
 
 func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
@@ -307,7 +669,7 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 			return fmt.Errorf("start %s returned no operation", *vm.ID)
 		}
 		// Accepted starts consume active bounds even if completion is uncertain.
-		s.setPowerOverride(*vm.InstanceID, false)
+		s.setPowerOverride(*vm.Properties.VMID, false)
 		if _, err := poller.PollUntilDone(ctx, nil); err != nil {
 			return fmt.Errorf("waiting for start %s: %w", *vm.ID, err)
 		}

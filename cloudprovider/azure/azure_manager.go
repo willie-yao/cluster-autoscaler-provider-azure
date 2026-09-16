@@ -239,10 +239,15 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 // Refresh is called before every main loop and can be used to dynamically update cloud provider state.
 // In particular the list of node groups returned by NodeGroups can change as a result of CloudProvider.Refresh().
 func (m *AzureManager) Refresh() error {
-	if m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
-		return nil
+	if !m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
+		if err := m.forceRefresh(); err != nil {
+			return err
+		}
 	}
-	return m.forceRefresh()
+	if m.config.ProviderOnlyDeallocate {
+		return m.reconcileProviderOnlyDeleteReceipts()
+	}
+	return nil
 }
 
 func (m *AzureManager) forceRefresh() error {

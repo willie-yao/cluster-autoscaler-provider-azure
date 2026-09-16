@@ -18,22 +18,32 @@ It requires Kubernetes `delete` permission on Nodes, which the existing Helm
 ClusterRole does not grant. No RBAC changes are included in this local spike.
 
 Normal core scale-down still chooses and drains Nodes. The provider waits for
-Azure deallocation, then deletes the old Node with a UID precondition. Parked
-VMs do not appear as expected Nodes to core, and active target is physical VMSS
-capacity minus parked instances. An ordinary scale-up starts parked VMs before
-requesting additional physical capacity. A rejected Start is an error, not
-permission to grow instead. An accepted Start whose completion fails remains
-counted through process-local bookkeeping until Azure reports running; its
-error is surfaced. General recovery of unfinished operations is not implemented.
-Stock cleanup of synthetic unregistered/failed Nodes still physically deletes
-VMs, including the default `DeleteNodes` path with its minimum-size constraints.
-Failed VM provisioning retains the existing configured error classification.
-Atomic scale-up is not implemented for this mode.
+Azure deallocation, then deletes the old Node with a UID precondition. Before
+deallocation it records one Node annotation binding the authorized Node name and
+UID to the Azure resource path and immutable VM ID. If Node deletion fails after
+the stop, ordinary provider refresh revalidates that receipt against a
+successfully deallocated instance and retries only the same UID-preconditioned
+deletion. Recovery never repeats Deallocate, adopts a replacement Node UID or
+removes finalizers. A receipt whose VM is running or has a different VM ID fails
+closed for operator diagnosis.
+
+Parked VMs do not appear as expected Nodes to core, and active target is
+physical VMSS capacity minus parked instances. An ordinary scale-up starts
+parked VMs before requesting additional physical capacity, but still refuses
+reuse while any Node conflicts by provider ID or registration name. A rejected
+Start is an error, not permission to grow instead. An accepted Start whose
+completion fails remains counted through process-local bookkeeping until Azure
+reports running; its error is surfaced. Stock cleanup of synthetic
+unregistered/failed Nodes still physically deletes VMs, including the default
+`DeleteNodes` path with its minimum-size constraints. Failed VM provisioning
+retains the existing configured error classification. Atomic scale-up is not
+implemented for this mode.
 
 A fresh manager can rediscover settled parked VMs from Azure without an old
-Node or a stored receipt. Reuse refuses a VM while its old Node still exists,
-including a Node whose deletion failed. In that case operator reconciliation
-may be needed. There is no Node metadata backup or persistent operation journal.
+Node. If the old Node remains after a completed stop, its deletion receipt lets
+a fresh manager finish only that exact deletion. A replacement UID or VM
+incarnation mismatch remains protected and blocks reuse. The receipt is not a
+general operation journal or Node metadata backup.
 
 The returning kubelet must restart and register a **new Node UID**. Its configured
 registration labels and taints, plus normal CCM initialization, must match the
