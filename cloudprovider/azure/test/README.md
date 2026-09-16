@@ -17,6 +17,9 @@ worker and the control plane must also fit eight vCPUs. A zero-capacity pool
 with an oversized SKU is rejected before it can scale.
 Positively observed envelope or per-pool capacity/instance-count breaches stop
 the observation immediately, even if a later read would converge within bounds.
+Received instance pages are counted by distinct normalized VM identity before
+NIC validation or another page request. A partial list can establish an upper
+bound breach, but the lower bound is checked only after the list is complete.
 Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
@@ -35,6 +38,28 @@ dry-run Ginkgo registration without running setup hooks or test bodies.
 They do not authenticate to Azure or contact Kubernetes. Ordinary PR CI runs
 the same target through `make test-ci`. The nested module's existing dependency
 and toolchain pins are unchanged. Compilation is not live E2E evidence.
+
+## Current and legacy workflows
+
+For the current suite, prepare the fixture and deploy Cluster Autoscaler
+separately according to the [operator contract](#operator-contract), then run
+[focused cases](#focused-execution) with `ENVIRONMENT` pointing to the
+[JSON binding](environment.example.json).
+
+The following Make targets are retained for a separate legacy AKS development
+workflow. They are not preparation or validation steps for the current
+standalone-control-plane VMSS Uniform fixture:
+
+| Target | Legacy action |
+| --- | --- |
+| `setup-cluster` | Creates AKS, ACR and workload identity. |
+| `deploy-local` | Builds and deploys CAS with the existing AKS Skaffold configuration. |
+| `deploy-local-dev` | Watches and redeploys CAS with that configuration. |
+| `validate-env` | Checks only the presence of `AZURE_SUBSCRIPTION_ID` and `AZURE_RESOURCE_GROUP`; it does not inspect the JSON binding or cluster. |
+
+Neither `setup-cluster` nor `validate-env` is a prerequisite for `e2etests`.
+The current runner takes its subscription and resource group from the JSON
+binding, not from those legacy environment-variable checks.
 
 ## Operator contract
 

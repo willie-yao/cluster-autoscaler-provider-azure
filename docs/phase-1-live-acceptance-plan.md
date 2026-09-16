@@ -17,7 +17,7 @@ resolution for the tested profile.
 | Item | Pin |
 | --- | --- |
 | Upstream Azure executable | `kubernetes/autoscaler@c85f5afed954f7ecdbfb9091da2202426806d8d8`, application directory, `-tags azure` |
-| Candidate | `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, unsigned local commit, not pushed |
+| Candidate | `48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, unsigned local commit, not yet pushed when this plan was written |
 | Extracted core | `sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac` |
 | Dependencies | Unchanged, including Kubernetes `v1.37.0-rc.1` and `replace k8s.io/autoscaler/cluster-autoscaler/apis => ./apis` |
 

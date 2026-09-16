@@ -30,6 +30,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/fake"
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
 	"k8s.io/utils/ptr"
 )
@@ -89,6 +90,131 @@ func TestAzureReadChecksReceivedPageBounds(t *testing.T) {
 			}
 			if !tt.bounds && !strings.Contains(err.Error(), "VMSS main must be Succeeded") {
 				t.Fatalf("expected ordinary Updating convergence error, got %v", err)
+			}
+		})
+	}
+}
+
+func TestAzureReadChecksReceivedInstancePageBounds(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name       string
+		pages      [][]string
+		missingNIC string
+		bounds     bool
+		requests   int
+		errorText  string
+	}{
+		{
+			name: "over-limit page before unread NextLink", pages: [][]string{{"0", "1", "2"}},
+			bounds: true, requests: 2,
+		},
+		{
+			name: "over-limit page before incomplete NIC", pages: [][]string{{"0", "1", "2"}},
+			missingNIC: "0", bounds: true, requests: 2,
+		},
+		{
+			name: "over-limit across pages", pages: [][]string{{"0", "1"}, {"2"}},
+			bounds: true, requests: 3,
+		},
+		{
+			name: "empty partial page before over-limit page", pages: [][]string{{}, {"0", "1", "2"}},
+			bounds: true, requests: 3,
+		},
+		{
+			name: "within-limit incomplete NIC", pages: [][]string{{"0", "1"}},
+			missingNIC: "0", requests: 2, errorText: "lacks identity/network evidence",
+		},
+		{
+			name: "within-limit read failure", pages: [][]string{{"0", "1"}},
+			requests: 3, errorText: "list VMSS instances",
+		},
+		{
+			name: "duplicate normalized identities across pages", pages: [][]string{{"a", "b"}, {"A", "B"}},
+			requests: 4, errorText: "list VMSS instances",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			setPath := c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachineScaleSets"
+			instancePath := setPath + "/" + c.MainPool + "/virtualMachines"
+			responses := map[string]interface{}{
+				setPath: armcompute.VirtualMachineScaleSetListResult{
+					Value: []*armcompute.VirtualMachineScaleSet{{
+						Name: ptr.To(c.MainPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(2))},
+						Tags: map[string]*string{
+							RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+							"min": ptr.To("1"), "max": ptr.To("2"),
+						},
+						Properties: &armcompute.VirtualMachineScaleSetProperties{
+							ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+						},
+					}},
+				},
+			}
+			for i, ids := range tt.pages {
+				page := armcompute.VirtualMachineScaleSetVMListResult{
+					Value:    []*armcompute.VirtualMachineScaleSetVM{},
+					NextLink: ptr.To(fmt.Sprintf("https://management.azure.com/instance-pages/%d", i+1)),
+				}
+				for _, id := range ids {
+					vm := &armcompute.VirtualMachineScaleSetVM{ID: ptr.To(c.PoolID(c.MainPool) + "/virtualMachines/" + id)}
+					if id != tt.missingNIC {
+						vm.Properties = &armcompute.VirtualMachineScaleSetVMProperties{
+							NetworkProfile: &armcompute.NetworkProfile{
+								NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{ID: ptr.To(*vm.ID + "/nic")}},
+							},
+						}
+					}
+					page.Value = append(page.Value, vm)
+				}
+				path := instancePath
+				if i > 0 {
+					path = fmt.Sprintf("/instance-pages/%d", i)
+				}
+				responses[path] = page
+			}
+			var requests int
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{
+					Retry: policy.RetryOptions{MaxRetries: -1},
+					Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+						requests++
+						if request.Method != http.MethodGet {
+							t.Fatalf("unexpected SDK method %s", request.Method)
+						}
+						status := http.StatusOK
+						response, ok := responses[request.URL.Path]
+						if !ok {
+							if request.URL.Path != fmt.Sprintf("/instance-pages/%d", len(tt.pages)) {
+								t.Fatalf("unexpected SDK path %s", request.URL.Path)
+							}
+							status = http.StatusServiceUnavailable
+							response = map[string]interface{}{"error": map[string]string{"code": "FixtureReadFailure"}}
+						}
+						body, err := json.Marshal(response)
+						if err != nil {
+							t.Fatal(err)
+						}
+						return &http.Response{
+							StatusCode: status, Header: http.Header{"Content-Type": []string{"application/json"}},
+							Body: io.NopCloser(bytes.NewReader(body)), Request: request,
+						}, nil
+					}),
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{
+				config: c, sets: factory.NewVirtualMachineScaleSetsClient(), vms: factory.NewVirtualMachineScaleSetVMsClient(),
+			}
+			_, err = cloud.Read(context.Background())
+			if err == nil || errors.Is(err, ErrBounds) != tt.bounds || requests != tt.requests {
+				t.Fatalf("Read error=%v, want bounds=%t and SDK requests=%d, got %d", err, tt.bounds, tt.requests, requests)
+			}
+			if tt.errorText != "" && !strings.Contains(err.Error(), tt.errorText) {
+				t.Fatalf("expected ordinary %q error, got %v", tt.errorText, err)
 			}
 		})
 	}

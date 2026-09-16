@@ -36,6 +36,13 @@ Intentional migration differences:
   preserve generated-client compatibility. CRD schemas are unchanged.
 - VPA packaging is restored from upstream, not excluded as another provider.
 
+Automatic Makefile versions use upstream's exact-tag/SHA/`dev` selection and
+append `-dirty` for unstaged tracked changes. Explicit `VERSION` overrides are
+used verbatim; staged-only and untracked changes do not add the suffix. The
+bootstrap omitted dirty marking, restored after the live campaigns with local
+Git/Make regression coverage. This build-metadata correction does not change
+the separately hashed historical acceptance artifacts or qualify a new runtime.
+
 ## Local and live evidence
 
 The local checks use Go 1.26.0 and unchanged dependency pins. Fake-client and
@@ -53,7 +60,7 @@ authorized live profile.
 | VMSS discovery and operation boundaries | Pass | `TestVMSSMigrationBoundaries` checks tagged pool scope, zero-size template/growth, max limits, selected non-force Delete request and already-minimum rejection. Fake cloud responses do not prove cloud effects. |
 | Core demand-driven growth and safe scale-down | Pass | `make test-core-integration` runs the pinned core's existing fake-provider lifecycle and resource-limit tests. This is not an integrated Azure-cloud E2E test. |
 | Full local race and API suites | Pass | `make test-ci GOOS=darwin`, API informer race tests, and repeated migration tests pass. API and focused migration tests were repeated ten times. |
-| Hosted CI for this change | Missing | No push or workflow run requested. Bootstrap run `34291127550` passed at the bootstrap SHA only. The existing `ct lint` version-increment gate still needs an approved chart version beyond inherited `9.59.0`. |
+| Hosted CI for this change | Separate gate | The recorded local/live evidence does not establish hosted CI for the migration branch. Bootstrap run `34291127550` passed at the bootstrap SHA only. The existing `ct lint` version-increment gate still needs an approved chart version beyond inherited `9.59.0`. |
 | Real auth, registration, scheduling, deletion, cutover and rollback | Pass | Passed for the exact bounded profile in the [Phase 1 acceptance evidence](phase-1-acceptance-evidence.md). This is not a general support claim. |
 
 The generated apply-aware fake client has a separate unresolved limitation:

@@ -147,11 +147,24 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				return result, fmt.Errorf("VMSS %s must be Succeeded with overprovision disabled", name)
 			}
 			pool := PoolState{Capacity: int(*set.SKU.Capacity), Instances: map[string]Instance{}}
+			instanceIDs := map[string]struct{}{}
 			instances := a.vms.NewListPager(c.ResourceGroup, name, nil)
 			for instances.More() {
 				page, err := instances.NextPage(ctx)
 				if err != nil {
 					return result, azureError("list VMSS instances", err)
+				}
+				// A received page can prove excess instances without complete NIC evidence.
+				for _, vm := range page.Value {
+					if vm != nil {
+						if id := normalizeID(value(vm.ID)); id != "" {
+							instanceIDs[id] = struct{}{}
+						}
+					}
+				}
+				if len(instanceIDs) > maximum {
+					return result, fmt.Errorf("%w: pool %s actual=%d exceeds maximum %d",
+						ErrBounds, name, len(instanceIDs), maximum)
 				}
 				for _, vm := range page.Value {
 					if vm == nil || vm.ID == nil || vm.Properties == nil ||

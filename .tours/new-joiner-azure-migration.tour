@@ -1,0 +1,117 @@
+{
+  "title": "Azure migration and E2E ownership",
+  "description": "A step-by-step handoff for the repository owner: distinguish preserved runtime code, Phase 1 compatibility work, Phase 2 test implementation, and the evidence behind the result. Covers the frozen evidence at 3dddfe394 and the subsequent operator-interface, instance-observation and build-version corrections on phase-2-e2e-suite. Historical live evidence remains tied to its recorded source and runtime checkpoints.",
+  "steps": [
+    {
+      "title": "1. Start with what we are actually delivering",
+      "file": "README.md",
+      "line": 1,
+      "description": "You are looking at an Azure-only executable repository, not a replacement implementation of the autoscaling algorithm. The existing bootstrap moved the application to the root and retained the extracted-core builder integration. The later work added compatibility evidence and a maintained E2E suite.\n\nFor ownership, keep three decisions separate: **Phase 1** preserves the pinned upstream Azure baseline; **Phase 2** exercises the accepted public-source scenarios; **Phase 3** will address deallocate behavior. The selected Phase 1 baseline is upstream Azure Delete mode, not full AKS-fork parity.\n\n**Watch for:** a passing test or a new repository name does not establish an official release, every Azure configuration, or an agreed deallocate architecture. The current code and evidence are on the local Phase 2 branch, not published main."
+    },
+    {
+      "title": "2. Separate the runtime adapter from the test harness",
+      "directory": "cloudprovider",
+      "description": "This directory contains the Azure provider, the small registration router, and the nested Azure test module. The runtime adapter translates Cluster Autoscaler operations into Azure behavior. The new code under `cloudprovider/azure/test` instead drives workloads and observes that behavior.\n\nThat distinction explains the large diff: many added lines are test helpers, frozen chart output, regression tests and acceptance records. Between bootstrap `c97a283f5` and the completed acceptance work, the Azure runtime and executable were not redesigned.\n\n**Watch for:** `azure_migration_test.go` is a fake-Azure boundary test; the nested Ginkgo suite is live E2E code. Neither is the provider implementation itself. Unrelated providers and the deallocate prototypes are outside this walkthrough."
+    },
+    {
+      "title": "3. Follow the executable into the extracted core",
+      "file": "main.go",
+      "line": 178,
+      "description": "`mustBuildAutoscaler` is the composition root. It creates the Kubernetes client and informer factory, passes them into `autoscalerbuilder.New(opts)`, and calls `Build(ctx)`. The builder and autoscaling loop come from `sigs.k8s.io/cluster-autoscaler`, rather than being copied back into this repository.\n\nThe blank import of `cloudprovider/router` activates Azure registration. In `cloudprovider/azure/azure_cloud_provider.go`, `init` registers `BuildAzure` and selects Azure as the default provider. This preserves the upstream Azure-only integration while eliminating the need to select unrelated providers.\n\n**Watch for:** the acceptance work did not rewrite this function. If you later need to change planning or scheduling semantics, first determine whether the responsibility belongs in extracted core or the Azure adapter; do not put it in an E2E helper."
+    },
+    {
+      "title": "4. Read module identity separately from repository location",
+      "file": "go.mod",
+      "line": 1,
+      "description": "The repository moved, but its application module intentionally remains `k8s.io/autoscaler/cluster-autoscaler`. The direct dependency on `sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac` identifies the extracted core, whose repository is `kubernetes-sigs/cluster-autoscaler`. The APIs replacement later in this file points to `./apis`.\n\nThis matters when reviewing the migration: physical relocation and Go publication identity are different changes. The root application, APIs, and nested E2E module also have separate module boundaries.\n\n**Watch for:** the dependency pins remain Kubernetes 1.37.0-rc.1 even though live acceptance used Kubernetes 1.37.0. We did not silently upgrade them. Module/API publication and supported-version policy still need an explicit maintainer decision."
+    },
+    {
+      "title": "5. See how chart compatibility became a real comparison",
+      "file": "charts/azure_compatibility_test.go",
+      "line": 35,
+      "description": "`TestAzureCompatibility` renders six populated fixtures and compares complete parsed resources with frozen upstream Azure-chart output. It requires exactly one Deployment, so a successful render that omitted the autoscaler cannot become a false compatibility pass. The VPA-enabled fixture also requires a VPA.\n\nThe restored implementation is `charts/cluster-autoscaler/templates/vpa.yaml`. It configures a VPA for the autoscaler Pod itself; it is not node autoscaling or deallocate behavior. `charts/testdata/azure-compatibility/README.md` records the oracle's exact source and one allowed field-level correction for the managed-identity Secret override.\n\n**Watch for:** do not regenerate expected files from the candidate just to make a failure pass. This is render-level packaging evidence, not live authentication or installation proof. The Helm capability version used to render the fixtures is also not a live cluster result."
+    },
+    {
+      "title": "6. Understand why generated APIs needed their own tests",
+      "file": "apis/integration/informers_test.go",
+      "line": 48,
+      "description": "This table exercises six API versions across CapacityBuffer, CapacityQuota and ProvisioningRequest. `exerciseInformer` checks serialization, typed add/update/delete events, namespace indexing, and the shared cache behind typed and legacy informer interfaces.\n\nThe bootstrap regenerated clients and added typed wrappers and scheme aliases, so these files were not merely relocated. The test makes that integration surface observable without changing the CRD schemas. This is why a successful compilation of generated code was not enough for the handoff.\n\n**Watch for:** these use simple fake trackers, not a real API server. They do not establish CRD admission or server-side apply behavior. The separately documented apply-aware fake-client limitation was not redesigned to make the migration look complete."
+    },
+    {
+      "title": "7. Distinguish Azure boundary regressions from live proof",
+      "file": "cloudprovider/azure/azure_migration_test.go",
+      "line": 37,
+      "description": "`TestVMSSMigrationBoundaries` runs real provider methods with mocked Azure clients. It checks discovery exclusion of an unowned pool, a usable zero-size template, rejection above max, the requested capacity update, and an exact non-force Delete request. `synctest` waits for the relevant asynchronous work without inventing cloud effects.\n\nThe companion `TestBuildAzureConfigMigrationPrecedence` in `azure_config_test.go` protects default/file/legacy/environment precedence and rejected conflicting authentication. These tests preserve specific existing contracts; they are not new Azure features.\n\n**Watch for:** this test proves the selected request reached the mocked SDK boundary. It does not prove a VM joined, a workload scheduled, or Azure physically deleted anything. Those required the later live campaigns."
+    },
+    {
+      "title": "8. Understand the E2E fixture before running a scenario",
+      "file": "cloudprovider/azure/test/pkg/environment/config.go",
+      "line": 43,
+      "description": "`Config` binds the runner to an explicit kubeconfig/context, cluster UID, subscription/resource group, controller, image, and two pools. `LoadConfig` rejects unknown fields and does not select a default cluster. `Validate` requires the standalone control-plane VM and the declared input shape.\n\nThe four-VM/eight-vCPU ceiling and main/zero geometry are a deliberately bounded test fixture. They were introduced for controlled acceptance, not as a restriction on all Azure provider capabilities.\n\n**Watch for:** this is not currently a drop-in managed AKS fixture. The ConfigMap marker and resource tags provide explicit operator opt-in and consistency checks, not independent access control. Do not remove the guards merely to make an unrelated environment fit; decide the supported fixture first."
+    },
+    {
+      "title": "9. Verify the controller that will react to our workloads",
+      "file": "cloudprovider/azure/test/pkg/environment/environment.go",
+      "line": 91,
+      "description": "`Controller` checks both the intended Deployment and the actual Ready Pod, then verifies the lease and reported group inventory. `checkControllerScope` requires unique literal ARM subscription/resource-group values, preventing matching pool names from disguising a controller pointed elsewhere.\n\n`NewEnvironment` and `Authorize` above this function load only the selected context and compare the real `kube-system` Namespace UID with the operator marker. The leader helper matches the pinned executable's `os.Hostname()` behavior, including the qualified host-network case. Status parsing accepts the real captured timestamp format.\n\n**Watch for:** literal ARM scope is a fixture interoperability cost: normal chart Secret references are not accepted unchanged. These checks also do not claim to discover every external autoscaler. The operator must still ensure single-controller ownership."
+    },
+    {
+      "title": "10. Observe Azure without making the test resize it",
+      "file": "cloudprovider/azure/test/pkg/environment/azure.go",
+      "line": 97,
+      "description": "`azureCloud.Read` is the Azure observation path. It validates owned VMSS resources and tags, reads actual instance/NIC identities, and counts requested capacity separately from materialized instances. It includes the control plane in the resource envelope and checks potential peak SKU demand even when a pool is empty.\n\nThe first pass over each received VMSS page checks identifiable pool capacities before an Updating entry can cause an ordinary convergence return. The instance pager separately counts distinct normalized VM identities across received pages before NIC validation or requesting another page. Only upper bounds can be established from a partial instance list; lower bounds wait for completion.\n\n**Watch for:** the instance-page correction came after both live campaigns and is covered locally, not retroactively credited to those runs. The runner does not call Azure scale APIs to manufacture an outcome. Sampled observations are not a hard cloud-spending interlock; the operator still owns budget monitoring and teardown."
+    },
+    {
+      "title": "11. Learn the difference between waiting and hiding a failure",
+      "file": "cloudprovider/azure/test/suites/scaleup/suite_test.go",
+      "line": 206,
+      "description": "`readSnapshot` turns the specific `ErrBounds` classification into `StopTrying`, so a positively observed violation cannot be retried away and replaced with a later green snapshot. Normal transport errors and incomplete convergence remain retryable. `readActiveSnapshot` adds the existing fresh-controller check for negative observations.\n\nThe setup near the top of this file creates a uniquely marked namespace only after authorization/controller/baseline checks. Its deferred cleanup verifies the original Namespace UID and run label, removes it, and waits for the 1/0 baseline. Infrastructure destruction is not part of the suite.\n\n**Watch for:** an `Eventually` success can otherwise hide an earlier invariant violation. A `Consistently` no-growth result can otherwise pass simply because the controller died. Both corrections are test-logic changes, not changes to the autoscaler."
+    },
+    {
+      "title": "12. Trace one positive test end to end",
+      "file": "cloudprovider/azure/test/suites/scaleup/public_test.go",
+      "line": 92,
+      "description": "CA-005 is a useful first case to own. It creates one Pod, confirms it is running, then raises demand to three Pods with required hostname anti-affinity. The existing worker cannot host them together, so the real autoscaler must grow the two owned pools to three workers. The test then requires three distinct actual Ready worker placements.\n\nFollow the helper names back to `workloads.go`, `waitWorkers`, `readSnapshot`, and `Snapshot.Stable`. Workload containers mostly sleep; scheduling requests and constraints, not a CPU stress loop, create the demand. Deferred namespace cleanup then makes excess workers unneeded.\n\n**Watch for:** this case proves placement-driven growth and restoration of the baseline. It does not independently assert every removed NIC. Physical-deletion helpers are used explicitly by the cases that make that stronger claim."
+    },
+    {
+      "title": "13. See what the PDB scenarios actually protect",
+      "file": "cloudprovider/azure/test/suites/scaleup/public_test.go",
+      "pattern": "^func drain\\(",
+      "description": "`drain` shares the setup for the public PDB cases. It creates three-worker pressure, places one or two movable Pods on every worker, verifies the actual distribution and disruption budget, then removes the pressure. Zero allowed disruptions must retain the captured state; a permitted disruption allows consolidation and workload recovery.\n\nThe allowed path checks a lower bound on Ready replicas at each observation and calls `waitBaselineDeleted`, which verifies actual removed instance, Node and NIC identities. The `kube-system` variant uses separately authorized synthetic objects with their own cleanup boundary, not real system addons.\n\n**Watch for:** preferred spread is not assumed to have worked; distribution is asserted. Readiness observations are sampled, not a proof of uninterrupted availability. The autoscaler may choose any eligible victim, so we did not add unnecessary predetermined-victim machinery."
+    },
+    {
+      "title": "14. Read the priority tests as corrected behavioral intent",
+      "file": "cloudprovider/azure/test/suites/scaleup/priority_test.go",
+      "line": 45,
+      "description": "CA-012 creates expendable demand in the test body, establishes one Ready and one Pending Pod, and observes no growth. This deliberately fixes the public source's misplaced deferred workload creation. Nearby cases exercise high-priority growth, real scheduler preemption, and retention or deletion of workers occupied by reservations.\n\nCA-014 waits for the old low-priority Pod to disappear after higher-priority demand arrives; the test does not directly evict it to manufacture preemption. PriorityClasses and the cutoff are prepared and verified externally rather than casually replacing global cluster objects.\n\n**Watch for:** CA-014 checks the high-priority workload before and after its observation window, not continuously inside it. The evidence wording was narrowed accordingly. The historical public runs also do not retroactively gain controller checks added in a later test checkpoint."
+    },
+    {
+      "title": "15. Understand the DRA adaptation rather than memorizing a count",
+      "file": "cloudprovider/azure/test/suites/scaleup/dra_test.go",
+      "line": 50,
+      "description": "CA-020 now requests eight one-device allocations on the main pool, requiring main 1 to 2 while zero stays 0. A ResourceClaimTemplate creates Pod-owned claims; `waitDRAWorkload` checks actual allocation results, unique driver/pool/device identities, and the matching worker ResourceSlices. CA-021 tests a five-device request against four-device workers; CA-022 verifies drain and reallocation.\n\nThe original twelve-Pod variant accidentally needed the fresh zero pool. The pinned core derives DRA templates from a real or cached node in the same group, while Azure's provider template supplies no ResourceSlices. The bounded adaptation tests the supported growth intent without adding a production feature. The driver image guard now matches the approved immutable digest.\n\n**Watch for:** this is synthetic DRA on a qualified profile, not hardware-GPU, DRA scale-from-zero, or three-worker DRA proof. The driver and its permissions are prepared outside the suite."
+    },
+    {
+      "title": "16. Learn why we test the tests",
+      "file": "cloudprovider/azure/test/suites/scaleup/observations_test.go",
+      "line": 85,
+      "description": "`TestReadSnapshotPolling` presents a bad first observation followed by a good one. A bounds breach must stop after the first read, whereas ordinary convergence or read errors must recover on the second. It covers both supported Gomega callback forms. `TestReadActiveSnapshotRejectsControllerLoss` later in this file starts healthy and then removes the Pod or makes leadership/status stale.\n\nThe Azure SDK regressions in `pkg/environment/azure_test.go` cover both VMSS desired-capacity pages and actual-instance pages through the real deserializer and pager. They distinguish known breaches from incomplete metadata/read failures, deduplicate identities across pages, and assert that no further page is fetched after a known breach. Completed fake Snapshots alone would bypass these paths.\n\n**Watch for:** race tests, fake clients, compilation and registration checks are not live Azure evidence. They are the appropriate place to test a bounds violation without intentionally overspending or touching an unauthorized resource."
+    },
+    {
+      "title": "17. Pick the correct command and ownership boundary",
+      "file": "Makefile",
+      "pattern": "^test-e2e-local:",
+      "description": "`test-e2e-local` enters the nested E2E module, and `test-ci` includes it alongside the root/provider/API/core checks. The chart comparison has its own Helm-tagged target. The nested runner Makefile distinguishes code checks from `e2etests`, which runs selected cases against a prepared, authorized environment.\n\nThe nested Makefile/README cleanup labels setup, Skaffold deployment and environment validation as legacy AKS development commands without changing their recipes. Separately, the root Makefile restores upstream automatic dirty-version marking, covered by isolated Git/Make cases in `version/version_test.go`. Explicit VERSION overrides remain verbatim; staged-only and untracked changes do not add the suffix.\n\n**Watch for:** `make help` is informational; live E2Es and legacy setup commands are not. This tour does not run commands or authorize cloud operations. Current hosted CI wiring validates local code paths, not a recurring live Azure campaign."
+    },
+    {
+      "title": "18. Read the handoff as versioned evidence, not a blanket green badge",
+      "file": "docs/phase-2-e2e-matrix.md",
+      "line": 31,
+      "description": "This table is the acceptance ledger. Phase 1's separate evidence records paired upstream/candidate behavior, image-only cutover and rollback. Phase 2 records 19 public cases on tests `886f31f...` and three corrected DRA cases on `1ac42b4...`, all against runtime `48f997f...`. The final committed evidence is `3dddfe3...`.\n\nAll 22 active public-source scenario intents have live evidence across those checkpoints. CA-003 remains source-disabled; four supplemental specs remain unexecuted. The new DRA guards are not retroactively credited to the older 19 runs, and the campaigns are not one full run of all 27 current specs. Cleanup of resources and credentials was independently checked.\n\n**Watch for:** these are public-fork scenario adaptations on qualified self-managed profiles, not internal AKS product coverage, every Azure backend, or release readiness. Keep that precision when sending the maintainer handoff."
+    },
+    {
+      "title": "19. Next steps: take ownership before expanding the work",
+      "description": "You can now review a change by asking four questions: **Is this runtime behavior, packaging, a test assertion, or operator preparation? Which exact input or failure would make this code matter? What evidence supports the claim? What remains outside the claim?** Trace one case from its JSON binding through Kubernetes workload creation, the real autoscaler, cloud observations, and owned cleanup before modifying it.\n\nFor the maintainer handoff, request a landing/review owner, acceptance of the documented evidence scope, an E2E maintenance/CI owner, and a plan for the chart-version gate. Registry, module/API publication and official support decisions remain separate. Phase 3 starts with a behavior contract, not adoption of a prototype.\n\nAvoid blanket fixture generalization, changing oracles to match the candidate, or running live commands without a fresh authorized envelope. Useful follow-up walkthroughs would focus on **Azure sizing/cache behavior** or **DRA allocation and consolidation**; neither is an automatic next task. Neither this tour nor publication of the source branch authorizes an official release."
+    }
+  ]
+}

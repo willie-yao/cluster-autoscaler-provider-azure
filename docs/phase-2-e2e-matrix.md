@@ -43,6 +43,17 @@ DRA was prepared but not installed in the first campaign because its remaining
 window was insufficient. The later campaign qualified and executed that
 profile. The earlier deferral was not an unsupported-feature or Phase 3 gate.
 
+## Post-campaign observation correction
+
+The current instance reader checks distinct VM identities across received pages
+before NIC validation or further paging. Earlier terminal-bounds coverage
+handled complete snapshots and received VMSS desired-capacity pages, but could
+lose an already-observed actual-count breach to an instance metadata/read error.
+Local SDK-response regressions cover that path, cross-page counting, duplicate
+identities and within-limit retryable errors. This correction was not executed
+in either live campaign and adds no retrospective assertion credit to the
+`886f31f8d` or `1ac42b41f` cohorts.
+
 ## Source-to-test mapping
 
 `B` means eligible baseline workers, excluding the control plane. The prepared

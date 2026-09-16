@@ -19,5 +19,6 @@ package version
 // ClusterAutoscalerVersion contains the version of Cluster Autoscaler. The
 // default placeholder value is overridden at build time via -ldflags by the
 // Makefile, which derives the value from the current git tag (or commit SHA
-// when HEAD is not tagged).
+// when HEAD is not tagged), with upstream's -dirty suffix for unstaged tracked
+// changes. Explicit VERSION overrides are used verbatim.
 var ClusterAutoscalerVersion = "dev"
