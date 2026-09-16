@@ -160,6 +160,9 @@ func CheckStatus(status string, expected []string, now time.Time) error {
 		return fmt.Errorf("decode autoscaler status: %w", err)
 	}
 	at, err := time.Parse(time.RFC3339, parsed.Time)
+	if err != nil {
+		at, err = time.Parse("2006-01-02 15:04:05.999999999 -0700 MST", parsed.Time)
+	}
 	if err != nil || now.Sub(at) > 2*time.Minute || at.After(now.Add(10*time.Second)) {
 		return fmt.Errorf("autoscaler status is missing or stale")
 	}

@@ -18,6 +18,7 @@ package environment
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -197,6 +198,38 @@ func TestCheckStatus(t *testing.T) {
 			err := CheckStatus(tt.status, []string{"main", "zero"}, now)
 			if (err == nil) != tt.valid {
 				t.Fatalf("CheckStatus = %v, valid=%v", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckStatusCapturedRuntimePayload(t *testing.T) {
+	t.Parallel()
+	payload, err := os.ReadFile("testdata/autoscaler-status.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	status := string(payload)
+	const capturedTime = "2026-09-16 09:21:08.356413974 +0000 UTC"
+	now := time.Date(2026, 9, 16, 9, 21, 9, 0, time.UTC)
+	for _, tt := range []struct {
+		name, status string
+		now          time.Time
+		valid        bool
+	}{
+		{name: "actual nanosecond timestamp", status: status, now: now, valid: true},
+		{name: "no fractional seconds", status: strings.ReplaceAll(status, capturedTime, "2026-09-16 09:21:08 +0000 UTC"), now: now, valid: true},
+		{name: "millisecond timestamp", status: strings.ReplaceAll(status, capturedTime, "2026-09-16 09:21:08.356 +0000 UTC"), now: now, valid: true},
+		{name: "RFC3339 compatibility", status: strings.ReplaceAll(status, capturedTime, "2026-09-16T09:21:08.356413974Z"), now: now, valid: true},
+		{name: "stale captured payload", status: status, now: now.Add(3 * time.Minute)},
+		{name: "future captured payload", status: status, now: now.Add(-time.Minute)},
+		{name: "malformed timestamp", status: strings.ReplaceAll(status, capturedTime, "not-a-timestamp"), now: now},
+		{name: "wrong inventory", status: strings.ReplaceAll(status, "name: zero", "name: foreign"), now: now},
+		{name: "inactive autoscaler", status: strings.ReplaceAll(status, "autoscalerStatus: Running", "autoscalerStatus: Inactive"), now: now},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckStatus(tt.status, []string{"main", "zero"}, tt.now); (err == nil) != tt.valid {
+				t.Fatalf("captured status error=%v, valid=%v", err, tt.valid)
 			}
 		})
 	}

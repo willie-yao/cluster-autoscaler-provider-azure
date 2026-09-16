@@ -88,34 +88,25 @@ outside this Azure CA inventory.
 
 ## Evidence gates
 
-The first actual rubber-duck review covered `49f159421` against the Phase 1
-base. Three concrete guard findings were accepted: bind both controller
-template and running Pod to the authorized ARM subscription/resource group,
-check effective per-pool timing/utilization overrides, and reject an oversized
-peak SKU envelope even when the zero pool is empty. These now have focused
-local regression checks. The earlier Calico init-container accounting issue
-was already repaired separately.
+The required actual `rubber-duck` review cycle completed at
+`385de9cc6670adf1b3e3ab4cdfe8e17ffd9bbdd8`, using `gpt-6-astra` through the
+working CLI. The app-hosted attempt failed its custom-agent prompt callback
+and did not perform this review. The same actual reviewer context was retained
+across all three rounds.
 
-The suggested predetermined-victim requirement was declined: public generic
-scale-down cases permit choosing any eligible worker. The assertions verify
-the actual removed, previously captured instance/Node/NIC identities, not a
-promise to delete a preselected worker. No survivor-pinning machinery was added.
-Full-diff follow-up review remains required; these dispositions are not a
-completed review cycle.
+| Round | Reviewed range | Findings and disposition |
+| --- | --- | --- |
+| 1 | Phase 1 base through `49f159421` | Three accepted guards fixed: controller ARM scope, per-pool timing/utilization overrides, and peak SKU budget before scaling. Predetermined-victim machinery declined because generic public shrink cases permit choosing any eligible worker. Actual removed VM/Node/NIC identities are still verified. |
+| 2 | Full Phase 2 diff through `e2038d649` | Earlier accepted fixes verified and scope decline accepted. One new per-pool bounds gap fixed: neither `main=3/zero=0` nor `main=1/zero=2` may pass through a valid three-worker total. |
+| 3 | Focused `e2038d649..385de9cc6` with prior context | Per-pool bounds, exact runtime hostname lease identity and split-form timing argument fixes verified. No new findings. |
 
-The second actual review covered the full Phase 2 diff through `e2038d649`.
-It verified the accepted first-round fixes and Calico helper reuse, accepted
-the predetermined-victim scope disposition, and found one additional concrete
-gap: three total workers could hide an invalid `main=3/zero=0` or
-`main=1/zero=2` distribution. Shared snapshot validation now checks each pool's
-requested and actual bounds before accepting caller-derived expectations.
-The related split-form argument guard and the live-discovered hostname lease
-repair also require the third, focused review. No completed review cycle is
-claimed yet.
+Calico init accounting and the live-discovered hostname mismatch were repaired
+independently; they were not additional first-round findings. The subsequent
+captured-status timestamp repair is an approved small compatibility fix with
+focused local regression coverage, not a new broad review cycle.
 
 Local race tests, tagged compilation and Ginkgo registration dry-runs cover
-harness logic only. Required
-custom review is coordinated separately and not yet complete. The sole live
+harness logic only. Completed code review does not establish live coverage. The sole live
 operator must record exact source/candidate/config identity, selected ID,
 JUnit result, cloud and Node observations, and cleanup outcome before any row
 changes to passed. A failed or unavailable optional profile remains failed or
@@ -142,7 +133,21 @@ The operator preserves `AZ-P1-001-retry2/report.e2e_suite.1.json`, SHA-256
 with its JUnit and runner log. Earlier inherited-credential failures are
 setup failures, not application or scenario passes. The hostname guard now
 uses the pinned runtime's exact identity forms with freshness and foreign-node
-rejection; a rerun is still required.
+rejection. The next attempt below exercised that repair.
+
+The next attempt, `AZ-P1-001-385de9c-retry1`, passed initialization and the
+repaired lease guard, then failed `BeforeEach` on status timestamp parsing at
+09:17:59 to 09:18:09 UTC. Its non-dry-run report SHA-256 is
+`c3d3cd104e7dae84155c7292216d1624d72d9266349347bd6383e3c7ac031490`.
+Again there were no passing scenarios or workload mutations. The runtime's
+actual status uses a Go `Time.String()` timestamp, not RFC3339 at the top-level
+`time` field. The parser now accepts those two formats while preserving stale,
+future and malformed timestamp rejection. The complete captured payload,
+original SHA-256
+`f3e77a1e309b33dc4dc7750d6d2786296aef2f27bfce9ddc6f89f4bad2921bd8`,
+is retained as a unit fixture with only pool names sanitized and a copyright
+header added. Its full status/group structure is exercised, not just a timestamp
+substring. A new live rerun remains required.
 
 The approved September 16, 2026 live campaign stops starting new cases at
 13:30 UTC. Every test process must return or be stopped by 14:00 UTC, and the
