@@ -53,9 +53,9 @@ not mean reviewed, executed, or passed.
 | [CA-017][ca017] | Unprocessed bypassed-scheduler demand that cannot fit triggers actual growth while remaining unprocessed. | `scheduler_test.go` | Implemented; unexecuted. Optional bypass profile, not Phase 3. |
 | [CA-018][ca018] | Bypassed-scheduler demand measured to fit stays unprocessed without growth. | `scheduler_test.go` | Implemented; unexecuted. Optional bypass profile. |
 | [CA-019][ca019] | Unprocessed demand under a unique, unconfigured scheduler name never triggers growth. | `scheduler_test.go` | Implemented; unexecuted. Can run as a baseline control without the bypass flag. |
-| [CA-020][ca020] | Twelve one-device DRA Pods cause three-worker growth with four synthetic devices per worker. | Pending | Optional-profile implementation pending; unexecuted. DRA API/driver/future-node simulation required, no GPU SKU. |
-| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event and persistent Pending behavior. | Pending | Optional-profile implementation pending; unexecuted. Not deallocate. |
-| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows Delete-mode drain and reallocation on one worker. | Pending | Optional-profile implementation pending; unexecuted. Not deallocate. |
+| [CA-020][ca020] | Twelve one-device DRA Pods cause three-worker growth; all are Ready with unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Operator-prepared DRA API/driver/future-node simulation required, no GPU SKU. |
+| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Implemented; unexecuted. Explicit optional DRA profile, not deallocate. |
+| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Implemented; unexecuted. Explicit optional DRA profile, not deallocate. |
 
 ## Supplemental and excluded coverage
 
@@ -88,13 +88,19 @@ outside this Azure CA inventory.
 
 ## Evidence gates
 
-Local race tests and tagged compilation cover harness logic only. Required
+Local race tests, tagged compilation and Ginkgo registration dry-runs cover
+harness logic only. Required
 custom review is coordinated separately and not yet complete. The sole live
 operator must record exact source/candidate/config identity, selected ID,
 JUnit result, cloud and Node observations, and cleanup outcome before any row
 changes to passed. A failed or unavailable optional profile remains failed or
 unexecuted. The initial `49f159421` demand cases are superseded by repaired
 init-container request accounting; they are not assumed to have passed.
+`df4ecc31ced963296a6ea4604457267a904be98e` is the repaired standard/public test
+checkpoint. The runtime under test remains the separate production candidate
+`48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, unless operator evidence explicitly
+records a different approved runtime. Test-suite commits and runtime provenance
+must not be conflated.
 
 Release ownership, chart `9.59.0` version increment, inherited
 `appVersion: 1.35.0`, registry/publication identity and support policy remain

@@ -21,7 +21,8 @@ make test-e2e-local # from the repository root
 make test-local
 ```
 
-These run race-enabled fake/unit checks and compile the `e2e`-tagged suite.
+These run race-enabled fake/unit checks, compile the `e2e`-tagged suite and
+dry-run Ginkgo registration without running setup hooks or test bodies.
 They do not authenticate to Azure or contact Kubernetes. Ordinary PR CI runs
 the same target through `make test-ci`. The nested module's existing dependency
 and toolchain pins are unchanged. Compilation is not live E2E evidence.
@@ -94,8 +95,13 @@ make -C cloudprovider/azure/test e2etests \
 ```
 
 The original `FOCUS` selector is also supported. Ginkgo parallel execution is
-rejected. JUnit and report entries record outcomes and redacted count/deletion
-observations. Do not treat a filtered-out or unexecuted spec as passing.
+rejected; an empty selection fails and the first failure stops further cases.
+JUnit and JSON reports record outcomes, runtime image, resource counts,
+captured VM/Node/NIC identities and physical deletion assertions, not raw API
+objects or credentials. Use a separate artifact directory for each invocation.
+Record the frozen test-suite commit separately from the runtime image's source
+commit and digest. Test-only changes do not require rebuilding the unchanged
+runtime. Do not treat a filtered-out or unexecuted spec as passing.
 
 Public-source cases use their own `AZ-001` or `CA-NNN` label. See the complete
 [source-to-test matrix](../../../docs/phase-2-e2e-matrix.md) for each scenario's
@@ -121,6 +127,22 @@ only uniquely named, run-labeled synthetic Deployment/PDB objects in
 `kube-system`. It rejects existing PDB selectors overlapping its labels and
 cleans up only the captured object names/UIDs. It never modifies actual system
 addons or global system-pod protections.
+
+`CA-020` through `CA-022` require an operator-prepared `resource.k8s.io/v1`
+synthetic DRA profile. The suite never installs its privileged addon, RBAC or
+DeviceClass. Prepare the public source's `dra-example-driver-kubeletplugin`
+DaemonSet in `kube-system`, container `plugin`, image
+`registry.k8s.io/dra-example-driver/dra-example-driver:v0.2.1`, with
+`DRIVER_NAME=gpu.example.com` and `NUM_DEVICES=4`. DeviceClass `gpu` must select
+`device.driver == 'gpu.example.com'`. Both objects must carry the run label.
+Set marker data `allow-dra-fixture: CA-020,CA-021,CA-022` only after separately
+qualifying API, kubelet and autoscaler DRA support. ResourceSlices must publish
+four devices per owned worker, with none on the control plane. This does not
+require a GPU SKU or authorize changing runtime feature gates or dependencies.
+The tests create only namespace-owned claim templates and workloads, and check
+generated claim ownership, actual allocations, device uniqueness and matching
+worker ResourceSlices. Missing future-node simulation or an incompatible driver
+is an execution failure/gap, never a reason to mark the scenarios passing.
 
 | Test ID | Assertions |
 | --- | --- |

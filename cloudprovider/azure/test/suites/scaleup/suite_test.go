@@ -73,6 +73,7 @@ var _ = BeforeSuite(func(ctx SpecContext) {
 var _ = BeforeEach(func(ctx SpecContext) {
 	Expect(env.Authorize(ctx)).To(Succeed())
 	Expect(env.Controller(ctx)).To(Succeed())
+	AddReportEntry("runtime-image", env.Config.ExpectedImage)
 	baseline := waitStable(ctx, 1, 0)
 	Expect(env.CheckWorkerIsolation(ctx, baseline, "")).To(Succeed())
 	namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
@@ -214,8 +215,20 @@ func waitStable(ctx context.Context, main, zero int) environment.Snapshot {
 		}
 		return snapshot.Stable(env.Config, main, zero)
 	}, settleTimeout, pollInterval).Should(Succeed())
-	AddReportEntry(fmt.Sprintf("stable-%d-%d", main, zero), fmt.Sprintf("main=%d zero=%d actualVMs=%d vCPUs=%d", main, zero, snapshot.VMs, snapshot.VCPUs))
+	reportSnapshot(fmt.Sprintf("stable-%d-%d", main, zero), snapshot)
 	return snapshot
+}
+
+func reportSnapshot(name string, snapshot environment.Snapshot) {
+	nodes := map[string]string{}
+	for _, node := range environment.WorkerNodes(snapshot.Nodes, env.Config) {
+		nodes[node.Name] = node.Spec.ProviderID
+	}
+	AddReportEntry(name, struct {
+		Pools           map[string]environment.PoolState
+		NodeProviderIDs map[string]string
+		VMs, VCPUs      int
+	}{snapshot.Pools, nodes, snapshot.VMs, snapshot.VCPUs})
 }
 
 func waitWorkload(ctx context.Context, name, pool string, ready, pending int) []corev1.Pod {
@@ -233,8 +246,10 @@ func waitWorkloadIn(ctx context.Context, workloadNamespace, name, pool string, r
 }
 
 func waitDeleted(ctx context.Context, before environment.Snapshot, pool string, deleted, main, zero int) {
+	var after environment.Snapshot
 	Eventually(ctx, func() error {
-		after, err := env.Read(ctx)
+		var err error
+		after, err = env.Read(ctx)
 		if err != nil {
 			return err
 		}
@@ -243,6 +258,7 @@ func waitDeleted(ctx context.Context, before environment.Snapshot, pool string, 
 		}
 		return env.Deleted(ctx, before, after, pool, deleted)
 	}, settleTimeout, pollInterval).Should(Succeed())
+	reportSnapshot("physical-delete-survivors", after)
 	AddReportEntry("physical-delete", fmt.Sprintf("pool=%s removedInstances=%d; captured instance, Node and NIC IDs absent", pool, deleted))
 }
 

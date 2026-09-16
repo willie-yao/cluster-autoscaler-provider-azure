@@ -55,17 +55,18 @@ e2etests: ## Run e2e tests (CAS must already be deployed)
 	@test -n "$(ENVIRONMENT)" || (echo "ENVIRONMENT must name an explicit JSON binding"; exit 1)
 	go run -mod=readonly github.com/onsi/ginkgo/v2/ginkgo \
 		--tags e2e \
-		-v --trace \
+		-v --trace --fail-fast --fail-on-empty \
 		--timeout $(TEST_TIMEOUT) \
 		--output-dir "$(ARTIFACTS)" \
 		--junit-report="junit.e2e_suite.1.xml" \
+		--json-report="report.e2e_suite.1.json" \
 		$(if $(FOCUS),--focus="$(FOCUS)",) \
 		$(if $(LABEL_FILTER),--label-filter="$(LABEL_FILTER)",) \
 		$(SUITE_PATH) -- \
 		-environment="$(ENVIRONMENT)"
 
 .PHONY: test-local
-test-local: ## Validate harness logic and compile E2E without cloud credentials
+test-local: ## Validate harness logic and E2E registration without cloud credentials
 	go test -mod=readonly -race ./pkg/...
 	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
 	go test -mod=readonly -tags=e2e ./suites/... -count=1 -args -ginkgo.dry-run

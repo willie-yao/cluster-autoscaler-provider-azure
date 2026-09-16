@@ -185,6 +185,7 @@ func waitWorkers(ctx context.Context, count int) environment.Snapshot {
 		}
 		return snapshot.Stable(env.Config, main, zero)
 	}, settleTimeout, pollInterval).Should(Succeed())
+	reportSnapshot("stable-workers", snapshot)
 	return snapshot
 }
 
@@ -247,6 +248,7 @@ func observeNoGrowth(ctx context.Context, name, pool string, ready, pending int)
 }
 
 func waitBaselineDeleted(ctx context.Context, before environment.Snapshot, minimumReady int, workload ...*appsv1.Deployment) {
+	var after environment.Snapshot
 	Eventually(ctx, func() error {
 		if len(workload) > 0 {
 			ready := 0
@@ -257,7 +259,8 @@ func waitBaselineDeleted(ctx context.Context, before environment.Snapshot, minim
 			}
 			Expect(ready).To(BeNumerically(">=", minimumReady), "workload continuity during drain")
 		}
-		after, err := env.Read(ctx)
+		var err error
+		after, err = env.Read(ctx)
 		if err != nil {
 			return err
 		}
@@ -271,6 +274,7 @@ func waitBaselineDeleted(ctx context.Context, before environment.Snapshot, minim
 		}
 		return nil
 	}, settleTimeout, pollInterval).Should(Succeed())
+	reportSnapshot("physical-delete-baseline", after)
 }
 
 func drain(ctx context.Context, podsPerNode, allowed int, workloadNamespace string) {
