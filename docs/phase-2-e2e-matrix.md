@@ -1,8 +1,8 @@
 # Phase 2 public-source E2E matrix
 
 **Phase 2 is not complete.** Runnable tests, required review and live execution
-are separate gates. Verified live batches record five public-source passes
-and one supplemental pass through September 16, 2026 at 10:40 UTC. Remaining
+are separate gates. Verified live batches record seven public-source passes
+and one supplemental pass through September 16, 2026 at 11:09 UTC. Remaining
 rows are not implied to pass. Phase 1 evidence does not substitute for running
 these new tests.
 
@@ -41,8 +41,8 @@ not mean reviewed, executed, or passed.
 | [CA-003][ca003] | Avoid duplicate scale-ups while an operation is processing. | None | Explicit source gap: unconditionally disabled as flaky. An idle/status check is not a replacement. No passing empty/skip test added. |
 | [CA-004][ca004] | Three Pods reserve the same host port 4321, require three distinct actual Ready workers, and all become Ready. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2` across both owned pools, host-port admission required. |
 | [CA-005][ca005] | Required hostname anti-affinity grows from one to three Pods on three distinct workers. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, namespace-owned constraints only. |
-| [CA-006][ca006] | A pending Pod with an EmptyDir and anti-affinity triggers growth and runs on a second worker. | `public_test.go` | Implemented; unexecuted. Local-storage scale-down protection remains enabled. |
-| [CA-007][ca007] | Remove three-worker pressure and require physical deletion back to baseline, not just desired-capacity change. | `public_test.go` | Implemented; unexecuted. `B+2`. |
+| [CA-006][ca006] | A pending Pod with an EmptyDir and anti-affinity triggers growth and runs on a second worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Local-storage scale-down protection remains enabled. |
+| [CA-007][ca007] | Remove three-worker pressure and require physical deletion back to baseline, not just desired-capacity change. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`. |
 | [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Implemented; unexecuted. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
 | [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged throughout five minutes. | `public_test.go` | Implemented; unexecuted. Scale-down timings are explicit and at most one minute. |
 | [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Implemented; unexecuted. `B+2`, PDB budget must replenish. |
@@ -91,7 +91,7 @@ outside this Azure CA inventory.
 ## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
-dry-runs, filtered specs or passing setup hooks. All six JSON reports declare
+dry-runs, filtered specs or passing setup hooks. All eight JSON reports declare
 the suite and selected scenario passed; their JUnit reports have zero failures
 and errors. Each invocation removed its test namespace and returned to actual
 main/zero `1/0` before the next case.
@@ -110,6 +110,8 @@ campaign identity, not an official image publication or release decision.
 | `CA-004` | 09:59:38.886 to 10:12:42.774 (suite) | 13m03.89s suite | Three Ready host-port Pods on distinct workers, actual and desired `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Cleanup restored actual baseline; this growth case does not assert individual NIC deletion. |
 | `CA-002` | 10:13:35.221 to 10:26:55.088 (suite) | 13m19.87s suite | All 100 small-memory Pods became Ready on main workers, actual and desired `1/0 -> 2/0 -> 1/0`; peak three VMs/six vCPUs. Added main instance `3`, its Node and captured NIC were physically deleted; main instance `0` survived. |
 | `AZ-001` | 10:27:31.947 to 10:40:50.644 (suite) | 13m18.70s suite | 100 CPU-requesting Pods caused actual and desired `1/0 -> 2/1 -> 1/0`; Ready test Pods used all three workers and excess demand remained Pending. Peak four VMs/eight vCPUs. Main instance `0` and zero instance `2`, their Nodes and captured NICs were physically deleted; main instance `4` survived. This is not a claim that all 100 Pods became Ready. |
+| `CA-006` | 10:41:38.259 to 10:54:47.104 (suite) | 13m08.85s suite | The EmptyDir/anti-affinity pair became Ready after actual and desired `1/0 -> 2/0` growth; peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, retaining main instance `5`. Local-storage protection remained enabled. This growth case does not separately assert individual NIC deletion. |
+| `CA-007` | 10:55:57.058 to 11:09:15.652 (suite) | 13m18.59s suite | Three-worker pressure grew actual and desired `1/0 -> 2/1`; peak four VMs/eight vCPUs. Removing pressure restored `1/0` with physical deletion of main instance `6`, zero instance `3`, their Nodes and captured NICs. Main instance `5` survived. |
 
 The sole operator preserves each run's non-secret runner log, JSON and JUnit
 under the run name below. Verified SHA-256 digests:
@@ -122,6 +124,8 @@ under the run name below. Verified SHA-256 digests:
 | `CA-004-886f31f` | `049bdd8eef70aaad59c4d4458f2d4a2c8a0e88fe2f5c23d02824a8cb53f7369c` | `84c8cbece41e24e486ea7e0a5a89e42c3b12b5a19e454514b1570cbb430cf3ca` | `c070863d787560b1109220ad69ac91fa7e4beda3818c58ecb35cd38b6ff3036e` |
 | `CA-002-886f31f` | `2608133d8109ff14c7664a2bd74307f36895280ba18d0eb395ac8a31d456a23f` | `26ab860cb1ddf656e0e1dab6e9420af79ad74edfcc9af057a6625f1f498e1e4c` | `9f72c43a05b7671a68b80f2c007d222cc468d91ff35b23b016b6854880df1d4a` |
 | `AZ-001-886f31f` | `de8c6773d711170abf120a31c1ef09053db3f4dcfd512627bc4322c8bd7faa88` | `18455b5c53988a67f98a75dca551ed076e2dee6032ee1f286df503331a7dc34e` | `3fa7957f76ebc89d500e5e736852f176dad876df947f61c8c70205f9d0c800be` |
+| `CA-006-886f31f` | `259f28769ee83488adfda1b66001d5792ddd940fcdf46dbf5b31552d28592de5` | `a0a4150c420bf5984266cfb0ef36919c561a689e285c48156eafedebc6c2d777` | `7d6080e8c6e89e26039923f42f531488a1f8f0148f199af6cb8aeb5f34160f1a` |
+| `CA-007-886f31f` | `77f46f2d166555b204818555e790acc0b327c6aef0ab6fb7fb88b6e72d145665` | `8daa7e1472369d380907bb671c065eb56394c6879e85b4090a86f1138db4bc9b` | `86bb633ff57d33e2d59281b83306957c6da916068778d87e038bc7b2f0dcf864` |
 
 ## Evidence gates
 
