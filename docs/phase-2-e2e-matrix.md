@@ -1,13 +1,16 @@
 # Phase 2 public-source E2E matrix
 
-**Full Phase 2 live completion is not established.** All 22 active public-source
-tests are implemented. The reviewed historical campaign records 19 baseline public
-passes and one supplemental pass through September 16, 2026 at 13:31 UTC.
-The three DRA cases were prepared but not installed or executed within the
-approved campaign window. They are unexecuted, not unsupported or Phase 3.
-Phase 1 evidence does not substitute for running these new tests.
-Campaign infrastructure and campaign-specific credentials were removed before
-the deadline; see [campaign closeout](#campaign-closeout).
+**All 22 active public-source scenario intents have documented live passes for
+the declared bounded profile.** The first campaign passed 19 baseline public
+cases and one supplemental case on `886f31f8d`; a separately authorized DRA
+campaign passed the remaining three public cases on corrected, reviewed tests
+`1ac42b41f`. Both used the unchanged `48f997fcd` runtime on Kubernetes `1.37.0`.
+This completes the agreed active public-inventory acceptance scope across those
+checkpoints, not a single run of all 27 current specs, internal AKS product
+compatibility, all Azure configurations or release readiness. `CA-020` is an
+explicit eight-Pod/main-only adaptation, not DRA scale-from-zero proof.
+Campaign infrastructure and credentials were removed; see
+[campaign closeout](#campaign-closeout).
 
 The accepted inventory source is
 [`Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`](https://github.com/Azure/autoscaler/commit/d892fba1cf557b26d45540f2f6418b7ae52cca46),
@@ -29,15 +32,16 @@ inventory, not comprehensive AKS product compatibility.
 
 | Coverage | Implemented tests | Live outcome |
 | --- | --- | --- |
-| Public baseline: `AZ-001`, `CA-001`, `CA-002`, `CA-004` through `CA-019` | 19 | 19 passed on the frozen candidate. |
-| Public DRA: `CA-020` through `CA-022` | 3 | Unexecuted. Prepared setup artifacts were retained, but the profile was not installed because the remaining campaign window was insufficient. |
+| Public baseline: `AZ-001`, `CA-001`, `CA-002`, `CA-004` through `CA-019` | 19 | 19 passed on tests `886f31f8d`, runtime `48f997fcd`. Not rerun with the later observation guards. |
+| Public DRA: `CA-020` through `CA-022` | 3 | Three passed on tests `1ac42b41f`, runtime `48f997fcd`, in the separately qualified DRA campaign. |
 | Source-disabled `CA-003` | 0 | Explicit disabled/flaky source gap, not a passing or skipped proxy spec. |
-| Supplemental cases | 5 | `AZ-P1-001` passed; four cases remain unexecuted in this campaign. |
+| Supplemental cases | 5 | `AZ-P1-001` passed on `886f31f8d`; four cases remain unexecuted across these campaigns. |
 
 The 22 active public tests plus five supplemental tests account for all 27
 registered specs. Registration and local fake/unit coverage are not live passes.
-The unexecuted DRA profile requires a later approved live window; it is not a
-deallocate dependency and was not found unsupported.
+DRA was prepared but not installed in the first campaign because its remaining
+window was insufficient. The later campaign qualified and executed that
+profile. The earlier deferral was not an unsupported-feature or Phase 3 gate.
 
 ## Source-to-test mapping
 
@@ -77,9 +81,9 @@ not mean reviewed, executed, or passed.
 | [CA-017][ca017] | Unprocessed bypassed-scheduler demand that cannot fit triggers actual growth while remaining unprocessed. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile, not Phase 3. |
 | [CA-018][ca018] | Bypassed-scheduler demand measured to fit stays unprocessed without growth. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Optional bypass profile. |
 | [CA-019][ca019] | Unprocessed demand under a unique, unconfigured scheduler name does not trigger growth for five minutes. | `scheduler_test.go` | Passed on `886f31f8d`; see verified live batches. Can run as a baseline control without the bypass flag. |
-| [CA-020][ca020] | Eight main-only one-device DRA Pods cause actual main/zero `1/0 -> 2/0` growth; all are Ready with eight unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Implemented; unexecuted. Bounded adaptation of the source's twelve Pods/three workers. Requires a DRA-bearing initial main worker and same-group future-node simulation, not DRA scale-from-zero or a GPU SKU. |
-| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
-| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Implemented; unexecuted. Setup prepared but not installed due campaign window, not unsupported or Phase 3. |
+| [CA-020][ca020] | Eight main-only one-device DRA Pods cause actual main/zero `1/0 -> 2/0` growth; all are Ready with eight unique, Pod-owned claim allocations matching four synthetic devices per worker. | `dra_test.go` | Passed on `1ac42b41f`. Bounded adaptation of the source's twelve Pods/three workers. Qualified with a DRA-bearing initial main worker and same-group future-node simulation, not DRA scale-from-zero or a GPU SKU. |
+| [CA-021][ca021] | A five-device claim cannot fit any four-device worker; exact-Pod no-growth event, persistent Pending behavior and actual unallocated claim. | `dra_test.go` | Passed on `1ac42b41f`. Five-minute negative window rechecks fresh controller Pod/lease/status/scope at each observation. |
+| [CA-022][ca022] | DRA anti-affinity grows to two workers, additional two-device Pods occupy both; removing pressure allows physical Delete-mode drain and actual claim reallocation on one worker. | `dra_test.go` | Passed on `1ac42b41f`. Captured VM/Node/NIC removal and survivor allocations verified in the DRA campaign. |
 
 ## Supplemental and excluded coverage
 
@@ -90,7 +94,7 @@ min/max, zero-pool identity/deletion, and an explicit PDB release transition.
 The retained ETag example is supplemental; the selected source has ETag
 unit tests, not an ETag E2E registration.
 
-Only `AZ-P1-001` was executed in this campaign. `AZ-P1-002`, `AZ-P1-003`,
+Only `AZ-P1-001` was executed across these campaigns. `AZ-P1-002`, `AZ-P1-003`,
 `AZ-P1-004` and `AZ-SUP-ETAG` remain implemented but unexecuted. Similar behavior
 observed by other public cases or the separate Phase 1 acceptance does not
 turn these four named specs into passes.
@@ -132,12 +136,15 @@ read errors remain retryable in positive waits. These are sampled checks, not
 a hard cloud-spending interlock or a continuous workload-availability monitor.
 The operator remains responsible for monitoring and cleanup.
 
-These corrections have no live execution evidence yet. The historical 19 public
-passes and one supplemental pass below remain evidence only for the assertions
-performed on `886f31f8d`, not retroactive credit for the new controller-liveness
-or terminal-bounds checks. All timed negative windows remain unchanged.
+The three DRA passes below exercised corrected tests frozen at
+`1ac42b41f848d0e8b2f590d131d4a86541641d10`. In particular, CA-021 exercised
+the controller-checked negative window. Local fake regressions, not live fault
+injection, prove controller-loss/staleness rejection and terminal handling of
+bad-then-good bounds observations. The historical 19 public passes and one
+supplemental pass remain evidence only for assertions performed on `886f31f8d`,
+not retroactive credit for the new guards. Timed negative windows are unchanged.
 
-## Verified live batches
+## Verified baseline live batch
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
 dry-runs, filtered specs or passing setup hooks. All 20 JSON reports declare
@@ -202,7 +209,59 @@ under the run name below. Verified SHA-256 digests:
 | `CA-018-886f31f` | `5de37587f7d0017f4ebdc53ac76b7da496da26df7dde9c53c1af591cef67b1bb` | `7a6b5b0fd84e23a46796226e163c27e719f89ba9ad4f055bb18a4c53471f8f95` | `53887046801f3772c982523041cda0e02cedc5e0dcac5fecd0e622d10b488bfd` |
 | `CA-019-886f31f` | `81ad26d6b60aaad82d7505bcd9539675ec5c683d296c87488f7c0e943310407b` | `29287487c4954d5db4750f1c85f8f99036aaf795a9b9ac37182f9b1042ff67b2` | `310498ca3d8f0e670aee9db0d281d0a9fd00968b9568fc419e608a7376691460` |
 
+## Verified DRA live batch
+
+The operator qualified a fresh Kubernetes `1.37.0` Linux VMSS Uniform fixture
+before running these cases, with main/zero `1/0`, an independent control plane
+and the same four-VM/eight-vCPU ceiling. The approved immutable driver image was
+`registry.k8s.io/dra-example-driver/dra-example-driver@sha256:728fbb69b99e335cfef2d1b9a3d695d2f502c58dd04f7f81143089a72e4044e3`.
+The main-only driver published four synthetic devices on the initial main
+worker. A separate smoke Pod obtained a real Pod-owned one-device claim and
+the expected CDI environment; its namespace and claims were removed before
+case execution. These qualification observations are not additional public
+scenario passes. No provider capability, runtime feature gate or dependency
+was changed for this campaign.
+
+The executed test archive matches `git archive` of
+`1ac42b41f848d0e8b2f590d131d4a86541641d10`. All three final JSON reports
+record a non-dry-run suite and exactly one passing selected `It` among 27;
+the other 26 are filtered out, not passes. Their JUnit reports have zero
+failures and errors. Runtime source remained
+`48f997fcd8d4a93f25d06837e185ea77d4e2c5cd`, with the same candidate image
+recorded in the baseline batch. Runs were sequential and each restored actual
+main/zero `1/0` before the next case.
+
+All intervals below are September 16, 2026 UTC. Suite durations include setup
+and cleanup, not just the scenario body. Operator wall intervals additionally
+include runner startup.
+
+| ID | Operator wall interval | JSON suite interval and duration | Observed result |
+| --- | --- | --- | --- |
+| `CA-020` retry | 17:34:28 to 17:47:42, 13m14s | 17:34:37.109 to 17:47:42.767, 785.657s | Actual and desired `1/0 -> 2/0 -> 1/0`, peak three VMs/six vCPUs. Eight Ready main-only Pods had eight unique Pod-owned allocations matching four devices per worker. Zero stayed at zero. Cleanup asserts actual baseline restoration, not individual NIC deletion. This is the bounded eight-Pod adaptation, not twelve Pods/three workers or DRA scale-from-zero. |
+| `CA-021` | 17:48:33 to 17:54:11, 5m38s | 17:48:40.242 to 17:54:11.835, 331.576s | The five-device Pod remained scheduler-rejected, emitted `NotTriggerScaleUp` for its exact UID and had no claim allocation. The five-minute no-growth window checked fresh controller Pod/lease/status/scope at each observation. Actual main/zero remained `1/0`, two VMs/four vCPUs; namespace and baseline cleanup passed. |
+| `CA-022` | 17:54:58 to 18:09:03, 14m05s | 17:55:03.796 to 18:09:03.505, 839.704s | Two growth Pods obtained two devices on two main workers; two protected Pods then obtained four unique devices across those workers. Removing growth pressure caused explicit captured VM/Node/NIC deletion to `1/0`. Both protected Pods recovered on the survivor with four unique device allocations matched to its ResourceSlices. Peak three VMs/six vCPUs; namespace and baseline cleanup passed. |
+
+The first `CA-020` attempt was not a pass. Its JSON suite ran from
+17:17:55.588 to 17:33:08.246 UTC and failed in `BeforeEach` because required
+run tags were missing from new operator-owned compute. It recorded only the
+runtime-image entry, before baseline acceptance or workload namespace creation;
+the scenario body was unexecuted. JUnit records one failure and zero errors.
+The operator merged the required tags on the exact authorized resources and
+revalidated the fixture before retrying the same frozen tests/runtime. This
+was an operator-fixture correction, not a source-code or runtime regression.
+
+Verified SHA-256 digests, with failed and passing attempts kept distinct:
+
+| Run | JSON report | JUnit report | Runner log |
+| --- | --- | --- | --- |
+| `CA-020-1ac42b4` (failed pre-body) | `65405f8126286d9476734d9f93ca0288e040febcf41473d49f740ee6d9c343ca` | `daa371dde3caa9d675405ffe0e2820956795135adeeb634c049ee2ea3697a75f` | `488511b17ba1b26e888081039278563661ad770b449d0299b42988a8fce8e22a` |
+| `CA-020-1ac42b4-retry1` (passed) | `5ab678bbb6d86943d3d303b0cb1c965099753f2e27d987d7f57059a8ab0f614c` | `bcf505ea1776ab495092469476d18e875213feae0cc77717ae10d034b7da71bb` | `039303abb7aac8ca6e0b3772f6f050fb43ea004afedae74fe513cf03277412cb` |
+| `CA-021-1ac42b4` (passed) | `2dbf51b77970bbf74e5bcb5260dca7b3afa48611113a5dca794a759667c542a6` | `546afb4d054a261607ee558130ddcfed772c2d361e31ed55aa7f2716afef415e` | `80ddce38cb4fa3d5405505f4a2d7952a67f44d9c8ebad9640c55a6c195796810` |
+| `CA-022-1ac42b4` (passed) | `235fbad05141d4d331d6151423f4ed72a6f71c481e6cd525ccc3fb0047d5e51a` | `7a6784518f21b0d83e44ebce0bf84865350abf6a71ccce08c1fa49095142c67a` | `d0d9a5fd50d821bd3e13f5820076f074d9a3e3e31292c098c83e7b1c02b4ed0b` |
+
 ## Campaign closeout
+
+### Baseline campaign
 
 The sole cloud operator stopped the autoscaler at 13:32:11 UTC and confirmed
 settled state at 13:32:39 and 13:33:33. Run-owned workloads, PriorityClasses and
@@ -219,7 +278,7 @@ and verified absent at 13:43:42, before the 15:00 deadline. The existing externa
 policy identity was left untouched. An independent coordinator check also
 confirmed both groups and the campaign credential directory absent.
 
-**Current campaign resource inventory is zero.** No infrastructure deletion was
+**Final baseline-campaign resource inventory is zero.** No infrastructure deletion was
 performed by the test suite. The operator cleared its deadline automation.
 The operator's estimate of approximately $2.25 covers identifiable usage only;
 traffic, operations and external policy telemetry may add charges. This is not
@@ -241,8 +300,51 @@ historical two-VM state from the final zero-resource state.
 All 102 manifest entries were verified against retained artifacts. The 60
 runner/JSON/JUnit digests for the 20 passing invocations were unchanged by the
 ledger correction. Cloud-resource, identity, network and credential details
-are intentionally omitted here. Successful campaign cleanup does not establish
-the unexecuted DRA coverage or full Phase 2 live completion.
+are intentionally omitted here. This first campaign's cleanup did not establish
+DRA coverage; that evidence comes from the separate later batch above.
+
+### DRA campaign
+
+The operator stopped the autoscaler at 18:09:42 UTC and observed settled
+main/zero `1/0`, two Ready Nodes and zero controller Pods at 18:10:20 and
+18:11:34. All bootstrap tokens were revoked and the root join template removed.
+The operator removed autoscaler resources, the authorization marker, driver
+DaemonSet/RBAC/DeviceClass, smoke objects, claims and the final ResourceSlice.
+The three campaign-created scoped role assignments were deleted and verified
+absent; external policy-managed identity outside the approved groups was
+untouched.
+
+Worker-group deletion completed at 18:15:24 and infrastructure-group deletion
+at 18:20:44. The operator's final checks reported both groups absent, zero
+run-tagged resources and zero created role assignments. Fourteen run-only
+credential/configuration files and their directory were removed, with
+directory absence recorded at 18:21:54 and final closeout reported at 18:22:24.
+The retained final resource and role-assignment JSON inventories are empty.
+The parent independently confirmed both exact approved groups absent and the
+local credential directory absent. No infrastructure teardown was performed
+by the tests.
+
+**Final DRA-campaign resource inventory is zero.** The operator cleared its
+deadline automation and completed cleanup before the separate 20:35:56 UTC
+deadline. Estimated identifiable spend was approximately $0.75, excluding
+possible traffic, operations and external policy telemetry; this is not a
+final invoice.
+
+All 60 entries in the corrected final non-secret manifest were independently
+hash-verified, including all 12 reports for the three passes and the failed
+pre-body attempt. The ledger now labels its earlier two-VM state as historical.
+Private operational configuration was hash-verified only; no account,
+identity, network or credential-path values are published here.
+
+| DRA provenance / closeout evidence | SHA-256 |
+| --- | --- |
+| Exact `1ac42b41f` test-source archive | `27e8468086bcb448cff5badbd068e3ae194ddd150c782c7f101cbc25ddfc9509` |
+| Operator run contract | `e983381cd70d37a39fa99a58df720ebb6574b033e7e7302afd586a8f6cbdfefe` |
+| Applied driver manifest | `bd24e8963a3856edc737e9017c286a9c8bc4daecdca3444eb10d7f413aed3833` |
+| Separate driver smoke fixture | `515d02fec9369d6feb314594ecdce9a86fb7a708089bc09c71a9d439e63fd2e2` |
+| Final empty run-resource, E2E-resource and role-assignment inventories (each) | `37517e5f3dc66819f61f5a7bb8ace1921282415f10551d2defa5c3eb0985b570` |
+| Corrected final DRA operator ledger | `8647b59715e082e3482f7d84793cbd35f497fa0b2e7f20edc229833c20855bb0` |
+| Corrected final 60-file DRA evidence manifest | `c5f23a2105e7d7477b16872d0cb6879a942cf97e5036e5b1d0693ce4dfd90655` |
 
 ## Evidence gates
 
@@ -262,6 +364,23 @@ Calico init accounting and the live-discovered hostname mismatch were repaired
 independently; they were not additional first-round findings. The subsequent
 captured-status timestamp repair is an approved small compatibility fix with
 focused local regression coverage, not a new broad review cycle.
+
+The separate, scope-locked pre-DRA `rubber-duck` review used `gpt-6-astra` and
+retained the same actual reviewer context for both rounds. It covered only
+the approved F1-F4 harness corrections and evidence wording, not the entire
+earlier suite or previously declined victim-selection semantics.
+
+| Pre-DRA round | Reviewed range | Findings and disposition |
+| --- | --- | --- |
+| 1 | `5ee260e240..f29c30dc9` | Bounded main-only CA-020, immutable driver pin, negative-window controller checks and shared terminal-bounds handling verified. One accepted F4 ordering gap: an earlier Updating VMSS could mask a later over-max pool on an already-received SDK page. Fixed in `1ac42b41f`; no finding declined. |
+| 2 | Focused `f29c30dc9..1ac42b41f`, retaining prior context | Received-page capacity precheck and actual SDK-response regression verified, including the valid Updating control and one-request assertion with an unread `NextLink`. No new findings; all F1-F4 corrections closed. |
+
+The focused SDK regression reproduced the old failure before the correction.
+Local validation at `1ac42b41f` passed nested race tests, the tagged fake Gomega
+and driver-image regressions, tagged compilation, exact 27-spec registration
+and package/tagged vet. Bad-then-good bounds samples fail on the first read;
+ordinary transport/convergence samples may recover. These are local
+counterexamples, not live fault-injection evidence.
 
 Local race tests, tagged compilation and Ginkgo registration dry-runs cover
 harness logic only. Completed code review does not establish live coverage. The sole live
@@ -308,9 +427,10 @@ header added. Its full status/group structure is exercised, not just a timestamp
 substring. The subsequent `AZ-P1-001` pass in the initial batch exercised the
 repair; the historical failed attempts do not become passes.
 
-The approved September 16, 2026 live campaign stops starting new cases at
-13:30 UTC. Every test process must return or be stopped by 14:00 UTC, and the
-sole cloud operator must remove all campaign infrastructure by 15:00 UTC.
+The first approved September 16, 2026 campaign stopped starting new cases at
+13:30 UTC, required every test process to return or stop by 14:00 UTC, and
+required infrastructure removal by 15:00 UTC. The DRA batch was separately
+authorized later that day; it did not extend or reuse the first campaign.
 Per-command timeouts must fit these absolute deadlines and allow cleanup.
 The suite does not schedule the campaign or extend its budget. Cancellation
 does not establish a pass; unfinished IDs remain unexecuted or interrupted.
