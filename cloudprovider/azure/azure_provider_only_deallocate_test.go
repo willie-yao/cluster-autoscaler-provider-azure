@@ -1336,7 +1336,7 @@ func TestProviderOnlyDeallocateUnownedNode(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, group)
 	has, err := provider.HasInstance(t.Context(), node)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, cloudprovider.ErrNotImplemented)
 	require.False(t, has)
 }
 

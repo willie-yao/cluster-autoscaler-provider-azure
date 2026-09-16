@@ -159,7 +159,7 @@ func (azure *AzureCloudProvider) HasInstance(ctx context.Context, node *apiv1.No
 			return false, err
 		}
 		if group == nil {
-			return false, nil
+			return azure.azureManager.azureCache.HasInstance(node.Spec.ProviderID)
 		}
 		instances, err := group.Nodes(ctx)
 		if err != nil {
