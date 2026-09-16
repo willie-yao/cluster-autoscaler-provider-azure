@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"slices"
 	"strconv"
@@ -61,7 +62,7 @@ import (
 	catest "sigs.k8s.io/cluster-autoscaler/pkg/utils/test"
 )
 
-const parkingVMSSID = "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/pool"
+const parkingVMSSID = "/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/virtualMachineScaleSets/pool"
 
 type parkingWorld struct {
 	mu           sync.Mutex
@@ -86,6 +87,63 @@ func (w *parkingWorld) history() []string {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return slices.Clone(w.events)
+}
+
+type parkingPowerTransport struct {
+	mu       sync.Mutex
+	world    *parkingWorld
+	requests []*http.Request
+}
+
+func (t *parkingPowerTransport) Do(request *http.Request) (*http.Response, error) {
+	t.mu.Lock()
+	t.requests = append(t.requests, request)
+	t.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+	if request.Method != http.MethodPost || len(parts) < 2 {
+		return nil, fmt.Errorf("unexpected power request %s %s", request.Method, request.URL.Path)
+	}
+	id, action := parts[len(parts)-2], parts[len(parts)-1]
+	instance, err := strconv.Atoi(id)
+	if err != nil {
+		return nil, fmt.Errorf("invalid VM instance %q: %w", id, err)
+	}
+	expectedPath := fmt.Sprintf("%s/virtualMachines/%s/%s", parkingVMSSID, id, action)
+	if !strings.EqualFold(request.URL.Path, expectedPath) {
+		return nil, fmt.Errorf("power request addressed %s, expected %s", request.URL.Path, expectedPath)
+	}
+
+	t.world.record(action + ":" + id)
+	t.world.mu.Lock()
+	if instance < 0 || instance >= len(t.world.states) {
+		t.world.mu.Unlock()
+		return nil, fmt.Errorf("VM instance %q is not in the authoritative inventory", id)
+	}
+	switch action {
+	case "deallocate":
+		t.world.states[instance] = vmPowerStateDeallocated
+	case "start":
+		t.world.states[instance] = vmPowerStateRunning
+	default:
+		t.world.mu.Unlock()
+		return nil, fmt.Errorf("unexpected power action %q", action)
+	}
+	t.world.mu.Unlock()
+	t.world.record(action + "-complete:" + id)
+
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"status":"Succeeded"}`)),
+		Request:    request,
+	}, nil
+}
+
+func (t *parkingPowerTransport) history() []*http.Request {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.requests)
 }
 
 func (w *parkingWorld) vmss() *armcompute.VirtualMachineScaleSet {
@@ -302,6 +360,32 @@ func checkParkingSize(t *testing.T, group *ScaleSet, want int) {
 	size, err := group.TargetSize(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, want, size)
+}
+
+func checkParkingCounts(t *testing.T, group *ScaleSet, physical, active, parked, returning int) {
+	t.Helper()
+	vms, parkedByID, err := group.parkingInventory()
+	require.NoError(t, err)
+	require.Len(t, vms, physical)
+	actualParked := 0
+	for _, isParked := range parkedByID {
+		if isParked {
+			actualParked++
+		}
+	}
+	require.Equal(t, parked, actualParked)
+	require.Equal(t, active, physical-actualParked)
+	checkParkingSize(t, group, active)
+
+	group.powerMutex.Lock()
+	actualReturning := 0
+	for _, isParked := range group.powerOverrides {
+		if !isParked {
+			actualReturning++
+		}
+	}
+	group.powerMutex.Unlock()
+	require.Equal(t, returning, actualReturning)
 }
 
 func TestProviderOnlyDeallocateStockLoop(t *testing.T) {
@@ -661,6 +745,214 @@ func TestProviderOnlyDeallocateNodeUIDAndDeleteControl(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestProviderOnlyDeallocateTransientNodeDeleteInterruption(t *testing.T) {
+	ctx := t.Context()
+	client := fake.NewClientset()
+	world := &parkingWorld{states: []string{
+		vmPowerStateRunning,
+		vmPowerStateRunning,
+		vmPowerStateRunning,
+	}}
+	var nodes []*apiv1.Node
+	for i := range 3 {
+		node := parkingNode(i, fmt.Sprintf("old-%d", i), true)
+		created, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+		require.NoError(t, err)
+		nodes = append(nodes, created)
+	}
+	demand := catest.BuildTestPod("persistent-demand", 2000, 100, catest.MarkUnschedulable())
+	demand.Spec.NodeSelector = map[string]string{"pool": "workers"}
+	_, err := client.CoreV1().Pods(demand.Namespace).Create(ctx, demand, metav1.CreateOptions{})
+	require.NoError(t, err)
+
+	deleteCalls := 0
+	client.PrependReactor("delete", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		a := action.(clienttesting.DeleteAction)
+		deleteCalls++
+		world.record(fmt.Sprintf("delete:%s:%s:attempt-%d", a.GetName(), *a.GetDeleteOptions().Preconditions.UID, deleteCalls))
+		if deleteCalls == 1 {
+			return true, nil, apierrors.NewServiceUnavailable("injected transient Node DELETE failure")
+		}
+		return false, nil, nil
+	})
+
+	provider, group := newParkingProvider(t, world, client, 1, 4, true)
+	power := &parkingPowerTransport{world: world}
+	provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+	subject := nodes[2]
+
+	err = group.DeleteNodes(ctx, []*apiv1.Node{subject})
+	require.ErrorContains(t, err, "delete stopped Node node-2")
+	require.Equal(t, metav1.StatusReasonServiceUnavailable, apierrors.ReasonForError(errors.Unwrap(err)))
+	require.Equal(t, map[string]bool{"2": true}, group.powerOverrides)
+	require.Equal(t, []string{
+		"deallocate:2",
+		"deallocate-complete:2",
+		"delete:node-2:old-2:attempt-1",
+	}, world.history())
+	require.Equal(t, provisioningStateSucceeded, ptr.Deref(world.vms()[2].Properties.ProvisioningState, ""))
+	require.Equal(t, vmPowerStateDeallocated, ptr.Deref(world.vms()[2].Properties.InstanceView.Statuses[0].Code, ""))
+	require.Equal(t, "vm-identity-2", ptr.Deref(world.vms()[2].Properties.VMID, ""))
+	require.Len(t, power.history(), 1)
+	require.Equal(t, http.MethodPost, power.history()[0].Method)
+	require.Equal(t,
+		"/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/"+
+			"virtualMachineScaleSets/pool/virtualMachines/2/deallocate",
+		power.history()[0].URL.Path,
+	)
+	require.Nil(t, power.history()[0].Body)
+	checkParkingCounts(t, group, 3, 2, 1, 0)
+	require.Empty(t, group.powerOverrides, "authoritative deallocated inventory must settle the accepted-operation override")
+
+	current, err := client.CoreV1().Nodes().Get(ctx, subject.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, subject.UID, current.UID)
+	require.ErrorContains(t, group.DeleteNodes(ctx, []*apiv1.Node{subject}), "not a unique active VM")
+	require.ErrorContains(t, group.IncreaseSize(ctx, 1), "still has Node node-2; refusing reuse")
+	require.Equal(t, 1, deleteCalls, "recovered Kubernetes DELETE must not be retried")
+	require.Len(t, power.history(), 1, "retry paths must issue neither another Deallocate nor a Start")
+	require.Equal(t, []string{
+		"deallocate:2",
+		"deallocate-complete:2",
+		"delete:node-2:old-2:attempt-1",
+	}, world.history(), "retry paths must issue neither growth nor another power operation")
+	pending, err := client.CoreV1().Pods(demand.Namespace).Get(ctx, demand.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Empty(t, pending.Spec.NodeName)
+	checkParkingCounts(t, group, 3, 2, 1, 0)
+
+	recreatedProvider, recreatedGroup := newParkingProvider(t, world, client, 1, 4, true)
+	recreatedProvider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+	require.Empty(t, recreatedGroup.powerOverrides, "provider-object recreation starts without in-memory overrides")
+	checkParkingCounts(t, recreatedGroup, 3, 2, 1, 0)
+	require.ErrorContains(t, recreatedGroup.DeleteNodes(ctx, []*apiv1.Node{subject}), "not a unique active VM")
+	require.ErrorContains(t, recreatedGroup.IncreaseSize(ctx, 1), "still has Node node-2; refusing reuse")
+	require.Equal(t, 1, deleteCalls)
+	require.Len(t, power.history(), 1)
+	current, err = client.CoreV1().Nodes().Get(ctx, subject.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, subject.UID, current.UID)
+	pending, err = client.CoreV1().Pods(demand.Namespace).Get(ctx, demand.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Empty(t, pending.Spec.NodeName)
+
+	require.NoError(t, client.CoreV1().Nodes().Delete(ctx, subject.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: ptr.To(subject.UID)},
+	}), "a direct control probe demonstrates that the one-shot API failure recovered")
+	require.Equal(t, 2, deleteCalls)
+	_, err = client.CoreV1().Nodes().Get(ctx, subject.Name, metav1.GetOptions{})
+	require.True(t, apierrors.IsNotFound(err))
+	require.Equal(t, []string{
+		"deallocate:2",
+		"deallocate-complete:2",
+		"delete:node-2:old-2:attempt-1",
+		"delete:node-2:old-2:attempt-2",
+	}, world.history())
+}
+
+func TestProviderOnlyDeallocateReplacementAfterStopInterruption(t *testing.T) {
+	ctx := t.Context()
+	client := fake.NewClientset()
+	world := &parkingWorld{states: []string{
+		vmPowerStateRunning,
+		vmPowerStateRunning,
+		vmPowerStateRunning,
+	}}
+	var nodes []*apiv1.Node
+	for i := range 3 {
+		node := parkingNode(i, fmt.Sprintf("old-%d", i), true)
+		created, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+		require.NoError(t, err)
+		nodes = append(nodes, created)
+	}
+	subject := nodes[2]
+	replacement := parkingNode(2, "replacement-2", true)
+	deleteCalls := 0
+	client.PrependReactor("delete", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+		a := action.(clienttesting.DeleteAction)
+		deleteCalls++
+		preconditions := a.GetDeleteOptions().Preconditions
+		require.NotNil(t, preconditions, "every recovery DELETE must remain UID-safe")
+		require.NotNil(t, preconditions.UID, "every recovery DELETE must remain UID-safe")
+		require.Equal(t, subject.UID, *preconditions.UID, "recovery must never adopt the replacement UID")
+		world.record(fmt.Sprintf("delete:%s:%s:attempt-%d", a.GetName(), *preconditions.UID, deleteCalls))
+		if deleteCalls == 1 {
+			require.NoError(t, client.Tracker().Update(
+				apiv1.SchemeGroupVersion.WithResource("nodes"),
+				replacement,
+				"",
+			))
+			world.record("replace:node-2:replacement-2")
+		}
+		current, err := client.Tracker().Get(apiv1.SchemeGroupVersion.WithResource("nodes"), "", a.GetName())
+		require.NoError(t, err)
+		if current.(*apiv1.Node).UID != *preconditions.UID {
+			return true, nil, apierrors.NewConflict(
+				schema.GroupResource{Resource: "nodes"},
+				a.GetName(),
+				errors.New("UID precondition failed"),
+			)
+		}
+		return false, nil, nil
+	})
+
+	provider, group := newParkingProvider(t, world, client, 1, 4, true)
+	power := &parkingPowerTransport{world: world}
+	provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+
+	err := group.DeleteNodes(ctx, []*apiv1.Node{subject})
+	require.ErrorContains(t, err, "UID precondition failed")
+	require.Equal(t, metav1.StatusReasonConflict, apierrors.ReasonForError(errors.Unwrap(err)))
+	require.Equal(t, map[string]bool{"2": true}, group.powerOverrides)
+	require.Equal(t, []string{
+		"deallocate:2",
+		"deallocate-complete:2",
+		"delete:node-2:old-2:attempt-1",
+		"replace:node-2:replacement-2",
+	}, world.history(), "the replacement appears only after the original Azure stop completed")
+	require.Equal(t, vmPowerStateDeallocated, ptr.Deref(world.vms()[2].Properties.InstanceView.Statuses[0].Code, ""))
+	require.Equal(t, provisioningStateSucceeded, ptr.Deref(world.vms()[2].Properties.ProvisioningState, ""))
+	require.Equal(t, "vm-identity-2", ptr.Deref(world.vms()[2].Properties.VMID, ""))
+	checkParkingCounts(t, group, 3, 2, 1, 0)
+	require.Empty(t, group.powerOverrides)
+
+	current, err := client.CoreV1().Nodes().Get(ctx, subject.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, replacement.UID, current.UID)
+	require.Empty(t, current.Spec.Taints)
+	require.ErrorContains(t, group.DeleteNodes(ctx, []*apiv1.Node{current}), "not a unique active VM")
+	require.ErrorContains(t, group.IncreaseSize(ctx, 1), "still has Node node-2; refusing reuse")
+	require.Equal(t, 1, deleteCalls)
+	require.Len(t, power.history(), 1, "recovery must issue neither another Deallocate nor a Start")
+
+	recreatedProvider, recreatedGroup := newParkingProvider(t, world, client, 1, 4, true)
+	recreatedProvider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+	require.Empty(t, recreatedGroup.powerOverrides)
+	checkParkingCounts(t, recreatedGroup, 3, 2, 1, 0)
+	require.ErrorContains(t, recreatedGroup.DeleteNodes(ctx, []*apiv1.Node{current}), "not a unique active VM")
+	require.ErrorContains(t, recreatedGroup.IncreaseSize(ctx, 1), "still has Node node-2; refusing reuse")
+	require.Equal(t, 1, deleteCalls)
+	require.Len(t, power.history(), 1)
+
+	err = client.CoreV1().Nodes().Delete(ctx, subject.Name, metav1.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: ptr.To(subject.UID)},
+	})
+	require.ErrorContains(t, err, "UID precondition failed")
+	require.Equal(t, 2, deleteCalls)
+	current, err = client.CoreV1().Nodes().Get(ctx, subject.Name, metav1.GetOptions{})
+	require.NoError(t, err)
+	require.Equal(t, replacement.UID, current.UID)
+	require.Empty(t, current.Spec.Taints)
+	require.Len(t, power.history(), 1)
+	require.Equal(t, []string{
+		"deallocate:2",
+		"deallocate-complete:2",
+		"delete:node-2:old-2:attempt-1",
+		"replace:node-2:replacement-2",
+		"delete:node-2:old-2:attempt-2",
+	}, world.history())
 }
 
 func TestProviderOnlyDeallocateIncoming(t *testing.T) {
