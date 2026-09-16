@@ -1,8 +1,8 @@
 # Phase 2 public-source E2E matrix
 
 **Phase 2 is not complete.** Runnable tests, required review and live execution
-are separate gates. Verified live batches record ten public-source passes
-and one supplemental pass through September 16, 2026 at 11:52 UTC. Remaining
+are separate gates. Verified live batches record twelve public-source passes
+and one supplemental pass through September 16, 2026 at 12:14 UTC. Remaining
 rows are not implied to pass. Phase 1 evidence does not substitute for running
 these new tests.
 
@@ -46,8 +46,8 @@ not mean reviewed, executed, or passed.
 | [CA-008][ca008] | One movable Pod per worker, PDB permits one disruption; drain preserves at least N-1 Ready replicas at each observation and all replicas recover on the surviving worker. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Preferred spread replaces source-wide taint mutations; actual initial distribution is asserted. |
 | [CA-009][ca009] | PDB permits no disruptions; captured instances and Ready workload remain unchanged throughout five minutes. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. Scale-down timings are explicit and at most one minute. |
 | [CA-010][ca010] | Two movable Pods per worker, one permitted disruption; multi-Pod drain preserves N-1 Ready replicas at each observation and reschedules all six. | `public_test.go` | Passed on `886f31f8d`; see verified live batches. `B+2`, PDB budget must replenish. |
-| [CA-011][ca011] | The multi-Pod PDB drain runs with synthetic test-owned kube-system objects, preserving actual system addons and protections. | `system_test.go` | Implemented; unexecuted. Explicit `allow-kube-system-fixture: CA-011` marker and no overlapping PDB selectors required. |
-| [CA-012][ca012] | Real low-priority demand is created in the test body; one Ready and one Pending expendable Pod do not grow the pool. | `priority_test.go` | Implemented; unexecuted. Corrects source bug that creates workload only in deferred cleanup. |
+| [CA-011][ca011] | The multi-Pod PDB drain runs with synthetic test-owned kube-system objects, preserving actual system addons and protections. | `system_test.go` | Passed on `886f31f8d`; see verified live batches. Explicit `allow-kube-system-fixture: CA-011` marker and no overlapping PDB selectors required. |
+| [CA-012][ca012] | Real low-priority demand is created in the test body; one Ready and one Pending expendable Pod do not grow the pool. | `priority_test.go` | Passed on `886f31f8d`; see verified live batches. Corrects source bug that creates workload only in deferred cleanup. |
 | [CA-013][ca013] | Two high-priority reservations cause growth and become Ready on distinct workers. | `priority_test.go` | Implemented; unexecuted. Operator-owned PriorityClasses/cutoff required. |
 | [CA-014][ca014] | High-priority demand actually replaces the captured low-priority Pod; low-priority replacement remains Pending without growth. | `priority_test.go` | Implemented; unexecuted. Real scheduling preemption, not direct test eviction. |
 | [CA-015][ca015] | Three expendable memory reservations do not prevent physical shrink; remaining demand is explicitly one Ready/two Pending. | `priority_test.go` | Implemented; unexecuted. `B+2`, source's running expendable workload intent retained. |
@@ -91,7 +91,7 @@ outside this Azure CA inventory.
 ## Verified live batches
 
 These are actual non-dry-run selected `It` results, not Ginkgo registration
-dry-runs, filtered specs or passing setup hooks. All eleven JSON reports declare
+dry-runs, filtered specs or passing setup hooks. All thirteen JSON reports declare
 the suite and selected scenario passed; their JUnit reports have zero failures
 and errors. Each invocation removed its test namespace and returned to actual
 main/zero `1/0` before the next case.
@@ -107,14 +107,16 @@ campaign identity, not an official image publication or release decision.
 | `AZ-P1-001` | 09:30:24 to 09:35:55 | 5m31s wall | Supplemental discovery/leadership/idle pass. Captured main VM/Node/NIC identities unchanged, actual main/zero `1/0`, two total VMs/four vCPUs. Does not cover public `AZ-001`. |
 | `CA-005` | 09:36:40.118 to 09:50:06.878 (suite) | 13m32s wall | Three Ready anti-affinity Pods on distinct workers, actual and desired pool counts `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Suite duration was 13m26.76s including cleanup. This growth case does not assert individual NIC deletion. |
 | `CA-001` | 09:50:41 to 09:56:12 | 5m31s wall | Exact-Pod rejection and five-minute no-growth pass. Measured worker allocatable memory 8,165,543,936 bytes, existing requests 52,428,800 bytes, oversized request 8,982,098,329 bytes. Actual main/zero remained `1/0`. |
-| `CA-004` | 09:59:38.886 to 10:12:42.774 (suite) | 13m03.89s suite | Three Ready host-port Pods on distinct workers, actual and desired `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Cleanup restored actual baseline; this growth case does not assert individual NIC deletion. |
-| `CA-002` | 10:13:35.221 to 10:26:55.088 (suite) | 13m19.87s suite | All 100 small-memory Pods became Ready on main workers, actual and desired `1/0 -> 2/0 -> 1/0`; peak three VMs/six vCPUs. Added main instance `3`, its Node and captured NIC were physically deleted; main instance `0` survived. |
-| `AZ-001` | 10:27:31.947 to 10:40:50.644 (suite) | 13m18.70s suite | 100 CPU-requesting Pods caused actual and desired `1/0 -> 2/1 -> 1/0`; Ready test Pods used all three workers and excess demand remained Pending. Peak four VMs/eight vCPUs. Main instance `0` and zero instance `2`, their Nodes and captured NICs were physically deleted; main instance `4` survived. This is not a claim that all 100 Pods became Ready. |
-| `CA-006` | 10:41:38.259 to 10:54:47.104 (suite) | 13m08.85s suite | The EmptyDir/anti-affinity pair became Ready after actual and desired `1/0 -> 2/0` growth; peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, retaining main instance `5`. Local-storage protection remained enabled. This growth case does not separately assert individual NIC deletion. |
-| `CA-007` | 10:55:57.058 to 11:09:15.652 (suite) | 13m18.59s suite | Three-worker pressure grew actual and desired `1/0 -> 2/1`; peak four VMs/eight vCPUs. Removing pressure restored `1/0` with physical deletion of main instance `6`, zero instance `3`, their Nodes and captured NICs. Main instance `5` survived. |
-| `CA-008` | 11:09:55.826 to 11:23:58.011 (suite) | 14m02.18s suite | Three movable Pods initially occupied separate workers. The one-disruption PDB drain kept at least two Ready at every observation and all three recovered on main instance `5`. Main instance `7`, zero instance `4`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
-| `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 12m56.38s suite | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
-| `CA-010` | 11:37:59.182 to 11:52:00.949 (suite) | 14m01.77s suite | Six movable Pods initially occupied three workers, two per worker. The one-disruption drain kept at least five Ready at every observation and all six recovered on main instance `5`. Main instance `9`, zero instance `6`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
+| `CA-004` | 09:59:38.886 to 10:12:42.774 (suite) | 13m09s wall | Three Ready host-port Pods on distinct workers, actual and desired `1/0 -> 2/1 -> 1/0`; peak four VMs/eight vCPUs. Cleanup restored actual baseline; this growth case does not assert individual NIC deletion. |
+| `CA-002` | 10:13:35.221 to 10:26:55.088 (suite) | 13m25s wall | All 100 small-memory Pods became Ready on main workers, actual and desired `1/0 -> 2/0 -> 1/0`; peak three VMs/six vCPUs. Added main instance `3`, its Node and captured NIC were physically deleted; main instance `0` survived. |
+| `AZ-001` | 10:27:31.947 to 10:40:50.644 (suite) | 13m23s wall | 100 CPU-requesting Pods caused actual and desired `1/0 -> 2/1 -> 1/0`; Ready test Pods used all three workers and excess demand remained Pending. Peak four VMs/eight vCPUs. Main instance `0` and zero instance `2`, their Nodes and captured NICs were physically deleted; main instance `4` survived. This is not a claim that all 100 Pods became Ready. |
+| `CA-006` | 10:41:38.259 to 10:54:47.104 (suite) | 13m14s wall | The EmptyDir/anti-affinity pair became Ready after actual and desired `1/0 -> 2/0` growth; peak three VMs/six vCPUs. Namespace cleanup restored actual `1/0`, retaining main instance `5`. Local-storage protection remained enabled. This growth case does not separately assert individual NIC deletion. |
+| `CA-007` | 10:55:57.058 to 11:09:15.652 (suite) | 13m23s wall | Three-worker pressure grew actual and desired `1/0 -> 2/1`; peak four VMs/eight vCPUs. Removing pressure restored `1/0` with physical deletion of main instance `6`, zero instance `3`, their Nodes and captured NICs. Main instance `5` survived. |
+| `CA-008` | 11:09:55.826 to 11:23:58.011 (suite) | 14m08s wall | Three movable Pods initially occupied separate workers. The one-disruption PDB drain kept at least two Ready at every observation and all three recovered on main instance `5`. Main instance `7`, zero instance `4`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
+| `CA-009` | 11:24:31.897 to 11:37:28.277 (suite) | 13m02s wall | Zero permitted disruptions retained captured main instances `5`/`8`, zero instance `5` and Ready movable workload throughout five minutes. Peak four VMs/eight vCPUs. Namespace cleanup restored actual `1/0`, main instance `5` surviving; this blocking case does not separately assert individual NIC deletion after fixture cleanup. |
+| `CA-010` | 11:37:59.182 to 11:52:00.949 (suite) | 14m07s wall | Six movable Pods initially occupied three workers, two per worker. The one-disruption drain kept at least five Ready at every observation and all six recovered on main instance `5`. Main instance `9`, zero instance `6`, their Nodes and captured NICs were physically deleted; actual and desired `1/0 -> 2/1 -> 1/0`, peak four VMs/eight vCPUs. |
+| `CA-011` | 11:52:40.531 to 12:06:40.655 (suite) | 14m05s wall | Six run-owned synthetic kube-system Pods initially occupied three workers, two per worker. The PDB drain kept at least five Ready per observation and all six recovered on main instance `10`; system-pod protection was not disabled. Main instance `5`, zero instance `7`, their Nodes and captured NICs were physically deleted. Peak four VMs/eight vCPUs; actual `1/0` restored. Operator also confirmed zero remaining run-owned kube-system Deployments/PDBs. |
+| `CA-012` | 12:07:48.940 to 12:14:05.286 (suite) | 6m16.35s suite | Real expendable demand remained one Ready/one Pending without growth throughout five minutes. Each reservation requested 5,715,880,755 bytes against measured allocatable 8,165,543,936 and existing requests 52,428,800 bytes. Main instance `10` remained the sole worker, actual `1/0`, total two VMs/four vCPUs. Namespace cleanup passed. |
 
 The sole operator preserves each run's non-secret runner log, JSON and JUnit
 under the run name below. Verified SHA-256 digests:
@@ -132,6 +134,8 @@ under the run name below. Verified SHA-256 digests:
 | `CA-008-886f31f` | `63abff5dd6410b6fadf15822822649d2db85301204ce550a434d23c733399c89` | `0d0f6b21d8609023109b655ec2feb87d8760069bd5f7e8991d1eadb8ab1efaed` | `f7835a1d0c31a1f14da1a1c02b98c6853ab8526c514c4e5199f975cb79e03c4b` |
 | `CA-009-886f31f` | `f4ef3c493011f3c8a2499e034170e7b66b46f4e3d77a07f900a05c81bdc8f19a` | `3f62073d94a5d14cbbc90e25ac76f14454bdcf702c6d6e919de6d2263aa87e62` | `3de87bf316c9b3b08ccd58fc8a3df2bf6b2b4e29a8d24a7c1762acd0f626bae3` |
 | `CA-010-886f31f` | `b249a66f999609c3622ec0d8ed000f1916dd2f244890deee73acf90a39c938a5` | `a5294fcddc60004d79405f5177b1e464682360f6fac23762668f23d6b1ed9c6d` | `88660148940ec229f78215754f0b1f2e3122ebefe613dbe93b9fcf575e814e90` |
+| `CA-011-886f31f` | `8f0b0de24bbb180d260210b76564b1270f233fdf7f1b6f3d6e16507ea48d7c35` | `977e658862607e2da7fca7606ff51a470524c4b99d11ff59b6bcd4fe561e8c64` | `390cba57f2d480eaa88783e9a708fa0686b16a9634b12a88d207dfdd35e112a9` |
+| `CA-012-886f31f` | `9c7b13266a00b7e91e55d7f334485e55bde83e1b0944318b939ce58a7c46357c` | `344291d512d9226f12ef5f0a82e849c12386c901f0e71b75d5df78e2b8bf53d5` | `6246f661d6278a7fd5d6400b4614ab71ea4f9feed44b1710d2e5dd6e312ffc58` |
 
 ## Evidence gates
 
