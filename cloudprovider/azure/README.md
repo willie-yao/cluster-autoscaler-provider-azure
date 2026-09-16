@@ -31,13 +31,23 @@ Parked VMs do not appear as expected Nodes to core, and active target is
 physical VMSS capacity minus parked instances. An ordinary scale-up starts
 parked VMs before requesting additional physical capacity, but still refuses
 reuse while any Node conflicts by provider ID or registration name. A rejected
-Start is an error, not permission to grow instead. An accepted Start whose
-completion fails remains counted through process-local bookkeeping until Azure
-reports running; its error is surfaced. Stock cleanup of synthetic
-unregistered/failed Nodes still physically deletes VMs, including the default
-`DeleteNodes` path with its minimum-size constraints. Failed VM provisioning
-retains the existing configured error classification. Atomic scale-up is not
-implemented for this mode.
+Start or a missing operation poller is an error, not permission to grow instead.
+For each accepted Start, the provider records the immutable-VM-ID capacity charge
+before continuing. `IncreaseSize` returns success only after every requested
+increase has been accepted and reflected in target size; it does not wait for
+Start completion. If a later Start submission in the same batch fails, earlier
+accepted portions remain charged and observed, while the batch returns an error
+instead of claiming full acceptance.
+
+Accepted Start completion is observed in the background under the existing
+30-minute Azure operation timeout. Successful and failed observations invalidate
+instance inventory. A terminal Azure failure and an ambiguous observation
+failure are logged separately, and neither releases the accepted capacity
+charge. Azure provisioning state remains the authoritative input to existing
+failed-instance and unregistered-instance cleanup. Stock cleanup still
+physically deletes VMs through the existing `DeleteNodes` path and its
+minimum-size constraints. Failed VM provisioning retains the existing configured
+error classification. Atomic scale-up is not implemented for this mode.
 
 A fresh manager can rediscover settled parked VMs from Azure without an old
 Node. If the old Node remains after a completed stop, its deletion receipt lets
@@ -53,11 +63,13 @@ taints and administrator cordons applied only to the old Node are lost. Updating
 pool configuration does not prove a retained VM has received that update.
 
 Readiness follows ordinary new-Node initialization and Kubernetes taints, not a
-provider-owned Azure-Start-plus-fresh-heartbeat gate. The provider waits for Start
-completion before returning success, but cannot stop the independent scheduler
-from using a newly initialized Node sooner. A new Node's reported readiness is
-not proof of Azure operation success, and Azure completion is not proof of Node
-readiness.
+provider-owned Azure-Start-plus-fresh-heartbeat gate. Core records its scale-up
+request when Start acceptance returns, so the configured node provisioning
+allowance begins before Azure LRO completion rather than after it. A new Node's
+reported readiness is not proof of Azure operation success, and Azure completion
+is not proof of Node registration or readiness. A process restart unrelated to
+health can still lose process-local accepted-Start bookkeeping; this prototype
+does not persist Start operations or reconstruct core requests.
 
 Local tests run the stock core builder, planner, cluster-state registry, actuator
 and scheduler predicates with the real Azure provider. Azure operations and Node

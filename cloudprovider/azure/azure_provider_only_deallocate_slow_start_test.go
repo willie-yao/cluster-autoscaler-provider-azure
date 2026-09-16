@@ -22,6 +22,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -31,11 +32,9 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/kubernetes/fake"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
-	statusutils "sigs.k8s.io/cluster-autoscaler/pkg/clusterstate/utils"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	"sigs.k8s.io/cluster-autoscaler/pkg/loop"
 	"sigs.k8s.io/cluster-autoscaler/pkg/metrics"
@@ -54,7 +53,8 @@ const (
 	slowStartPollInterval         = 37 * time.Second
 	slowStartActionPath           = "/subscriptions/subscription/resourceGroups/rg/providers/Microsoft.Compute/" +
 		"virtualMachineScaleSets/pool/virtualMachines/1/start"
-	slowStartPollPath = "/operations/slow-start"
+	slowStartPollPath   = "/operations/slow-start"
+	slowStartResultPath = "/operations/slow-start/result"
 )
 
 type slowStartTrace struct {
@@ -64,19 +64,33 @@ type slowStartTrace struct {
 }
 
 type nonterminalStartTransport struct {
-	mu        sync.Mutex
-	world     *parkingWorld
-	trace     []slowStartTrace
-	accepted  bool
-	firstPoll chan struct{}
-	pollOnce  sync.Once
+	mu         sync.Mutex
+	world      *parkingWorld
+	trace      []slowStartTrace
+	accepted   bool
+	completion string
+	firstPoll  chan struct{}
+	terminal   chan struct{}
+	result     chan struct{}
+	pollOnce   sync.Once
+	termOnce   sync.Once
+	resultOnce sync.Once
 }
 
 func newNonterminalStartTransport(world *parkingWorld) *nonterminalStartTransport {
 	return &nonterminalStartTransport{
-		world:     world,
-		firstPoll: make(chan struct{}),
+		world:      world,
+		completion: "InProgress",
+		firstPoll:  make(chan struct{}),
+		terminal:   make(chan struct{}),
+		result:     make(chan struct{}),
 	}
+}
+
+func (t *nonterminalStartTransport) setCompletion(status string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.completion = status
 }
 
 func (t *nonterminalStartTransport) Do(request *http.Request) (*http.Response, error) {
@@ -110,7 +124,7 @@ func (t *nonterminalStartTransport) Do(request *http.Request) (*http.Response, e
 		header := make(http.Header)
 		header.Set("Azure-AsyncOperation", "https://management.test"+slowStartPollPath)
 		header.Set("Content-Type", "application/json")
-		header.Set("Location", "https://management.test"+slowStartPollPath)
+		header.Set("Location", "https://management.test"+slowStartResultPath)
 		return &http.Response{
 			StatusCode: http.StatusAccepted,
 			Header:     header,
@@ -120,14 +134,46 @@ func (t *nonterminalStartTransport) Do(request *http.Request) (*http.Response, e
 
 	case request.Method == http.MethodGet && request.URL.Path == slowStartPollPath:
 		t.pollOnce.Do(func() { close(t.firstPoll) })
+		t.mu.Lock()
+		completion := t.completion
+		t.mu.Unlock()
+		if completion != "InProgress" {
+			t.world.mu.Lock()
+			if t.world.provisioning == nil {
+				t.world.provisioning = make(map[int]string)
+			}
+			switch completion {
+			case "Succeeded":
+				t.world.states[1] = vmPowerStateRunning
+				t.world.provisioning[1] = provisioningStateSucceeded
+			case "Failed":
+				t.world.states[1] = vmPowerStateDeallocated
+				t.world.provisioning[1] = VMProvisioningStateFailed
+			}
+			t.world.mu.Unlock()
+			t.termOnce.Do(func() { close(t.terminal) })
+		}
+		body := fmt.Sprintf(`{"status":%q}`, completion)
+		if completion == "Failed" {
+			body = `{"status":"Failed","error":{"code":"StartFailed","message":"controlled terminal Start failure"}}`
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
 			Header: http.Header{
 				"Content-Type": []string{"application/json"},
 				"Retry-After":  []string{"37"},
 			},
-			Body:    io.NopCloser(strings.NewReader(`{"status":"InProgress"}`)),
+			Body:    io.NopCloser(strings.NewReader(body)),
 			Request: request,
+		}, nil
+
+	case request.Method == http.MethodGet && request.URL.Path == slowStartResultPath:
+		t.resultOnce.Do(func() { close(t.result) })
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    request,
 		}, nil
 
 	default:
@@ -219,12 +265,10 @@ func slowStartAutoscaler(
 
 type slowStartFixture struct {
 	world      *parkingWorld
-	provider   *AzureCloudProvider
 	group      *ScaleSet
 	autoscaler *core.StaticAutoscaler
 	health     *metrics.HealthCheck
 	transport  *nonterminalStartTransport
-	events     *record.FakeRecorder
 	spareVMID  string
 	demandPods []string
 }
@@ -249,15 +293,6 @@ func newSlowStartFixture(
 	require.NoError(t, err)
 
 	autoscaler := slowStartAutoscaler(t, ctx, infra, provider)
-	events := record.NewFakeRecorder(100)
-	autoscaler.LogRecorder, err = statusutils.NewStatusMapRecorder(
-		client,
-		"kube-system",
-		events,
-		true,
-		"test-ca-status",
-	)
-	require.NoError(t, err)
 
 	healthCheck := metrics.NewHealthCheck(stockMaxInactivity, stockMaxFailingTime, stockMaxStartupTime)
 	healthCheck.StartMonitoring()
@@ -279,21 +314,18 @@ func newSlowStartFixture(
 
 	return &slowStartFixture{
 		world:      world,
-		provider:   provider,
 		group:      group,
 		autoscaler: autoscaler,
 		health:     healthCheck,
 		transport:  transport,
-		events:     events,
 		spareVMID:  *world.vms()[1].Properties.VMID,
 		demandPods: []string{demand.Name},
 	}
 }
 
-func blockSlowStartPastHealthDeadline(
+func startAcceptedSlowStart(
 	t *testing.T,
 	ctx context.Context,
-	infra *integration.TestInfrastructure,
 	fixture *slowStartFixture,
 	iterations int,
 ) (*slowStartLoopDriver, slowStartLoopMoment) {
@@ -301,11 +333,10 @@ func blockSlowStartPastHealthDeadline(
 	driver := startSlowStartLoopDriver(ctx, fixture.autoscaler, fixture.health, 1, iterations)
 	started := <-driver.started
 	require.Equal(t, 1, started.iteration)
-	select {
-	case <-fixture.transport.firstPoll:
-	case returned := <-driver.returned:
-		t.Fatalf("loop iteration %d returned at %s before the first nonterminal poll", returned.iteration, returned.at)
-	}
+	returned := <-driver.returned
+	require.Equal(t, started.at, returned.at)
+	synctest.Wait()
+	<-fixture.transport.firstPoll
 
 	require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
 	require.Equal(t,
@@ -324,45 +355,20 @@ func blockSlowStartPastHealthDeadline(
 
 	readiness := fixture.autoscaler.ClusterStateRegistry.GetClusterReadiness()
 	require.Contains(t, readiness.Ready, "node-0")
-	require.False(t, fixture.autoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, fixture.group.Id()))
-	require.False(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+	require.True(t, fixture.autoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, fixture.group.Id()))
+	require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
 	require.False(t,
 		fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
 	)
 	upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
-	require.Zero(t, upcoming[fixture.group.Id()])
+	require.Equal(t, 1, upcoming[fixture.group.Id()])
 	currentSize, targetSize := fixture.autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
 	require.Equal(t, 1, currentSize)
-	require.Equal(t, 1, targetSize, "the blocked iteration has not published the accepted target")
-
-	lateDemand := catest.BuildTestPod("demand-created-while-start-blocked", 1000, 100, catest.MarkUnschedulable())
-	lateDemand.Spec.NodeSelector = map[string]string{"pool": "workers"}
-	_, err = infra.Fakes.KubeClient.CoreV1().Pods(lateDemand.Namespace).Create(ctx, lateDemand, metav1.CreateOptions{})
-	require.NoError(t, err)
-	fixture.demandPods = append(fixture.demandPods, lateDemand.Name)
-	synctest.Wait()
-	slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
-	slowStartRequireDemandFitsReturningWorker(t, ctx, infra.Fakes.KubeClient, fixture)
-
-	time.Sleep(stockMaxInactivity - time.Nanosecond)
-	require.Equal(t, stockMaxInactivity-time.Nanosecond, time.Now().Sub(started.at))
+	require.Equal(t, 2, targetSize)
 	statusCode, body := slowStartHealthStatus(fixture.health)
 	require.Equal(t, http.StatusOK, statusCode)
 	require.Equal(t, "OK", body)
-	slowStartRequireNoLoopMoment(t, driver.returned, "blocked loop returned before inactivity deadline")
-	slowStartRequireNoLoopMoment(t, driver.started, "next loop started while IncreaseSize was blocked")
-
-	time.Sleep(2 * time.Nanosecond)
-	healthFailureElapsed := time.Now().Sub(started.at)
-	require.Equal(t, stockMaxInactivity+time.Nanosecond, healthFailureElapsed)
-	require.Less(t, healthFailureElapsed, slowStartMaxNodeProvisionTime)
-	statusCode, body = slowStartHealthStatus(fixture.health)
-	require.Equal(t, http.StatusInternalServerError, statusCode)
-	require.Contains(t, body, "last activity more 10m0.000000001s ago")
 	require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
-	slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
-	slowStartRequireNoLoopMoment(t, driver.returned, "blocked loop returned at inactivity failure")
-	slowStartRequireNoLoopMoment(t, driver.started, "next loop started at inactivity failure")
 
 	trace, accepted := fixture.transport.snapshot()
 	require.True(t, accepted)
@@ -370,186 +376,209 @@ func blockSlowStartPastHealthDeadline(
 	return driver, started
 }
 
+func addSlowStartLateDemand(
+	t *testing.T,
+	ctx context.Context,
+	infra *integration.TestInfrastructure,
+	fixture *slowStartFixture,
+) {
+	t.Helper()
+	lateDemand := catest.BuildTestPod("demand-created-while-start-blocked", 1000, 100, catest.MarkUnschedulable())
+	lateDemand.Spec.NodeSelector = map[string]string{"pool": "workers"}
+	_, err := infra.Fakes.KubeClient.CoreV1().Pods(lateDemand.Namespace).Create(ctx, lateDemand, metav1.CreateOptions{})
+	require.NoError(t, err)
+	fixture.demandPods = append(fixture.demandPods, lateDemand.Name)
+	synctest.Wait()
+	slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
+	slowStartRequireDemandFitsReturningWorker(t, ctx, infra.Fakes.KubeClient, fixture)
+}
+
+func advanceSlowStartLoop(
+	t *testing.T,
+	driver *slowStartLoopDriver,
+	after time.Duration,
+	iteration int,
+) slowStartLoopMoment {
+	t.Helper()
+	time.Sleep(after)
+	driver.advance <- struct{}{}
+	started := <-driver.started
+	returned := <-driver.returned
+	require.Equal(t, iteration, started.iteration)
+	require.Equal(t, started.at, returned.at)
+	return returned
+}
+
 func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
-	t.Run("simulated restart after health deadline", func(t *testing.T) {
-		infra := integration.SetupInfrastructure(t)
-		synctest.Test(t, func(t *testing.T) {
-			ctx, cancel := context.WithCancel(context.Background())
-			defer synctestutils.TearDown(cancel)
-			firstCtx, stopFirst := context.WithCancel(ctx)
-			defer stopFirst()
-
-			fixture := newSlowStartFixture(t, firstCtx, infra)
-			driver, blockedStart := blockSlowStartPastHealthDeadline(t, firstCtx, infra, fixture, 2)
-			beforeIDs := slowStartWorldVMIDs(fixture.world)
-
-			stopFirst()
-			returned := <-driver.returned
-			require.Equal(t, 1, returned.iteration)
-			require.Equal(t, stockMaxInactivity+time.Nanosecond, returned.at.Sub(blockedStart.at))
-			synctest.Wait()
-			slowStartRequireNoLoopMoment(t, driver.started, "cancelled process started another iteration")
-			require.Equal(t,
-				[]string{vmPowerStateRunning, vmPowerStateStarting},
-				slowStartWorldStates(fixture.world),
-			)
-			require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
-
-			infra.Fakes.InformerFactory = informers.NewSharedInformerFactory(infra.Fakes.KubeClient, 0)
-			recreatedProvider, recreatedGroup := newParkingProvider(t, fixture.world, infra.Fakes.KubeClient, 1, 3, true)
-			recreatedProvider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, fixture.transport)
-			recreatedAutoscaler := slowStartAutoscaler(t, ctx, infra, recreatedProvider)
-			recreatedHealth := metrics.NewHealthCheck(stockMaxInactivity, stockMaxFailingTime, stockMaxStartupTime)
-			recreatedHealth.StartMonitoring()
-
-			require.NotSame(t, fixture.provider, recreatedProvider)
-			require.NotSame(t, fixture.group, recreatedGroup)
-			require.NotSame(t, fixture.autoscaler, recreatedAutoscaler)
-			require.Empty(t, slowStartPowerOverrides(recreatedGroup))
-			require.Equal(t, 2, slowStartTargetSize(t, recreatedGroup))
-			require.False(t, recreatedAutoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, recreatedGroup.Id()))
-			require.False(t, recreatedAutoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(recreatedGroup.Id()))
-
-			recreatedDriver := startSlowStartLoopDriver(ctx, recreatedAutoscaler, recreatedHealth, 0, 1)
-			recreatedStarted := <-recreatedDriver.started
-			recreatedReturned := <-recreatedDriver.returned
-			require.Equal(t, recreatedStarted.at, recreatedReturned.at)
-
-			trace, accepted := fixture.transport.snapshot()
-			require.True(t, accepted)
-			slowStartValidateTrace(t, trace, blockedStart.at)
-			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
-			require.Equal(t, 17, slowStartCountMethod(trace, http.MethodGet))
-			require.Equal(t, []string{"start-accepted:1", "grow:3"}, fixture.world.history())
-			require.Equal(t, 3, slowStartTargetSize(t, recreatedGroup))
-			require.Equal(t,
-				[]string{vmPowerStateRunning, vmPowerStateStarting, vmPowerStateStarting},
-				slowStartWorldStates(fixture.world),
-			)
-			afterIDs := slowStartWorldVMIDs(fixture.world)
-			require.Equal(t, beforeIDs, afterIDs[:2])
-			require.Equal(t, "vm-identity-2", afterIDs[2])
-			require.Empty(t, slowStartPowerOverrides(recreatedGroup))
-
-			readiness := recreatedAutoscaler.ClusterStateRegistry.GetClusterReadiness()
-			require.Contains(t, readiness.Ready, "node-0")
-			require.True(t, recreatedAutoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, recreatedGroup.Id()))
-			require.True(t, recreatedAutoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(recreatedGroup.Id()))
-			require.False(t,
-				recreatedAutoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, recreatedGroup, time.Now()).IsBackedOff,
-			)
-			upcoming, _ := recreatedAutoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
-			require.Equal(t, 2, upcoming[recreatedGroup.Id()])
-			currentSize, targetSize := recreatedAutoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
-			require.Equal(t, 1, currentSize)
-			require.Equal(t, 3, targetSize)
-			statusCode, body := slowStartHealthStatus(recreatedHealth)
-			require.Equal(t, http.StatusOK, statusCode)
-			require.Equal(t, "OK", body)
-			slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
-
-			t.Logf(
-				"simulated restart timeline: health failed at %s, old loop returned at %s, recreated loop grew at %s; Start POSTs=%d polls=%d",
-				stockMaxInactivity+time.Nanosecond,
-				returned.at.Sub(blockedStart.at),
-				recreatedStarted.at.Sub(blockedStart.at),
-				slowStartCountMethod(trace, http.MethodPost),
-				slowStartCountMethod(trace, http.MethodGet),
-			)
-		})
-	})
-
-	t.Run("provider timeout restores loop but not accepted request tracking", func(t *testing.T) {
+	t.Run("accepted Start keeps serial loop healthy through readiness", func(t *testing.T) {
 		infra := integration.SetupInfrastructure(t)
 		synctest.Test(t, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			defer synctestutils.TearDown(cancel)
 
 			fixture := newSlowStartFixture(t, ctx, infra)
-			driver, blockedStart := blockSlowStartPastHealthDeadline(t, ctx, infra, fixture, 2)
-			beforeIDs := slowStartWorldVMIDs(fixture.world)
+			driver, acceptedAt := startAcceptedSlowStart(t, ctx, fixture, 14)
+			addSlowStartLateDemand(t, ctx, infra, fixture)
 
-			returned := <-driver.returned
-			require.Equal(t, 1, returned.iteration)
-			require.Equal(t, asyncContextTimeout, returned.at.Sub(blockedStart.at))
-			require.Contains(t, slowStartDrainEvents(fixture.events), "context deadline exceeded")
-
+			for iteration := 2; iteration <= 12; iteration++ {
+				advanceSlowStartLoop(t, driver, time.Minute, iteration)
+				require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+				require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+				require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+				upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+				require.Equal(t, 1, upcoming[fixture.group.Id()])
+			}
+			require.Equal(t, 11*time.Minute, time.Now().Sub(acceptedAt.at))
+			require.Less(t, time.Now().Sub(acceptedAt.at), slowStartMaxNodeProvisionTime)
 			statusCode, body := slowStartHealthStatus(fixture.health)
-			require.Equal(t, http.StatusOK, statusCode, "the wrapper records the overall RunOnce as successful")
-			require.Equal(t, "OK", body)
-			require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
-			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
-			require.Equal(t,
-				[]string{vmPowerStateRunning, vmPowerStateStarting},
-				slowStartWorldStates(fixture.world),
-			)
-			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
-			require.False(t, fixture.autoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, fixture.group.Id()))
-			require.False(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
-			require.False(t,
-				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
-				"the five-minute failure backoff is timestamped at the 30-minute-old loop start",
-			)
-			upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
-			require.Zero(t, upcoming[fixture.group.Id()])
-			currentSize, targetSize := fixture.autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
-			require.Equal(t, 1, currentSize)
-			require.Equal(t, 1, targetSize, "the timed-out loop retains its pre-Start core snapshot")
-			slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
-
-			traceAtTimeout, accepted := fixture.transport.snapshot()
-			require.True(t, accepted)
-			slowStartValidateTrace(t, traceAtTimeout, blockedStart.at)
-			require.Equal(t, 1, slowStartCountMethod(traceAtTimeout, http.MethodPost))
-			require.Equal(t, 49, slowStartCountMethod(traceAtTimeout, http.MethodGet))
-
-			driver.advance <- struct{}{}
-			nextStarted := <-driver.started
-			nextReturned := <-driver.returned
-			require.Equal(t, 2, nextStarted.iteration)
-			require.Equal(t, nextStarted.at, nextReturned.at)
-
-			trace, accepted := fixture.transport.snapshot()
-			require.True(t, accepted)
-			require.Equal(t, traceAtTimeout, trace, "later planning must not poll or restart the old operation")
-			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
-			require.Equal(t, []string{"start-accepted:1", "grow:3"}, fixture.world.history())
-			require.Equal(t, 3, slowStartTargetSize(t, fixture.group))
-			require.Equal(t,
-				[]string{vmPowerStateRunning, vmPowerStateStarting, vmPowerStateStarting},
-				slowStartWorldStates(fixture.world),
-			)
-			afterIDs := slowStartWorldVMIDs(fixture.world)
-			require.Equal(t, beforeIDs, afterIDs[:2])
-			require.Equal(t, "vm-identity-2", afterIDs[2])
-			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
-
-			readiness := fixture.autoscaler.ClusterStateRegistry.GetClusterReadiness()
-			require.Contains(t, readiness.Ready, "node-0")
-			require.True(t, fixture.autoscaler.ClusterStateRegistry.IsNodeGroupScalingUp(ctx, fixture.group.Id()))
-			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
-			require.False(t,
-				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
-			)
-			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
-			require.Equal(t, 2, upcoming[fixture.group.Id()])
-			currentSize, targetSize = fixture.autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
-			require.Equal(t, 1, currentSize)
-			require.Equal(t, 3, targetSize)
-			statusCode, body = slowStartHealthStatus(fixture.health)
 			require.Equal(t, http.StatusOK, statusCode)
 			require.Equal(t, "OK", body)
 			slowStartRequirePendingPods(t, ctx, infra.Fakes.KubeClient, fixture.demandPods)
 
+			fixture.transport.setCompletion("Succeeded")
+			<-fixture.transport.terminal
+			<-fixture.transport.result
+			synctest.Wait()
+			require.Equal(t,
+				[]string{vmPowerStateRunning, vmPowerStateRunning},
+				slowStartWorldStates(fixture.world),
+			)
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+			instances, err := fixture.group.Nodes(ctx)
+			require.NoError(t, err)
+			require.Len(t, instances, 2)
+			require.Equal(t, cloudprovider.InstanceRunning, instances[1].Status.State)
+
+			advanceSlowStartLoop(t, driver, 0, 13)
+			readiness := fixture.autoscaler.ClusterStateRegistry.GetClusterReadiness()
+			require.Contains(t, readiness.Ready, "node-0")
+			require.NotContains(t, readiness.Ready, "node-1")
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 1, upcoming[fixture.group.Id()], "Azure completion alone is not Node registration")
+			require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+
+			registered := parkingNode(1, "registered-after-start", true)
+			_, err = infra.Fakes.KubeClient.CoreV1().Nodes().Create(ctx, registered, metav1.CreateOptions{})
+			require.NoError(t, err)
+			synctest.Wait()
+			advanceSlowStartLoop(t, driver, 0, 14)
+			readiness = fixture.autoscaler.ClusterStateRegistry.GetClusterReadiness()
+			require.Contains(t, readiness.Ready, "node-0")
+			require.Contains(t, readiness.Ready, "node-1")
+			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Zero(t, upcoming[fixture.group.Id()])
+			require.False(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			currentSize, targetSize := fixture.autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
+			require.Equal(t, 2, currentSize)
+			require.Equal(t, 2, targetSize)
+			require.Equal(t, []string{"start-accepted:1"}, fixture.world.history())
+			statusCode, body = slowStartHealthStatus(fixture.health)
+			require.Equal(t, http.StatusOK, statusCode)
+			require.Equal(t, "OK", body)
+
+			trace, accepted := fixture.transport.snapshot()
+			require.True(t, accepted)
+			slowStartValidateTrace(t, trace, acceptedAt.at)
+			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
 			t.Logf(
-				"provider timeout timeline: health failed at %s, loop returned at %s, next iteration started at %s; Start POSTs=%d polls=%d",
-				stockMaxInactivity+time.Nanosecond,
-				returned.at.Sub(blockedStart.at),
-				nextStarted.at.Sub(blockedStart.at),
+				"accepted Start timeline: first loop returned at %s, health remained 200 through %s, Azure completed before iteration 13, Node became Ready in iteration 14; Start POSTs=%d polls=%d",
+				time.Duration(0),
+				time.Now().Sub(acceptedAt.at),
 				slowStartCountMethod(trace, http.MethodPost),
-				slowStartCountMethod(trace, http.MethodGet),
+				slowStartCountPath(trace, slowStartPollPath),
 			)
 		})
+	})
+
+	t.Run("terminal accepted failure is cleaned before later scale-up", func(t *testing.T) {
+		infra := integration.SetupInfrastructure(t)
+		synctest.Test(t, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer synctestutils.TearDown(cancel)
+
+			fixture := newSlowStartFixture(t, ctx, infra)
+			driver, acceptedAt := startAcceptedSlowStart(t, ctx, fixture, 8)
+			addSlowStartLateDemand(t, ctx, infra, fixture)
+
+			fixture.group.enableFastDeleteOnFailedProvisioning = true
+			fixture.transport.setCompletion("Failed")
+			<-fixture.transport.terminal
+			synctest.Wait()
+			instances, err := fixture.group.Nodes(ctx)
+			require.NoError(t, err)
+			require.Len(t, instances, 2)
+			require.Equal(t, cloudprovider.InstanceCreating, instances[1].Status.State)
+			require.NotNil(t, instances[1].Status.ErrorInfo)
+			require.Equal(t, "provisioning-state-failed", instances[1].Status.ErrorInfo.ErrorCode)
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Equal(t, map[string]bool{fixture.spareVMID: false}, slowStartPowerOverrides(fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+
+			advanceSlowStartLoop(t, driver, time.Minute, 2)
+			history := fixture.world.history()
+			require.Equal(t, []string{"start-accepted:1", "physical-delete:1"}, history)
+			require.Equal(t, 1, slowStartTargetSize(t, fixture.group))
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+			require.False(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			require.True(t,
+				fixture.autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, fixture.group, time.Now()).IsBackedOff,
+			)
+			upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Zero(t, upcoming[fixture.group.Id()])
+
+			for iteration := 3; iteration <= 8 && !slices.Contains(history, "grow:2"); iteration++ {
+				advanceSlowStartLoop(t, driver, time.Minute, iteration)
+				history = fixture.world.history()
+			}
+			require.Equal(t, []string{"start-accepted:1", "physical-delete:1", "grow:2"}, history)
+			trace, accepted := fixture.transport.snapshot()
+			require.True(t, accepted)
+			slowStartValidateTrace(t, trace, acceptedAt.at)
+			require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
+			require.Equal(t, []string{"vm-identity-0", "vm-identity-2"}, slowStartWorldVMIDs(fixture.world))
+			require.Equal(t, 2, slowStartTargetSize(t, fixture.group))
+			require.Empty(t, slowStartPowerOverrides(fixture.group))
+			require.True(t, fixture.autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp(fixture.group.Id()))
+			upcoming, _ = fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
+			require.Equal(t, 1, upcoming[fixture.group.Id()])
+			currentSize, targetSize := fixture.autoscaler.ClusterStateRegistry.GetAutoscaledNodesCount()
+			require.Equal(t, 1, currentSize)
+			require.Equal(t, 2, targetSize)
+
+			t.Logf(
+				"accepted failed Start timeline: terminal failure visible before iteration 2, ordinary cleanup deleted VM 1, later demand grew replacement VM 2 at %s",
+				time.Now().Sub(acceptedAt.at),
+			)
+		})
+	})
+}
+
+func TestProviderOnlyDeallocateAcceptedStartObservationTimeout(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		world := &parkingWorld{states: []string{vmPowerStateRunning, vmPowerStateDeallocated}}
+		provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 2, true)
+		transport := newNonterminalStartTransport(world)
+		provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, transport)
+
+		require.NoError(t, group.IncreaseSize(context.Background(), 1))
+		<-transport.firstPoll
+		time.Sleep(asyncContextTimeout)
+		synctest.Wait()
+
+		trace, accepted := transport.snapshot()
+		require.True(t, accepted)
+		slowStartValidateTrace(t, trace, trace[0].at)
+		require.Equal(t, 1, slowStartCountMethod(trace, http.MethodPost))
+		require.Equal(t, 49, slowStartCountPath(trace, slowStartPollPath))
+		require.Equal(t, 2, slowStartTargetSize(t, group))
+		require.Equal(t, map[string]bool{"vm-identity-1": false}, slowStartPowerOverrides(group))
+		require.Equal(t,
+			[]string{vmPowerStateRunning, vmPowerStateStarting},
+			slowStartWorldStates(world),
+		)
+		require.Equal(t, []string{"start-accepted:1"}, world.history())
 	})
 }
 
@@ -629,26 +658,26 @@ func slowStartRequireDemandFitsReturningWorker(
 	}
 }
 
-func slowStartRequireNoLoopMoment(t *testing.T, moments <-chan slowStartLoopMoment, message string) {
-	t.Helper()
-	select {
-	case moment := <-moments:
-		t.Fatalf("%s: iteration %d at %s", message, moment.iteration, moment.at)
-	default:
-	}
-}
-
 func slowStartValidateTrace(t *testing.T, trace []slowStartTrace, start time.Time) {
 	t.Helper()
 	require.GreaterOrEqual(t, len(trace), 2)
 	require.Equal(t, slowStartTrace{at: start, method: http.MethodPost, path: slowStartActionPath}, trace[0])
+	var lastPoll time.Time
 	for i, request := range trace[1:] {
 		require.Equal(t, http.MethodGet, request.method)
-		require.Equal(t, slowStartPollPath, request.path)
 		require.False(t, request.at.Before(start))
-		if i > 0 {
-			require.Equal(t, slowStartPollInterval, request.at.Sub(trace[i].at))
+		if request.path == slowStartResultPath {
+			require.Equal(t, len(trace)-2, i)
+			require.Equal(t, lastPoll, request.at)
+			continue
 		}
+		require.Equal(t, slowStartPollPath, request.path)
+		if lastPoll.IsZero() {
+			require.Equal(t, start, request.at)
+		} else {
+			require.Equal(t, slowStartPollInterval, request.at.Sub(lastPoll))
+		}
+		lastPoll = request.at
 	}
 }
 
@@ -662,12 +691,14 @@ func slowStartCountMethod(trace []slowStartTrace, method string) int {
 	return count
 }
 
-func slowStartDrainEvents(events *record.FakeRecorder) string {
-	var messages []string
-	for len(events.Events) > 0 {
-		messages = append(messages, <-events.Events)
+func slowStartCountPath(trace []slowStartTrace, path string) int {
+	count := 0
+	for _, request := range trace {
+		if request.path == path {
+			count++
+		}
 	}
-	return strings.Join(messages, "\n")
+	return count
 }
 
 var _ policy.Transporter = (*nonterminalStartTransport)(nil)

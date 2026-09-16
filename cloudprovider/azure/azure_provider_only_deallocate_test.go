@@ -30,6 +30,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/Azure/go-autorest/autorest/azure"
@@ -274,6 +275,40 @@ func (w *parkingWorld) BeginStart(_ context.Context, _, _, id string, _ *armcomp
 	})
 }
 
+type scriptedStartPowerClient struct {
+	world      *parkingWorld
+	mu         sync.Mutex
+	startCalls []string
+	beginStart func(context.Context, string) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error)
+}
+
+func (c *scriptedStartPowerClient) BeginDeallocate(
+	ctx context.Context,
+	resourceGroup string,
+	scaleSet string,
+	instanceID string,
+	options *armcompute.VirtualMachineScaleSetVMsClientBeginDeallocateOptions,
+) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse], error) {
+	return c.world.BeginDeallocate(ctx, resourceGroup, scaleSet, instanceID, options)
+}
+
+func (c *scriptedStartPowerClient) BeginStart(
+	ctx context.Context,
+	_, _, instanceID string,
+	_ *armcompute.VirtualMachineScaleSetVMsClientBeginStartOptions,
+) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error) {
+	c.mu.Lock()
+	c.startCalls = append(c.startCalls, instanceID)
+	c.mu.Unlock()
+	return c.beginStart(ctx, instanceID)
+}
+
+func (c *scriptedStartPowerClient) calls() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.startCalls)
+}
+
 func newParkingProvider(t *testing.T, w *parkingWorld, client *fake.Clientset, minimum, maximum int, enabled bool) (*AzureCloudProvider, *ScaleSet) {
 	t.Helper()
 	ctrl := gomock.NewController(t)
@@ -341,6 +376,91 @@ func newParkingProvider(t *testing.T, w *parkingWorld, client *fake.Clientset, m
 	provider, err := BuildAzureCloudProvider(m, cloudprovider.NewResourceLimiter(map[string]int64{}, map[string]int64{}))
 	require.NoError(t, err)
 	return provider.(*AzureCloudProvider), group
+}
+
+func TestProviderOnlyDeallocateStartSubmissionBoundaries(t *testing.T) {
+	t.Run("completion errors distinguish Azure failure from observation failure", func(t *testing.T) {
+		require.True(t, isTerminalStartFailure(&azcore.ResponseError{
+			StatusCode:  http.StatusOK,
+			RawResponse: &http.Response{StatusCode: http.StatusOK},
+		}))
+		require.False(t, isTerminalStartFailure(&azcore.ResponseError{
+			StatusCode:  http.StatusInternalServerError,
+			RawResponse: &http.Response{StatusCode: http.StatusInternalServerError},
+		}))
+		require.False(t, isTerminalStartFailure(errors.New("final result retrieval failed")))
+	})
+
+	t.Run("missing poller is not accepted", func(t *testing.T) {
+		world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+		provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 1, true)
+		power := &scriptedStartPowerClient{
+			world: world,
+			beginStart: func(context.Context, string) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error) {
+				return nil, nil
+			},
+		}
+		provider.azureManager.azClient.vmssPowerClient = power
+
+		err := group.IncreaseSize(t.Context(), 1)
+		require.ErrorContains(t, err, "returned no operation")
+		require.Equal(t, []string{"0"}, power.calls())
+		checkParkingCounts(t, group, 1, 0, 1, 0)
+	})
+
+	t.Run("accepted portion remains charged after later rejection", func(t *testing.T) {
+		world := &parkingWorld{states: []string{vmPowerStateDeallocated, vmPowerStateDeallocated}}
+		provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 2, true)
+		observed := make(chan struct{})
+		power := &scriptedStartPowerClient{
+			world: world,
+			beginStart: func(_ context.Context, instanceID string) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error) {
+				if instanceID == "1" {
+					return nil, errors.New("controlled second Start rejection")
+				}
+				return newParkingPoller[armcompute.VirtualMachineScaleSetVMsClientStartResponse](func() error {
+					close(observed)
+					return errors.New("controlled accepted Start result observation failure")
+				})
+			},
+		}
+		provider.azureManager.azClient.vmssPowerClient = power
+
+		err := group.IncreaseSize(t.Context(), 2)
+		require.ErrorContains(t, err, "controlled second Start rejection")
+		<-observed
+		require.Equal(t, []string{"0", "1"}, power.calls())
+		checkParkingCounts(t, group, 2, 1, 1, 1)
+		require.Equal(t, map[string]bool{"vm-identity-0": false}, slowStartPowerOverrides(group))
+		require.Empty(t, world.history(), "partial Start acceptance must not fall through to physical growth")
+	})
+
+	t.Run("busy group lock respects submission deadline", func(t *testing.T) {
+		synctest.Test(t, func(t *testing.T) {
+			world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+			provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 1, true)
+			power := &scriptedStartPowerClient{
+				world: world,
+				beginStart: func(context.Context, string) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error) {
+					return nil, errors.New("unexpected Start submission")
+				},
+			}
+			provider.azureManager.azClient.vmssPowerClient = power
+
+			group.parkMutex.Lock()
+			defer group.parkMutex.Unlock()
+			ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+			defer cancel()
+			started := time.Now()
+
+			err := group.IncreaseSize(ctx, 1)
+
+			require.ErrorIs(t, err, context.DeadlineExceeded)
+			require.Equal(t, 250*time.Millisecond, time.Since(started))
+			require.Empty(t, power.calls())
+			checkParkingCounts(t, group, 1, 0, 1, 0)
+		})
+	})
 }
 
 // Registration is simulated from fixed kubelet/CCM configuration, not the old Node.
@@ -876,12 +996,14 @@ func TestProviderOnlyDeallocateZeroActiveAndFailures(t *testing.T) {
 					checkParkingSize(t, group, 0)
 					require.Equal(t, []string{"start:0"}, world.history())
 				case "accepted-failed":
-					require.Contains(t, messages, "FailedToScaleUpGroup")
-					require.Contains(t, messages, "injected Start polling failure")
+					require.NotContains(t, messages, "FailedToScaleUpGroup")
+					require.Contains(t, messages, "ScaledUpGroup")
 					checkParkingSize(t, group, 1)
 					require.Equal(t, []string{"start:0"}, world.history())
 					upcoming, _ := autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
-					require.Zero(t, upcoming["pool"], "failed acceptance must not be simulated as usable incoming capacity")
+					require.Equal(t, 1, upcoming["pool"], "accepted capacity remains incoming until ordinary cleanup")
+					require.True(t, autoscaler.ClusterStateRegistry.HasNodeGroupStartedScaleUp("pool"))
+					require.False(t, autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, group, time.Now()).IsBackedOff)
 				case "old-node-present":
 					require.Contains(t, messages, "FailedToScaleUpGroup")
 					require.Contains(t, messages, "still has Node")

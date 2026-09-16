@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	azcorepolicy "github.com/Azure/azure-sdk-for-go/sdk/azcore/policy"
@@ -40,6 +41,7 @@ import (
 const (
 	providerOnlyDeleteReceiptAnnotation = "cluster-autoscaler.kubernetes.io/azure-provider-only-delete"
 	providerOnlyDeleteReceiptVersion    = 1
+	providerOnlyParkLockRetryInterval   = 100 * time.Millisecond
 )
 
 type providerOnlyDeleteReceipt struct {
@@ -143,6 +145,11 @@ func isDefiniteDeallocateRejection(err error) bool {
 type vmssPowerClient interface {
 	BeginDeallocate(context.Context, string, string, string, *armcompute.VirtualMachineScaleSetVMsClientBeginDeallocateOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse], error)
 	BeginStart(context.Context, string, string, string, *armcompute.VirtualMachineScaleSetVMsClientBeginStartOptions) (*runtime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse], error)
+}
+
+type acceptedStartOperation struct {
+	poller     *runtime.Poller[armcompute.VirtualMachineScaleSetVMsClientStartResponse]
+	resourceID string
 }
 
 func (m *AzureManager) providerOnlyGroup(providerID string) (*ScaleSet, error) {
@@ -658,17 +665,26 @@ func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 }
 
 func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
-	ctx, cancel := context.WithTimeout(ctx, asyncContextTimeout)
+	submissionCtx, cancel := context.WithTimeout(ctx, vmssContextTimeout)
 	defer cancel()
-	s.parkMutex.Lock()
-	defer s.parkMutex.Unlock()
 	if delta <= 0 {
 		return fmt.Errorf("size increase must be positive")
 	}
 	if s.manager.kubeClient == nil || s.manager.azClient.vmssPowerClient == nil {
 		return fmt.Errorf("providerOnlyDeallocate requires Kubernetes and VMSS power clients")
 	}
-	vms, parked, err := s.parkingInventory()
+	if err := s.lockParkOperation(submissionCtx); err != nil {
+		return fmt.Errorf("waiting to submit provider-only scale-up for %s: %w", s.Name, err)
+	}
+	accepted := make([]acceptedStartOperation, 0, delta)
+	defer func() {
+		s.parkMutex.Unlock()
+		for _, operation := range accepted {
+			go s.waitForStart(operation)
+		}
+	}()
+
+	vms, parked, err := s.parkingInventoryWithContext(submissionCtx)
 	if err != nil {
 		return err
 	}
@@ -679,7 +695,7 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 	if active+int64(delta) > int64(s.maxSize) {
 		return fmt.Errorf("size increase too large - desired:%d max:%d", active+int64(delta), s.maxSize)
 	}
-	nodeList, err := s.manager.kubeClient.CoreV1().Nodes().List(ctx, metav1.ListOptions{})
+	nodeList, err := s.manager.kubeClient.CoreV1().Nodes().List(submissionCtx, metav1.ListOptions{})
 	if err != nil {
 		return err
 	}
@@ -695,7 +711,7 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 				return fmt.Errorf("parked VM %s still has Node %s; refusing reuse", *vm.ID, node.Name)
 			}
 		}
-		poller, err := s.manager.azClient.vmssPowerClient.BeginStart(ctx, s.manager.config.ResourceGroup, s.Name, *vm.InstanceID, nil)
+		poller, err := s.manager.azClient.vmssPowerClient.BeginStart(submissionCtx, s.manager.config.ResourceGroup, s.Name, *vm.InstanceID, nil)
 		if err != nil {
 			return fmt.Errorf("start %s: %w", *vm.ID, err)
 		}
@@ -704,9 +720,7 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 		}
 		// Accepted starts consume active bounds even if completion is uncertain.
 		s.setPowerOverride(*vm.Properties.VMID, false)
-		if _, err := poller.PollUntilDone(ctx, nil); err != nil {
-			return fmt.Errorf("waiting for start %s: %w", *vm.ID, err)
-		}
+		accepted = append(accepted, acceptedStartOperation{poller: poller, resourceID: *vm.ID})
 		delta--
 	}
 	if delta == 0 {
@@ -721,4 +735,57 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 		return sizeErr.error
 	}
 	return s.createOrUpdateInstances(vmss, physical+int64(delta))
+}
+
+func (s *ScaleSet) lockParkOperation(ctx context.Context) error {
+	ticker := time.NewTicker(providerOnlyParkLockRetryInterval)
+	defer ticker.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.parkMutex.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-ticker.C:
+		}
+	}
+}
+
+func (s *ScaleSet) waitForStart(operation acceptedStartOperation) {
+	ctx, cancel := getContextWithTimeout(asyncContextTimeout)
+	defer cancel()
+
+	klog.V(3).Infof("Calling PollUntilDone for Start(%s)", operation.resourceID)
+	_, err := operation.poller.PollUntilDone(ctx, nil)
+	s.invalidateInstanceCache()
+	if err != nil {
+		if isTerminalStartFailure(err) {
+			klog.Errorf(
+				"Start operation for %s completed with failure after acceptance: %v; accepted capacity remains charged pending ordinary instance cleanup",
+				operation.resourceID,
+				err,
+			)
+		} else {
+			klog.Errorf(
+				"Failed to observe completion of accepted Start operation for %s: %v; accepted capacity remains charged",
+				operation.resourceID,
+				err,
+			)
+		}
+		return
+	}
+	klog.V(3).Infof("PollUntilDone for Start(%s) success", operation.resourceID)
+}
+
+func isTerminalStartFailure(err error) bool {
+	var responseError *azcore.ResponseError
+	if !errors.As(err, &responseError) || responseError.RawResponse == nil {
+		return false
+	}
+	return responseError.RawResponse.StatusCode >= http.StatusOK &&
+		responseError.RawResponse.StatusCode < http.StatusMultipleChoices
 }
