@@ -94,6 +94,15 @@ make -C cloudprovider/azure/test e2etests \
   TEST_TIMEOUT=90m
 ```
 
+`TEST_TIMEOUT` is the Ginkgo suite timeout, not a cloud-operation deadline.
+Choose it to fit the operator's remaining execution window, including the
+bounded namespace/baseline cleanup. The Make target runs Ginkgo's compiled test
+binary, not a direct `go test` with its default ten-minute timeout. If invoking
+`go test` directly, set both its `-timeout` and `-ginkgo.timeout` explicitly.
+The operator must also enforce an absolute process deadline: cancellation and
+cleanup grace periods must not delay infrastructure teardown. Interrupted,
+timed-out or cleanup-failed cases are unproven/failed, never passing.
+
 The original `FOCUS` selector is also supported. Ginkgo parallel execution is
 rejected; an empty selection fails and the first failure stops further cases.
 JUnit and JSON reports record outcomes, runtime image, resource counts,

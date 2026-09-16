@@ -102,6 +102,13 @@ checkpoint. The runtime under test remains the separate production candidate
 records a different approved runtime. Test-suite commits and runtime provenance
 must not be conflated.
 
+The approved September 16, 2026 live campaign stops starting new cases at
+13:30 UTC. Every test process must return or be stopped by 14:00 UTC, and the
+sole cloud operator must remove all campaign infrastructure by 15:00 UTC.
+Per-command timeouts must fit these absolute deadlines and allow cleanup.
+The suite does not schedule the campaign or extend its budget. Cancellation
+does not establish a pass; unfinished IDs remain unexecuted or interrupted.
+
 Release ownership, chart `9.59.0` version increment, inherited
 `appVersion: 1.35.0`, registry/publication identity and support policy remain
 separate unresolved decisions.
