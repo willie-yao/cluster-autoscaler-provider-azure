@@ -1,0 +1,4 @@
+autoDiscovery:
+  clusterName: '{{ .Release.Name }}-cluster'
+azureUseManagedIdentityExtension: true
+azureUserAssignedIdentityID: test-managed-identity
