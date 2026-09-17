@@ -288,3 +288,6 @@ This suite covers public Delete-mode intents, not internal AKS product parity,
 deallocate behavior or every Azure backend. Historical live outcomes must be
 read at their recorded test and runtime checkpoints. New source changes do not
 inherit live credit from an earlier run.
+
+See [provenance and validation](../../../docs/provenance.md) for immutable
+source links and the exact boundaries of historical execution evidence.

@@ -1,0 +1,96 @@
+{
+  "$schema": "https://aka.ms/codetour-schema",
+  "title": "Azure provider contributor orientation",
+  "description": "Follow the application/core boundary, compatibility contracts and prepared-fixture E2E harness before making an Azure provider change.",
+  "isPrimary": true,
+  "steps": [
+    {
+      "file": "README.md",
+      "line": 1,
+      "title": "Start with the application contract",
+      "description": "This repository builds an Azure-only Cluster Autoscaler, not a replacement scheduling algorithm. The root README connects build, chart and developer entrypoints so you can choose the right path for a contribution. Image values are placeholders: repository branding does not identify an official release or runnable registry image."
+    },
+    {
+      "file": "docs/architecture.md",
+      "pattern": "^## Module and package boundaries",
+      "title": "Locate the boundary before editing",
+      "description": "The root application, local APIs and nested E2E harness have separate responsibilities and Go module boundaries. Follow the table to decide whether your change belongs in provider behavior, generated APIs, packaging or tests. Root `go test ./...` does not cross into nested modules, so it cannot replace the full local CI target."
+    },
+    {
+      "file": "go.mod",
+      "line": 1,
+      "title": "Keep repository and module identities separate",
+      "description": "The application retains `k8s.io/autoscaler/cluster-autoscaler`, replaces its API module with `./apis` and pins the shared core from `kubernetes-sigs/cluster-autoscaler`. This lets Azure-specific code use the existing upstream contracts. Do not rename imports or substitute the old monorepo for the extracted core just because the repository name is different."
+    },
+    {
+      "file": "main.go",
+      "pattern": "^func mustBuildAutoscaler\\(",
+      "title": "Follow application wiring into the core",
+      "description": "`mustBuildAutoscaler` gives the core builder a manager, Kubernetes client and shared informer factory. The application supplies lifecycle infrastructure while the dependency owns the autoscaler implementation. Preserve that division when diagnosing a change; duplicating the core loop here would create a second behavior path."
+    },
+    {
+      "file": "cloudprovider/router/router.go",
+      "pattern": "^import \\(",
+      "title": "Find the Azure registration entrypoint",
+      "description": "The router's blank import registers Azure through package initialization. It is intentionally the only provider imported by the application. Follow it into `azure_cloud_provider.go` for `BuildAzure`; adding another import here would change the executable's supported-provider surface, not merely organize code."
+    },
+    {
+      "file": "charts/azure_compatibility_test.go",
+      "pattern": "^func TestAzureCompatibility\\(",
+      "title": "Treat chart output as a compatibility contract",
+      "description": "Six populated configurations compare whole parsed resource sets with frozen upstream YAML. Requiring a Deployment, plus VPA in its enabled case, prevents empty rendering from passing. For a packaging change, read the fixture provenance first: the managed-identity existing-Secret reference is the single field-level exception, and the expected files must not be refreshed from the candidate to conceal a regression."
+    },
+    {
+      "file": "apis/integration/informers_test.go",
+      "pattern": "^func TestGeneratedInformerIntegration\\(",
+      "title": "Protect generated API integration",
+      "description": "These six-version checks combine scheme serialization, typed events and namespace indexing with a shared typed/legacy informer cache. They protect the seams used by the application without needing a cluster. A fake-client tracker is not an API server and does not establish admission or server-side apply behavior."
+    },
+    {
+      "file": "cloudprovider/azure/azure_migration_test.go",
+      "pattern": "^func TestVMSSMigrationBoundaries\\(",
+      "title": "Test which request reaches Azure",
+      "description": "This regression exercises real provider methods with mocked Azure clients: owned-group discovery, zero-size templates, bounded growth and the selected non-force Delete request. It is a useful model for provider boundary tests. Successful mocked responses establish the request contract, not that a real VM or NIC disappeared."
+    },
+    {
+      "file": "cloudprovider/azure/test/pkg/environment/config.go",
+      "pattern": "^type Config struct",
+      "title": "Switch from runtime configuration to test binding",
+      "description": "The E2E Config explicitly binds an operator-prepared fixture to a kubeconfig/context, cluster UID, controller image, Azure scope and two pools. Missing or unknown fields fail rather than selecting a default cluster. This JSON is the harness contract, not the provider's cloud config, and its opt-in marker does not replace operator authorization."
+    },
+    {
+      "file": "cloudprovider/azure/test/pkg/environment/azure.go",
+      "pattern": "^type Cloud interface",
+      "title": "Observe cloud state without performing the scale",
+      "description": "The harness Cloud interface exposes reads and NIC-existence checks, not resize methods. Tests create Kubernetes demand and rely on the real autoscaler to act, so a test cannot satisfy its own growth assertion with an Azure update. The reader checks requested capacity and observed instances separately; its sampled limits are not a hard spending interlock."
+    },
+    {
+      "file": "cloudprovider/azure/test/suites/scaleup/suite_test.go",
+      "pattern": "^func readSnapshot\\(",
+      "title": "Distinguish convergence from terminal bounds",
+      "description": "`readSnapshot` converts known resource-bound violations into Gomega StopTrying, while ordinary reads may retry during positive convergence waits. This prevents a later green snapshot from hiding a known breach. Negative windows additionally check controller freshness through `readActiveSnapshot`; no growth alone is insufficient when the controller is unhealthy."
+    },
+    {
+      "file": "cloudprovider/azure/test/suites/scaleup/public_test.go",
+      "pattern": "It\\(\"CA-005 grows for hostname anti-affinity\"",
+      "title": "Trace workload demand to actual placement",
+      "description": "CA-005 first runs one replica, then scales an anti-affinity workload to three and requires three distinct real workers. Scheduler constraints, rather than CPU burning, create the demand. Shared cleanup restores the pool baseline, but this case does not independently attest every removed NIC; only explicit physical-deletion helpers make that stronger claim."
+    },
+    {
+      "file": "Makefile",
+      "pattern": "^test-ci:",
+      "title": "Choose the matching development check",
+      "description": "`test-ci` combines root, API, pinned-core integration and nested E2E local checks; Helm comparisons use `test-chart` separately. Use `GOOS=darwin` on macOS because the build prerequisite otherwise targets Linux. The nested dry run does not execute setup or scenario bodies, and legacy AKS setup targets do not prepare the current fixture."
+    },
+    {
+      "file": "docs/provenance.md",
+      "pattern": "^## Historical live evidence",
+      "title": "Read historical results at their checkpoints",
+      "description": "This note separates frozen source, test checkpoints and runtime identity. The 22 active public intents passed across two historical test revisions, not as all 27 specs at current HEAD. Use those links for background when reviewing a change; new assertions and rebuilt images do not inherit earlier live qualification, and DRA is not deallocate."
+    },
+    {
+      "title": "Make a focused contribution",
+      "description": "Choose a provider boundary, API seam or chart contract and add the smallest regression that demonstrates the intended change. Follow CONTRIBUTING.md for local checks and the E2E operator guide only for separately authorized live work. Useful next reading paths are configuration precedence, VMSS template/discovery behavior and DRA observation assertions; avoid broadening a documentation or test change into a runtime redesign."
+    }
+  ]
+}

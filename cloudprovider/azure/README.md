@@ -6,7 +6,7 @@ This README will help you get cluster autoscaler running on your Azure Kubernete
 
 ## Version and image selection
 
-Build the root-level source tree with `make build`, then publish the resulting image to a registry you control before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that published image reference. This bootstrap does not define an official image registry or release channel.
+Build a local image from the root-level source tree with `make image IMAGE=cluster-autoscaler-azure TAG=dev`. Make an image built from your intended source available to the cluster before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that image reference. This source tree does not define an official image registry or release channel. See the [root build guide](../../README.md#build-and-image-configuration).
 
 ## Permissions
 
