@@ -122,7 +122,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   key: UserAssignedIdentityID
-                  name: {{ template "cluster-autoscaler.fullname" . }}
+                  name: {{ default (include "cluster-autoscaler.fullname" .) .Values.secretKeyRefNameOverride }}
             {{- else }}
             - name: ARM_TENANT_ID
               valueFrom:
