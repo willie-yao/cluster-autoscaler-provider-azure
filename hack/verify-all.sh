@@ -22,7 +22,7 @@ KUBE_ROOT=$(dirname "${BASH_SOURCE}")/..
 source "${KUBE_ROOT}/hack/kube-env.sh"
 
 SILENT=true
-EXCLUDE=${EXCLUDE:-} # nothing excluded by default
+EXCLUDE="${EXCLUDE:-} verify-upstream.sh" # Import verification needs full history.
 
 function is-excluded {
   if [[ $1 -ef ${BASH_SOURCE} ]]; then
