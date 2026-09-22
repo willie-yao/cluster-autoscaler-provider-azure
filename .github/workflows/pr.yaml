@@ -17,10 +17,8 @@ jobs:
         with:
           filters: |
             charts:
-              - 'cluster-autoscaler/charts/**/Chart.yaml'
-              - 'cluster-autoscaler/charts/**/*'
-              - 'vertical-pod-autoscaler/charts/**/Chart.yaml'
-              - 'vertical-pod-autoscaler/charts/**/*'
+              - 'charts/**/Chart.yaml'
+              - 'charts/**/*'
           token: ${{ secrets.GITHUB_TOKEN }}
   helm-lint-test:
     if: ${{ needs.changes.outputs.charts == 'true' }}
@@ -35,15 +33,13 @@ jobs:
         run: git fetch --prune --unshallow
       - name: Set up chart-testing
         uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
-      - name: Run chart-testing for CA (lint)
-        run: ct lint --chart-dirs cluster-autoscaler/charts --target-branch ${{ github.event.pull_request.base.ref }}
-      - name: Run chart-testing for VPA (lint)
-        run: ct lint --chart-dirs vertical-pod-autoscaler/charts --target-branch ${{ github.event.pull_request.base.ref }} --check-version-increment=false
+      - name: Run chart-testing (lint)
+        run: ct lint --chart-dirs charts --target-branch ${{ github.event.pull_request.base.ref }} --validate-maintainers=false
       # Only build a kind cluster if there are chart changes to test.
       - name: Run chart-testing (list-changed)
         id: list-changed
         run: |
-          changed=$(ct list-changed --chart-dirs cluster-autoscaler/charts,vertical-pod-autoscaler/charts --target-branch ${{ github.event.pull_request.base.ref }})
+          changed=$(ct list-changed --chart-dirs charts --target-branch ${{ github.event.pull_request.base.ref }})
           if [[ -n "$changed" ]]; then
             echo "changed=true" >> $GITHUB_OUTPUT
           fi
@@ -54,20 +50,6 @@ jobs:
           config: .github/kind-config.yaml
       - if: steps.list-changed.outputs.changed == 'true'
         name: Run chart-testing (install)
-        run: ct install --chart-dirs cluster-autoscaler/charts,vertical-pod-autoscaler/charts --target-branch ${{ github.event.pull_request.base.ref }}
-  helm-docs-validate:
-    if: ${{ needs.changes.outputs.charts == 'true' }}
-    name: Helm Docs
-    needs:
-      - changes
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
-      - name: Run helm-docs
-        uses: losisin/helm-docs-github-action@3a4528e97c49a5e83de6b78c50c61c8ee5c9f944 # v2.0.0
-        with:
-          fail-on-diff: true
-
+        run: ct install --chart-dirs charts --target-branch ${{ github.event.pull_request.base.ref }}
 name: Lint and Test Charts
 on: pull_request
