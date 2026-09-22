@@ -59,3 +59,11 @@ Please use the following format for linking documentation:
 ```docs
 
 ```
+
+#### How was this PR tested?
+
+<!--
+List the checks you ran and their results, and say what you did not test.
+For live E2E runs, give the commit of the test source, and the source commit and digest of the image you ran.
+Do not include credentials, private environment details or sensitive logs.
+-->
