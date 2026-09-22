@@ -39,7 +39,7 @@ rules:
 {{- if (include "cluster-autoscaler.priorityExpanderEnabled" .) }}
       - watch
 {{- end }}
-{{- if  eq (default "" (index .Values.extraArgs "leader-elect-resource-lock")) "configmaps" }}
+{{- if eq (default "" (index .Values.extraArgs "leader-elect-resource-lock")) "configmaps" }}
   - apiGroups:
       - ""
     resources:
@@ -50,30 +50,7 @@ rules:
       - get
       - update
 {{- end }}
-{{- if and ( and ( eq .Values.cloudProvider "clusterapi" ) ( not .Values.rbac.clusterScoped ) ( or ( eq .Values.clusterAPIMode "incluster-incluster" ) ( eq .Values.clusterAPIMode "kubeconfig-incluster" ) ))}}
-  - apiGroups:
-    - cluster.x-k8s.io
-    resources:
-    - machinedeployments
-    - machinepools
-    - machines
-    - machinesets
-    verbs:
-    - get
-    - list
-    - update
-    - watch
-  - apiGroups:
-    - cluster.x-k8s.io
-    resources:
-    - machinedeployments/scale
-    - machinepools/scale
-    verbs:
-    - get
-    - patch
-    - update
-{{- end }}
-{{- if ( not .Values.rbac.clusterScoped ) }}
+{{- if not .Values.rbac.clusterScoped }}
   - apiGroups:
     - coordination.k8s.io
     resources:
@@ -91,6 +68,6 @@ rules:
     - update
 {{- end }}
 {{- if .Values.rbac.additionalRules }}
-{{ toYaml .Values.rbac.additionalRules | indent 2}}
+{{ toYaml .Values.rbac.additionalRules | indent 2 }}
 {{- end }}
 {{- end -}}

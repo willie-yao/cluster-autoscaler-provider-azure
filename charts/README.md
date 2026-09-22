@@ -7,7 +7,6 @@ The Helm chart for the Cluster Autoscaler project resides within this folder. If
 This Helm repository has pre-commit hooks for Helm specific needs:
 
 * Makes sure all charts pass a `helm lint` check.
-* Updates the `README.md` file of all charts based on comments in that chart's `values.yaml` file.
 
 ### Install `pre-commit` binary
 
@@ -29,6 +28,4 @@ $ pre-commit install
 
 ### Install hook dependencies
 
-The pre-commit hooks themselves call binaries under the hood; they can be installed via the [instructions found here](https://github.com/norwoodj/helm-docs#installation).
-
-Note: You should ensure that whichever installation method you are using you either install the same version of helm-docs as used in the PR workflow to ensure your PR passes CI checks or update the version used by the workflow to match.
+The chart hook requires `helm` to be installed and available on `PATH`.
