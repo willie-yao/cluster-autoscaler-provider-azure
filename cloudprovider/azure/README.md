@@ -28,7 +28,8 @@ removes finalizers. A receipt whose VM is running or has a different VM ID fails
 closed for operator diagnosis.
 
 Parked VMs do not appear as expected Nodes to core, and active target is
-physical VMSS capacity minus parked instances. An ordinary scale-up starts
+physical VMSS capacity minus parked and accepted-deallocating instances,
+counting each excluded instance once. An ordinary scale-up starts
 parked VMs before requesting additional physical capacity, but still refuses
 reuse while any Node conflicts by provider ID or registration name. A rejected
 Start or a missing operation poller is an error, not permission to grow instead.
@@ -43,11 +44,34 @@ Accepted Start completion is observed in the background under the existing
 30-minute Azure operation timeout. Successful and failed observations invalidate
 instance inventory. A terminal Azure failure and an ambiguous observation
 failure are logged separately, and neither releases the accepted capacity
-charge. Azure provisioning state remains the authoritative input to existing
-failed-instance and unregistered-instance cleanup. Stock cleanup still
-physically deletes VMs through the existing `DeleteNodes` path and its
-minimum-size constraints. Failed VM provisioning retains the existing configured
-error classification. Atomic scale-up is not implemented for this mode.
+charge. In provider-only mode, a failed provisioning state with non-running
+power is reported as a failed Start independently of the ordinary fast-delete
+option.
+
+Core represents failed-creation and long-unregistered cleanup as synthetic Nodes
+with no Kubernetes UID. The provider recognizes only those core reasons, resolves
+the current VMSS instance and immutable VM ID, rejects any conflicting real Node,
+and submits Azure Deallocate without fabricating a receipt or Node identity.
+`DeleteNodes` preserves its minimum constraint; `ForceDeleteNodes` bypasses that
+constraint but still deallocates rather than physically deleting the VM.
+Real Nodes use the same receipt, UID, VM-incarnation and finalizer safeguards in
+both routes; Force bypasses only the minimum check.
+
+Accepted synthetic cleanup is reported as deleting and excluded from adjusted
+active target while completion is observed under the existing 30-minute
+background timeout. The physical VM, disk and VMID operation ownership remain
+tracked, and the cleanup slot is not eligible for Start. `IncreaseSize` uses the
+adjusted target for maximum enforcement, so physical VM count may exceed the
+active maximum by retained cleanup or parked slots.
+
+Confirmed completion changes the same VM ID from cleanup exclusion to parked
+exclusion without subtracting it twice. An explicit terminal Deallocate failure
+restores the slot to active accounting and permits ordinary cleanup retry;
+future increases still enforce the adjusted maximum. Ambiguous observation
+failure keeps the exclusion and deallocating marker until authoritative
+inventory proves the VM parked or absent. Later reuse requires a new accepted
+Start of the retained VM.
+Atomic scale-up is not implemented for this mode.
 
 A fresh manager can rediscover settled parked VMs from Azure without an old
 Node. If the old Node remains after a completed stop, its deletion receipt lets

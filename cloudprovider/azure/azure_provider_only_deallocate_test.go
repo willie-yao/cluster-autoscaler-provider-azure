@@ -99,6 +99,117 @@ type parkingPowerTransport struct {
 	failDeallocate   int
 }
 
+type retainedCleanupTransport struct {
+	mu         sync.Mutex
+	world      *parkingWorld
+	next       int
+	operations map[string]string
+	requests   []string
+}
+
+func newRetainedCleanupTransport(world *parkingWorld) *retainedCleanupTransport {
+	return &retainedCleanupTransport{world: world, operations: make(map[string]string)}
+}
+
+func (t *retainedCleanupTransport) Do(request *http.Request) (*http.Response, error) {
+	if err := request.Context().Err(); err != nil {
+		return nil, err
+	}
+	t.mu.Lock()
+	t.requests = append(t.requests, request.Method+" "+request.URL.Path)
+	t.mu.Unlock()
+
+	parts := strings.Split(strings.Trim(request.URL.Path, "/"), "/")
+	if request.Method == http.MethodPost {
+		if len(parts) < 2 {
+			return nil, fmt.Errorf("unexpected retained cleanup request %s", request.URL.Path)
+		}
+		instanceID := parts[len(parts)-2]
+		action := parts[len(parts)-1]
+		instance, err := strconv.Atoi(instanceID)
+		if err != nil {
+			return nil, err
+		}
+		if action != "start" && action != "deallocate" {
+			return nil, fmt.Errorf("unexpected retained cleanup action %s", action)
+		}
+		t.world.mu.Lock()
+		if instance < 0 || instance >= len(t.world.states) {
+			t.world.mu.Unlock()
+			return nil, fmt.Errorf("retained cleanup instance %s is absent", instanceID)
+		}
+		if action == "start" {
+			t.world.states[instance] = vmPowerStateStarting
+		} else {
+			t.world.states[instance] = vmPowerStateDeallocating
+		}
+		t.world.mu.Unlock()
+		t.world.record(action + "-accepted:" + instanceID)
+
+		t.mu.Lock()
+		t.next++
+		operationID := fmt.Sprintf("%s-%s-%d", action, instanceID, t.next)
+		t.operations[operationID] = action + ":" + instanceID
+		t.mu.Unlock()
+		header := make(http.Header)
+		header.Set("Azure-AsyncOperation", "https://management.test/operations/"+operationID)
+		header.Set("Content-Type", "application/json")
+		header.Set("Location", "https://management.test/operations/"+operationID+"/result")
+		return &http.Response{
+			StatusCode: http.StatusAccepted,
+			Header:     header,
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    request,
+		}, nil
+	}
+	if request.Method != http.MethodGet || len(parts) < 2 || parts[0] != "operations" {
+		return nil, fmt.Errorf("unexpected retained cleanup request %s %s", request.Method, request.URL.Path)
+	}
+	operationID := parts[1]
+	t.mu.Lock()
+	operation := t.operations[operationID]
+	t.mu.Unlock()
+	if operation == "" {
+		return nil, fmt.Errorf("unknown retained cleanup operation %s", operationID)
+	}
+	if len(parts) == 3 && parts[2] == "result" {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{"application/json"}},
+			Body:       io.NopCloser(strings.NewReader(`{}`)),
+			Request:    request,
+		}, nil
+	}
+
+	actionAndID := strings.Split(operation, ":")
+	action, instanceID := actionAndID[0], actionAndID[1]
+	instance, _ := strconv.Atoi(instanceID)
+	t.world.mu.Lock()
+	if t.world.provisioning == nil {
+		t.world.provisioning = make(map[int]string)
+	}
+	t.world.provisioning[instance] = provisioningStateSucceeded
+	if action == "start" {
+		t.world.states[instance] = vmPowerStateRunning
+	} else {
+		t.world.states[instance] = vmPowerStateDeallocated
+	}
+	t.world.mu.Unlock()
+	t.world.record(action + "-complete:" + instanceID)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     http.Header{"Content-Type": []string{"application/json"}},
+		Body:       io.NopCloser(strings.NewReader(`{"status":"Succeeded"}`)),
+		Request:    request,
+	}, nil
+}
+
+func (t *retainedCleanupTransport) history() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.requests)
+}
+
 func (t *parkingPowerTransport) Do(request *http.Request) (*http.Response, error) {
 	t.mu.Lock()
 	t.requests = append(t.requests, request)
@@ -211,6 +322,11 @@ func (w *parkingWorld) vms() []*armcompute.VirtualMachineScaleSetVM {
 			Properties: &armcompute.VirtualMachineScaleSetVMProperties{
 				VMID: ptr.To(vmID), ProvisioningState: ptr.To(provisioning),
 				OSProfile: &armcompute.OSProfile{ComputerName: ptr.To("node-" + id)},
+				StorageProfile: &armcompute.StorageProfile{
+					OSDisk: &armcompute.OSDisk{
+						ManagedDisk: &armcompute.ManagedDiskParameters{ID: ptr.To("disk-identity-" + id)},
+					},
+				},
 				InstanceView: &armcompute.VirtualMachineScaleSetVMInstanceView{
 					Statuses: []*armcompute.InstanceViewStatus{{Code: ptr.To(state)}},
 				},
@@ -380,15 +496,15 @@ func newParkingProvider(t *testing.T, w *parkingWorld, client *fake.Clientset, m
 
 func TestProviderOnlyDeallocateStartSubmissionBoundaries(t *testing.T) {
 	t.Run("completion errors distinguish Azure failure from observation failure", func(t *testing.T) {
-		require.True(t, isTerminalStartFailure(&azcore.ResponseError{
+		require.True(t, isTerminalPowerOperationFailure(&azcore.ResponseError{
 			StatusCode:  http.StatusOK,
 			RawResponse: &http.Response{StatusCode: http.StatusOK},
 		}))
-		require.False(t, isTerminalStartFailure(&azcore.ResponseError{
+		require.False(t, isTerminalPowerOperationFailure(&azcore.ResponseError{
 			StatusCode:  http.StatusInternalServerError,
 			RawResponse: &http.Response{StatusCode: http.StatusInternalServerError},
 		}))
-		require.False(t, isTerminalStartFailure(errors.New("final result retrieval failed")))
+		require.False(t, isTerminalPowerOperationFailure(errors.New("final result retrieval failed")))
 	})
 
 	t.Run("missing poller is not accepted", func(t *testing.T) {
@@ -522,7 +638,7 @@ func checkParkingSize(t *testing.T, group *ScaleSet, want int) {
 
 func checkParkingCounts(t *testing.T, group *ScaleSet, physical, active, parked, returning int) {
 	t.Helper()
-	vms, parkedByID, err := group.parkingInventory()
+	vms, parkedByID, _, err := group.parkingInventory()
 	require.NoError(t, err)
 	require.Len(t, vms, physical)
 	actualParked := 0
@@ -1074,7 +1190,7 @@ func TestProviderOnlyDeallocateRejectedStartRecovery(t *testing.T) {
 		require.Nil(t, request.Body)
 
 		checkParkingSize(t, group, 1)
-		vms, parked, err := group.parkingInventory()
+		vms, parked, _, err := group.parkingInventory()
 		require.NoError(t, err)
 		require.Len(t, vms, 2)
 		require.False(t, parked["0"])
@@ -1718,31 +1834,117 @@ func TestProviderOnlyDeallocateUnsupportedPools(t *testing.T) {
 }
 
 func TestProviderOnlyDeallocateUnregisteredCleanup(t *testing.T) {
-	for _, failStart := range []bool{false, true} {
-		t.Run(fmt.Sprintf("failed-start-%t", failStart), func(t *testing.T) {
-			infra := integration.SetupInfrastructure(t)
-			synctest.Test(t, func(t *testing.T) {
-				ctx, cancel := context.WithCancel(context.Background())
-				defer synctestutils.TearDown(cancel)
-				world := &parkingWorld{states: []string{vmPowerStateDeallocated}, failStart: failStart}
-				client := infra.Fakes.KubeClient
-				provider, group := newParkingProvider(t, world, client, 0, 1, true)
-				pod := catest.BuildTestPod("demand", 2000, 100, catest.MarkUnschedulable())
-				_, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+	infra := integration.SetupInfrastructure(t)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer synctestutils.TearDown(cancel)
+		world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+		client := infra.Fakes.KubeClient
+		provider, group := newParkingProvider(t, world, client, 0, 1, true)
+		power := newRetainedCleanupTransport(world)
+		provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+		beforeVMIDs := slowStartWorldVMIDs(world)
+		beforeDisks := slowStartWorldDiskIDs(world)
+		pod := catest.BuildTestPod("demand", 2000, 100, catest.MarkUnschedulable())
+		_, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
+		require.NoError(t, err)
+		autoscaler := parkingAutoscaler(t, ctx, infra, provider)
+		require.False(t, autoscaler.ForceDeleteLongUnregisteredNodes)
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		require.Equal(t, []string{"start-accepted:0", "start-complete:0"}, world.history())
+		require.NoError(t, client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		synctestutils.MustRunOnceAfter(t, autoscaler, 3*time.Minute)
+		synctestutils.MustRunOnceAfter(t, autoscaler, 11*time.Minute)
+		require.Equal(t, []string{
+			"start-accepted:0",
+			"start-complete:0",
+			"deallocate-accepted:0",
+			"deallocate-complete:0",
+		}, world.history())
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute)
+		checkParkingCounts(t, group, 1, 0, 1, 0)
+		require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
+		require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
+		require.False(t, world.deleted[0])
+
+		later := catest.BuildTestPod("later-demand", 2000, 100, catest.MarkUnschedulable())
+		_, err = client.CoreV1().Pods(later.Namespace).Create(ctx, later, metav1.CreateOptions{})
+		require.NoError(t, err)
+		for range 7 {
+			synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute)
+			if len(world.history()) == 6 {
+				break
+			}
+		}
+		require.Equal(t, []string{
+			"start-accepted:0",
+			"start-complete:0",
+			"deallocate-accepted:0",
+			"deallocate-complete:0",
+			"start-accepted:0",
+			"start-complete:0",
+		}, world.history())
+		checkParkingCounts(t, group, 1, 1, 0, 0)
+		require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
+		require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
+		require.Len(t, power.history(), 9)
+		require.NotContains(t, strings.Join(power.history(), "\n"), "/delete")
+	})
+}
+
+func TestProviderOnlyDeallocateRealNodeForceMinimumRouting(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		name := "ordinary Delete preserves minimum"
+		if force {
+			name = "Force bypasses minimum with receipt safeguards"
+		}
+		t.Run(name, func(t *testing.T) {
+			world := &parkingWorld{states: []string{vmPowerStateRunning}}
+			client := fake.NewClientset()
+			provider, group := newParkingProvider(t, world, client, 1, 1, true)
+			power := newRetainedCleanupTransport(world)
+			provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+			beforeVMIDs := slowStartWorldVMIDs(world)
+			beforeDisks := slowStartWorldDiskIDs(world)
+			node := parkingNode(0, "real-node", true)
+			_, err := client.CoreV1().Nodes().Create(t.Context(), node, metav1.CreateOptions{})
+			require.NoError(t, err)
+			deleteCalls := 0
+			client.PrependReactor("delete", "nodes", func(action clienttesting.Action) (bool, runtime.Object, error) {
+				a := action.(clienttesting.DeleteAction)
+				current, err := client.Tracker().Get(apiv1.SchemeGroupVersion.WithResource("nodes"), "", a.GetName())
 				require.NoError(t, err)
-				autoscaler := parkingAutoscaler(t, ctx, infra, provider)
-				require.False(t, autoscaler.ForceDeleteLongUnregisteredNodes)
-				synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
-				require.Equal(t, []string{"start:0"}, world.history())
-				require.NoError(t, client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
-				synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
-				synctestutils.MustRunOnceAfter(t, autoscaler, 3*time.Minute)
-				synctestutils.MustRunOnceAfter(t, autoscaler, 11*time.Minute)
-				require.Equal(t, []string{"start:0", "physical-delete:0"}, world.history())
-				synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute)
-				checkParkingSize(t, group, 0)
-				require.Empty(t, group.powerOverrides)
+				require.Contains(t, current.(*apiv1.Node).Annotations, providerOnlyDeleteReceiptAnnotation)
+				require.NotNil(t, a.GetDeleteOptions().Preconditions)
+				require.Equal(t, node.UID, *a.GetDeleteOptions().Preconditions.UID)
+				deleteCalls++
+				return false, nil, nil
 			})
+
+			if force {
+				err = group.ForceDeleteNodes(t.Context(), []*apiv1.Node{node})
+				require.NoError(t, err)
+				require.Equal(t, 1, deleteCalls)
+				require.Equal(t, []string{"deallocate-accepted:0", "deallocate-complete:0"}, world.history())
+				require.Len(t, power.history(), 3)
+				_, err = client.CoreV1().Nodes().Get(t.Context(), node.Name, metav1.GetOptions{})
+				require.True(t, apierrors.IsNotFound(err))
+				checkParkingCounts(t, group, 1, 0, 1, 0)
+				require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
+				require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
+				return
+			}
+
+			err = group.DeleteNodes(t.Context(), []*apiv1.Node{node})
+			require.ErrorContains(t, err, "below minimum")
+			require.Zero(t, deleteCalls)
+			require.Empty(t, power.history())
+			_, err = client.CoreV1().Nodes().Get(t.Context(), node.Name, metav1.GetOptions{})
+			require.NoError(t, err)
+			checkParkingCounts(t, group, 1, 1, 0, 0)
+			require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
+			require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
 		})
 	}
 }
@@ -1757,13 +1959,15 @@ func TestProviderOnlyDeallocateFailedFreshVM(t *testing.T) {
 				world := &parkingWorld{}
 				client := infra.Fakes.KubeClient
 				provider, group := newParkingProvider(t, world, client, 0, 1, true)
-				group.enableFastDeleteOnFailedProvisioning = true
+				require.False(t, group.enableFastDeleteOnFailedProvisioning)
 				pod := catest.BuildTestPod("demand", 2000, 100, catest.MarkUnschedulable())
 				_, err := client.CoreV1().Pods(pod.Namespace).Create(ctx, pod, metav1.CreateOptions{})
 				require.NoError(t, err)
 				autoscaler := parkingAutoscaler(t, ctx, infra, provider)
 				synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
 				require.Equal(t, []string{"grow:1"}, world.history())
+				beforeVMIDs := slowStartWorldVMIDs(world)
+				beforeDisks := slowStartWorldDiskIDs(world)
 				require.NoError(t, client.CoreV1().Pods(pod.Namespace).Delete(ctx, pod.Name, metav1.DeleteOptions{}))
 				world.mu.Lock()
 				world.states[0] = power
@@ -1775,12 +1979,15 @@ func TestProviderOnlyDeallocateFailedFreshVM(t *testing.T) {
 				require.Len(t, instances, 1)
 				require.Equal(t, cloudprovider.InstanceCreating, instances[0].Status.State)
 				require.NotNil(t, instances[0].Status.ErrorInfo)
-				require.Equal(t, "provisioning-state-failed", instances[0].Status.ErrorInfo.ErrorCode)
+				require.Equal(t, "start-deallocated-failed", instances[0].Status.ErrorInfo.ErrorCode)
 				for range 2 {
 					synctestutils.MustRunOnceAfter(t, autoscaler, time.Minute)
 				}
-				require.Equal(t, []string{"grow:1", "physical-delete:0"}, world.history())
-				checkParkingSize(t, group, 0)
+				require.Equal(t, []string{"grow:1", "deallocate:0"}, world.history())
+				checkParkingCounts(t, group, 1, 0, 1, 0)
+				require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
+				require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
+				require.False(t, world.deleted[0])
 			})
 		})
 	}

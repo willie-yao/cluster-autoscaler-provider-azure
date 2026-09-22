@@ -103,6 +103,9 @@ type ScaleSet struct {
 	powerMutex sync.Mutex
 	// powerOverrides bridge accepted operations by VMID until instance view catches up.
 	powerOverrides map[string]bool
+	// syntheticDeallocating keeps accepted synthetic cleanup active-charged but out of incoming capacity.
+	syntheticDeallocating     map[string]uint64
+	nextSyntheticDeallocation uint64
 }
 
 // NewScaleSet creates a new NewScaleSet.
@@ -902,17 +905,17 @@ func (scaleSet *ScaleSet) waitForDeleteInstances(poller *runtime.Poller[armcompu
 // DeleteNodes deletes the nodes from the group.
 func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
 	if scaleSet.manager.config.ProviderOnlyDeallocate {
-		synthetic := len(nodes) > 0
-		for _, node := range nodes {
-			reason := node.Annotations[cloudprovider.FakeNodeReasonAnnotation]
-			if node.UID != "" || (reason != cloudprovider.FakeNodeUnregistered && reason != cloudprovider.FakeNodeCreateError) {
-				synthetic = false
-				break
-			}
-		}
-		if !synthetic {
+		if !isProviderOnlySyntheticCleanup(nodes) {
 			return scaleSet.parkNodes(ctx, nodes)
 		}
+		size, err := scaleSet.getScaleSetSize()
+		if err != nil {
+			return err
+		}
+		if int(size) <= scaleSet.MinSize(context.TODO()) {
+			return fmt.Errorf("min size reached, nodes will not be deleted")
+		}
+		return scaleSet.deallocateSyntheticNodes(ctx, nodes)
 	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	size, err := scaleSet.getScaleSetSize()
@@ -931,6 +934,12 @@ func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) 
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
 func (scaleSet *ScaleSet) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	if scaleSet.manager.config.ProviderOnlyDeallocate {
+		if isProviderOnlySyntheticCleanup(nodes) {
+			return scaleSet.deallocateSyntheticNodes(ctx, nodes)
+		}
+		return scaleSet.parkNodesWithMinimum(ctx, nodes, false)
+	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	refs := make([]*azureRef, 0, len(nodes))
 	hasUnregisteredNodes := false

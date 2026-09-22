@@ -152,6 +152,13 @@ type acceptedStartOperation struct {
 	resourceID string
 }
 
+type acceptedSyntheticDeallocateOperation struct {
+	poller     *runtime.Poller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse]
+	resourceID string
+	vmID       string
+	token      uint64
+}
+
 func (m *AzureManager) providerOnlyGroup(providerID string) (*ScaleSet, error) {
 	for _, group := range m.getNodeGroups() {
 		scaleSet, ok := group.(*ScaleSet)
@@ -309,11 +316,11 @@ func (s *ScaleSet) deleteProviderOnlyReceiptNode(ctx context.Context, receipt pr
 	return nil
 }
 
-func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
+func (s *ScaleSet) parkingInventory() ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, map[string]bool, error) {
 	return s.parkingInventoryWithList(s.GetScaleSetVms)
 }
 
-func (s *ScaleSet) parkingInventoryWithContext(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
+func (s *ScaleSet) parkingInventoryWithContext(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, map[string]bool, error) {
 	return s.parkingInventoryWithList(func() ([]*armcompute.VirtualMachineScaleSetVM, error) {
 		return s.getScaleSetVms(ctx)
 	})
@@ -321,22 +328,23 @@ func (s *ScaleSet) parkingInventoryWithContext(ctx context.Context) ([]*armcompu
 
 func (s *ScaleSet) parkingInventoryWithList(
 	list func() ([]*armcompute.VirtualMachineScaleSetVM, error),
-) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, error) {
+) ([]*armcompute.VirtualMachineScaleSetVM, map[string]bool, map[string]bool, error) {
 	s.powerMutex.Lock()
 	defer s.powerMutex.Unlock()
 	if err := s.validateParking(); err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	vms, err := list()
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, nil, err
 	}
 	parked := make(map[string]bool, len(vms))
+	deallocating := make(map[string]bool, len(vms))
 	observedVMIDs := make(map[string]bool, len(vms))
 	for _, vm := range vms {
 		if vm == nil || vm.ID == nil || vm.InstanceID == nil || vm.Properties == nil ||
 			vm.Properties.VMID == nil || *vm.Properties.VMID == "" {
-			return nil, nil, fmt.Errorf("incomplete VM instance view for %s", s.Name)
+			return nil, nil, nil, fmt.Errorf("incomplete VM instance view for %s", s.Name)
 		}
 		state := vmPowerStateUnknown
 		if vm.Properties.InstanceView != nil {
@@ -345,11 +353,20 @@ func (s *ScaleSet) parkingInventoryWithList(
 		provisioning := ptr.Deref(vm.Properties.ProvisioningState, "")
 		if state == vmPowerStateUnknown && provisioning != VMProvisioningStateCreating &&
 			provisioning != VMProvisioningStateFailed && provisioning != VMProvisioningStateDeleting {
-			return nil, nil, fmt.Errorf("unknown VM power state for %s", *vm.ID)
+			return nil, nil, nil, fmt.Errorf("unknown VM power state for %s", *vm.ID)
 		}
 		isParked := isAuthoritativelyParked(vm)
 		vmID := *vm.Properties.VMID
 		observedVMIDs[vmID] = true
+		_, cleanupPending := s.syntheticDeallocating[vmID]
+		if cleanupPending && isParked {
+			delete(s.syntheticDeallocating, vmID)
+			if s.powerOverrides == nil {
+				s.powerOverrides = make(map[string]bool)
+			}
+			s.powerOverrides[vmID] = true
+			cleanupPending = false
+		}
 		if override, ok := s.powerOverrides[vmID]; ok {
 			if (override && isParked) || (!override && state == vmPowerStateRunning) {
 				delete(s.powerOverrides, vmID)
@@ -358,17 +375,23 @@ func (s *ScaleSet) parkingInventoryWithList(
 			}
 		}
 		parked[*vm.InstanceID] = isParked
+		deallocating[*vm.InstanceID] = cleanupPending
 	}
 	for vmID := range s.powerOverrides {
 		if !observedVMIDs[vmID] {
 			delete(s.powerOverrides, vmID)
 		}
 	}
-	return vms, parked, nil
+	for vmID := range s.syntheticDeallocating {
+		if !observedVMIDs[vmID] {
+			delete(s.syntheticDeallocating, vmID)
+		}
+	}
+	return vms, parked, deallocating, nil
 }
 
 func (s *ScaleSet) providerOnlyNodes() ([]cloudprovider.Instance, error) {
-	vms, parked, err := s.parkingInventory()
+	vms, parked, deallocating, err := s.parkingInventory()
 	if err != nil {
 		return nil, err
 	}
@@ -392,20 +415,23 @@ func (s *ScaleSet) providerOnlyNodes() ([]cloudprovider.Instance, error) {
 			(vm.Properties.InstanceView == nil || vmPowerStateFromStatuses(vm.Properties.InstanceView.Statuses) != vmPowerStateRunning) {
 			status.State = cloudprovider.InstanceCreating
 		}
+		if deallocating[*vm.InstanceID] {
+			status = cloudprovider.InstanceStatus{State: cloudprovider.InstanceDeleting}
+		}
 		instances = append(instances, cloudprovider.Instance{Id: azurePrefix + id, Status: &status})
 	}
 	return instances, nil
 }
 
 func (s *ScaleSet) providerOnlyTargetSize() (int64, error) {
-	_, parked, err := s.parkingInventory()
+	_, parked, deallocating, err := s.parkingInventory()
 	if err != nil {
 		return 0, err
 	}
-	return s.activeTarget(parked)
+	return s.activeTarget(parked, deallocating)
 }
 
-func (s *ScaleSet) activeTarget(parked map[string]bool) (int64, error) {
+func (s *ScaleSet) activeTarget(parked map[string]bool, deallocating map[string]bool) (int64, error) {
 	physical, err := s.getCurSize()
 	if err != nil {
 		return 0, err.error
@@ -415,8 +441,13 @@ func (s *ScaleSet) activeTarget(parked map[string]bool) (int64, error) {
 			physical--
 		}
 	}
+	for instanceID, isDeallocating := range deallocating {
+		if isDeallocating && !parked[instanceID] {
+			physical--
+		}
+	}
 	if physical < 0 {
-		return 0, fmt.Errorf("parked inventory exceeds VMSS capacity for %s", s.Name)
+		return 0, fmt.Errorf("parked and deallocating inventory exceeds VMSS capacity for %s", s.Name)
 	}
 	return physical, nil
 }
@@ -430,7 +461,69 @@ func (s *ScaleSet) setPowerOverride(vmID string, parked bool) {
 	s.powerOverrides[vmID] = parked
 }
 
+func (s *ScaleSet) isSyntheticDeallocating(vmID string) bool {
+	s.powerMutex.Lock()
+	defer s.powerMutex.Unlock()
+	_, found := s.syntheticDeallocating[vmID]
+	return found
+}
+
+func (s *ScaleSet) setSyntheticDeallocating(vmID string) uint64 {
+	s.powerMutex.Lock()
+	defer s.powerMutex.Unlock()
+	if s.syntheticDeallocating == nil {
+		s.syntheticDeallocating = make(map[string]uint64)
+	}
+	s.nextSyntheticDeallocation++
+	s.syntheticDeallocating[vmID] = s.nextSyntheticDeallocation
+	return s.nextSyntheticDeallocation
+}
+
+func (s *ScaleSet) clearSyntheticDeallocating(vmID string, token uint64) bool {
+	s.powerMutex.Lock()
+	defer s.powerMutex.Unlock()
+	if s.syntheticDeallocating[vmID] != token {
+		return false
+	}
+	delete(s.syntheticDeallocating, vmID)
+	return true
+}
+
+func (s *ScaleSet) completeSyntheticDeallocate(vmID string, token uint64) bool {
+	s.powerMutex.Lock()
+	defer s.powerMutex.Unlock()
+	if s.syntheticDeallocating[vmID] != token {
+		return false
+	}
+	delete(s.syntheticDeallocating, vmID)
+	if s.powerOverrides == nil {
+		s.powerOverrides = make(map[string]bool)
+	}
+	s.powerOverrides[vmID] = true
+	return true
+}
+
+func isProviderOnlySyntheticCleanup(nodes []*apiv1.Node) bool {
+	if len(nodes) == 0 {
+		return false
+	}
+	for _, node := range nodes {
+		if node == nil {
+			return false
+		}
+		reason := node.Annotations[cloudprovider.FakeNodeReasonAnnotation]
+		if node.UID != "" || (reason != cloudprovider.FakeNodeUnregistered && reason != cloudprovider.FakeNodeCreateError) {
+			return false
+		}
+	}
+	return true
+}
+
 func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	return s.parkNodesWithMinimum(ctx, nodes, true)
+}
+
+func (s *ScaleSet) parkNodesWithMinimum(ctx context.Context, nodes []*apiv1.Node, enforceMinimum bool) error {
 	ctx, cancel := context.WithTimeout(ctx, asyncContextTimeout)
 	defer cancel()
 	s.parkMutex.Lock()
@@ -438,11 +531,11 @@ func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
 	if s.manager.kubeClient == nil || s.manager.azClient.vmssPowerClient == nil {
 		return fmt.Errorf("providerOnlyDeallocate requires Kubernetes and VMSS power clients")
 	}
-	vms, parked, err := s.parkingInventory()
+	vms, parked, deallocating, err := s.parkingInventory()
 	if err != nil {
 		return err
 	}
-	active, err := s.activeTarget(parked)
+	active, err := s.activeTarget(parked, deallocating)
 	if err != nil {
 		return err
 	}
@@ -498,7 +591,7 @@ func (s *ScaleSet) parkNodes(ctx context.Context, nodes []*apiv1.Node) error {
 		newStops++
 		candidates = append(candidates, parkingCandidate{node: current, vm: vm, receipt: receipt})
 	}
-	if active-int64(newStops) < int64(s.minSize) {
+	if enforceMinimum && active-int64(newStops) < int64(s.minSize) {
 		return fmt.Errorf("parking %d nodes would fall below minimum %d", newStops, s.minSize)
 	}
 	for _, candidate := range candidates {
@@ -609,7 +702,7 @@ func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 	ctx context.Context,
 	receipts []providerOnlyDeleteReceipt,
 ) error {
-	vms, _, err := s.parkingInventoryWithContext(ctx)
+	vms, _, _, err := s.parkingInventoryWithContext(ctx)
 	if err != nil {
 		return fmt.Errorf("load VM inventory for provider-only deletion recovery in %s: %w", s.Name, err)
 	}
@@ -664,6 +757,110 @@ func (s *ScaleSet) reconcileProviderOnlyDeleteReceipts(
 	return nil
 }
 
+func (s *ScaleSet) deallocateSyntheticNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	submissionCtx, cancel := context.WithTimeout(ctx, vmssContextTimeout)
+	defer cancel()
+	if s.manager.kubeClient == nil || s.manager.azClient.vmssPowerClient == nil {
+		return fmt.Errorf("providerOnlyDeallocate requires Kubernetes and VMSS power clients")
+	}
+	if err := s.lockParkOperation(submissionCtx); err != nil {
+		return fmt.Errorf("waiting to submit provider-only cleanup for %s: %w", s.Name, err)
+	}
+	accepted := make([]acceptedSyntheticDeallocateOperation, 0, len(nodes))
+	defer func() {
+		s.parkMutex.Unlock()
+		for _, operation := range accepted {
+			go s.waitForSyntheticDeallocate(operation)
+		}
+	}()
+
+	vms, _, _, err := s.parkingInventoryWithContext(submissionCtx)
+	if err != nil {
+		return err
+	}
+	byProviderID := make(map[string]*armcompute.VirtualMachineScaleSetVM, len(vms))
+	for _, vm := range vms {
+		byProviderID[normalizeProviderID(azurePrefix+*vm.ID)] = vm
+	}
+	realNodes, err := s.manager.kubeClient.CoreV1().Nodes().List(submissionCtx, metav1.ListOptions{})
+	if err != nil {
+		return err
+	}
+	seen := make(map[string]bool, len(nodes))
+	for _, node := range nodes {
+		vm := byProviderID[normalizeProviderID(node.Spec.ProviderID)]
+		if vm == nil || seen[*vm.InstanceID] {
+			return fmt.Errorf("synthetic node %s is not a unique VM in %s", node.Name, s.Name)
+		}
+		seen[*vm.InstanceID] = true
+		vmID := *vm.Properties.VMID
+		if s.isSyntheticDeallocating(vmID) {
+			continue
+		}
+		if vm.Properties.OSProfile == nil || ptr.Deref(vm.Properties.OSProfile.ComputerName, "") == "" {
+			return fmt.Errorf("synthetic cleanup VM %s has no registration name", *vm.ID)
+		}
+		for _, realNode := range realNodes.Items {
+			if strings.EqualFold(realNode.Spec.ProviderID, azurePrefix+*vm.ID) ||
+				strings.EqualFold(realNode.Name, *vm.Properties.OSProfile.ComputerName) {
+				return fmt.Errorf("synthetic cleanup VM %s still has Node %s", *vm.ID, realNode.Name)
+			}
+		}
+		poller, err := s.manager.azClient.vmssPowerClient.BeginDeallocate(
+			submissionCtx,
+			s.manager.config.ResourceGroup,
+			s.Name,
+			*vm.InstanceID,
+			nil,
+		)
+		if err != nil {
+			return fmt.Errorf("deallocate synthetic VM %s: %w", *vm.ID, err)
+		}
+		if poller == nil {
+			return fmt.Errorf("deallocate synthetic VM %s returned no operation", *vm.ID)
+		}
+		token := s.setSyntheticDeallocating(vmID)
+		accepted = append(accepted, acceptedSyntheticDeallocateOperation{
+			poller: poller, resourceID: *vm.ID, vmID: vmID, token: token,
+		})
+	}
+	return nil
+}
+
+func (s *ScaleSet) waitForSyntheticDeallocate(operation acceptedSyntheticDeallocateOperation) {
+	ctx, cancel := getContextWithTimeout(asyncContextTimeout)
+	defer cancel()
+
+	klog.V(3).Infof("Calling PollUntilDone for synthetic Deallocate(%s)", operation.resourceID)
+	_, err := operation.poller.PollUntilDone(ctx, nil)
+	s.invalidateInstanceCache()
+	if err != nil {
+		if isTerminalPowerOperationFailure(err) {
+			if !s.clearSyntheticDeallocating(operation.vmID, operation.token) {
+				klog.V(3).Infof("Ignoring superseded synthetic Deallocate failure for %s", operation.resourceID)
+				return
+			}
+			klog.Errorf(
+				"Synthetic Deallocate operation for %s completed with failure after acceptance: %v; active charge retained for ordinary cleanup retry",
+				operation.resourceID,
+				err,
+			)
+		} else {
+			klog.Errorf(
+				"Failed to observe completion of accepted synthetic Deallocate operation for %s: %v; active charge and deallocating state retained",
+				operation.resourceID,
+				err,
+			)
+		}
+		return
+	}
+	if !s.completeSyntheticDeallocate(operation.vmID, operation.token) {
+		klog.V(3).Infof("Ignoring superseded synthetic Deallocate completion for %s", operation.resourceID)
+		return
+	}
+	klog.V(3).Infof("PollUntilDone for synthetic Deallocate(%s) success", operation.resourceID)
+}
+
 func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 	submissionCtx, cancel := context.WithTimeout(ctx, vmssContextTimeout)
 	defer cancel()
@@ -684,11 +881,11 @@ func (s *ScaleSet) increaseWithParked(ctx context.Context, delta int) error {
 		}
 	}()
 
-	vms, parked, err := s.parkingInventoryWithContext(submissionCtx)
+	vms, parked, deallocating, err := s.parkingInventoryWithContext(submissionCtx)
 	if err != nil {
 		return err
 	}
-	active, err := s.activeTarget(parked)
+	active, err := s.activeTarget(parked, deallocating)
 	if err != nil {
 		return err
 	}
@@ -763,7 +960,7 @@ func (s *ScaleSet) waitForStart(operation acceptedStartOperation) {
 	_, err := operation.poller.PollUntilDone(ctx, nil)
 	s.invalidateInstanceCache()
 	if err != nil {
-		if isTerminalStartFailure(err) {
+		if isTerminalPowerOperationFailure(err) {
 			klog.Errorf(
 				"Start operation for %s completed with failure after acceptance: %v; accepted capacity remains charged pending ordinary instance cleanup",
 				operation.resourceID,
@@ -781,7 +978,7 @@ func (s *ScaleSet) waitForStart(operation acceptedStartOperation) {
 	klog.V(3).Infof("PollUntilDone for Start(%s) success", operation.resourceID)
 }
 
-func isTerminalStartFailure(err error) bool {
+func isTerminalPowerOperationFailure(err error) bool {
 	var responseError *azcore.ResponseError
 	if !errors.As(err, &responseError) || responseError.RawResponse == nil {
 		return false
