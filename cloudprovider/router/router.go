@@ -1,6 +1,3 @@
-//go:build azure
-// +build azure
-
 /*
 Copyright The Kubernetes Authors.
 
@@ -17,10 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package router registers the Azure cloud provider.
 package router
 
 import (
 	// Blank import to register a cloudprovider outside main or test package.
-	// This is by design.
+	// This repository supports Azure only.
 	_ "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure"
 )
