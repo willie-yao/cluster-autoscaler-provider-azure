@@ -141,7 +141,6 @@ skipped_names = [
     "hack/boilerplate/test",
     "hack/boilerplate/boilerplate.py",
     "hack/list-owners.py",
-    "hack/scripts/break_mig.py",
     "hack/scripts/ca_metrics_parser.py",
     "cloudprovider/azure/azure_instance_types/gen.go",
 ]
