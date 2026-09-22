@@ -1,0 +1,4 @@
+autoDiscovery:
+  clusterName: test-cluster
+azureUseManagedIdentityExtension: true
+secretKeyRefNameOverride: existing-azure-config

@@ -1,0 +1,9 @@
+cloudProvider: azure
+image:
+  repository: example.invalid/cluster-autoscaler
+  tag: migration-test
+azureSubscriptionID: test-subscription
+azureResourceGroup: test-node-resource-group
+azureTenantID: test-tenant
+azureClientID: test-client
+azureClientSecret: not-a-real-secret
