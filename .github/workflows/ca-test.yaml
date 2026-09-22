@@ -27,6 +27,7 @@ jobs:
           cache-dependency-path: |
              ${{ env.GOPATH}}/src/k8s.io/autoscaler/go.sum
              ${{ env.GOPATH}}/src/k8s.io/autoscaler/apis/go.sum
+             ${{ env.GOPATH}}/src/k8s.io/autoscaler/cloudprovider/azure/test/go.sum
 
       - name: Apt-get
         run: sudo apt-get install libseccomp-dev -qq
