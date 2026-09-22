@@ -19,6 +19,10 @@ jobs:
             charts:
               - 'charts/**/Chart.yaml'
               - 'charts/**/*'
+              - '.github/workflows/pr.yaml'
+              - 'Makefile'
+              - 'go.mod'
+              - 'go.sum'
           token: ${{ secrets.GITHUB_TOKEN }}
   helm-lint-test:
     if: ${{ needs.changes.outputs.charts == 'true' }}
@@ -33,6 +37,12 @@ jobs:
         run: git fetch --prune --unshallow
       - name: Set up chart-testing
         uses: helm/chart-testing-action@6ec842c01de15ebb84c8627d2744a0c2f2755c9f # v2.8.0
+      - name: Set up Go
+        uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Compare Azure chart with pinned upstream
+        run: make test-chart
       - name: Run chart-testing (lint)
         run: ct lint --chart-dirs charts --target-branch ${{ github.event.pull_request.base.ref }} --validate-maintainers=false
       # Only build a kind cluster if there are chart changes to test.
