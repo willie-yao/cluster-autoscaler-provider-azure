@@ -1,0 +1,10 @@
+autoscalingGroups:
+  - name: standard-pool
+    minSize: 1
+    maxSize: 5
+rbac:
+  clusterScoped: false
+  additionalRules:
+    - apiGroups: [""]
+      resources: ["resourcequotas"]
+      verbs: ["get", "list", "watch"]
