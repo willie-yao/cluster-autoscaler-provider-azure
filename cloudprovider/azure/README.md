@@ -4,15 +4,9 @@ The cluster autoscaler on Azure dynamically scales Kubernetes worker nodes. It r
 
 This README will help you get cluster autoscaler running on your Azure Kubernetes cluster.
 
-## Kubernetes Version
+## Version and image selection
 
-Kubernetes v1.10.x or later is required to use cluster autoscaler on Azure. See the "[Releases][]" section in the README for more information.
-
-## CA Version
-
-Cluster autoscaler v1.2.x or later is required for Azure. See the "[Releases][]" section in the README for more information.
-
-> **_NOTE_**: In the deployment manifests referenced below, be sure to replace the `{{ ca_version }}` placeholder with an actual release, such as `v1.14.2`.
+Build a local image from the root-level source tree with `make image IMAGE=cluster-autoscaler-azure TAG=dev`. Make an image built from your intended source available to the cluster before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that image reference. This source tree does not define an official image registry or release channel. See the [root build guide](../../README.md#build-and-image-configuration).
 
 ## Permissions
 
@@ -146,7 +140,7 @@ To allow scaling similar node pools simultaneously, or when using separate node 
         - --balance-similar-node-groups=true
 ```
 
-See the [FAQ](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#im-running-cluster-with-nodes-in-multiple-zones-for-ha-purposes-is-that-supported-by-cluster-autoscaler) for more details.
+Use `--balance-similar-node-groups` only when the node pools are suitable to scale interchangeably.
 
 Save the updated deployment manifest, then deploy cluster-autoscaler by running:
 
@@ -223,7 +217,7 @@ Make a copy of [cluster-autoscaler-standard-control-plane.yaml](examples/cluster
 
 > **_NOTE_**: Use a command such as `echo $CLIENT_ID | base64` to encode each of the fields above.
 
-In the `cluster-autoscaler` spec, find the `image:` field and replace `{{ ca_version }}` with a specific cluster autoscaler release.
+In the `cluster-autoscaler` spec, replace the image placeholder with an image you have built and published.
 
 Below that, in the `command:` section, update the `--nodes=` arguments to reference your node limits and node pool name (tips: node pool name is NOT availability set name, e.g., the corresponding node pool name of the availability set
 `agentpool1-availabilitySet-xxxxxxxx` would be `agentpool1`). For example, if node pool "k8s-nodepool-1" should scale from 1 to 10 nodes:
@@ -295,7 +289,6 @@ The new version of [Azure client][] supports rate limit and back-off retries whe
 [aks-engine]: https://github.com/Azure/aks-engine
 [Azure CLI]: https://docs.microsoft.com/cli/azure/install-azure-cli
 [Azure Portal]: https://portal.azure.com
-[Releases]: ../../README.md#releases
 [service principal]: https://docs.microsoft.com/azure/active-directory/develop/app-objects-and-service-principals
 [helm installation tutorial]: https://github.com/helm/charts/tree/master/stable/cluster-autoscaler#azure-aks
 [Azure client]: https://github.com/kubernetes-sigs/cloud-provider-azure/tree/master/pkg/azureclients
