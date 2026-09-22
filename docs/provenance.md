@@ -1,12 +1,40 @@
-# Source provenance
+# Source provenance and compatibility scope
 
-Imported selected files unchanged from `kubernetes/autoscaler@7df904eabeef796b63ca845b7d5e7f6d9a300f44`.
-The first commit preserves upstream paths and modes. The second only moves files.
-The third changes only the module and owned package paths, with Go formatting.
+## Source identity
+
+| Component | Source |
+| --- | --- |
+| Upstream application and chart | [`kubernetes/autoscaler@7df904eabeef796b63ca845b7d5e7f6d9a300f44`](https://github.com/kubernetes/autoscaler/tree/7df904eabeef796b63ca845b7d5e7f6d9a300f44) |
+| Extracted autoscaling core | [`kubernetes-sigs/cluster-autoscaler@3d1c7137cdac`](https://github.com/kubernetes-sigs/cluster-autoscaler/commit/3d1c7137cdac), module `sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac` |
+| Autoscaler APIs | [`kubernetes/autoscaler@eec9bc4dc1d2`](https://github.com/kubernetes/autoscaler/tree/eec9bc4dc1d2/cluster-autoscaler/apis), module `k8s.io/autoscaler/cluster-autoscaler/apis v0.0.0-20260717085528-eec9bc4dc1d2`, the version required by the extracted core |
+
+The application uses the `github.com/Azure/cluster-autoscaler-provider-azure` module path.
+The published API module stays at the version required by the extracted core.
+The repository starts with fresh history. Source licenses and copyrights are retained.
+
+The Azure-only source omits the GCE-only fault-injection utility and unused
+protobuf-generator module; active build, verification and Kubernetes
+dependency-maintenance tooling is retained.
+
+## Compatibility scope
+
+The provider follows ordinary upstream Azure Delete-mode behavior. It does not
+implement the AKS deallocate mode, and it does not try to match the
+[`Azure/autoscaler` fork](https://github.com/Azure/autoscaler).
+
+Azure-only registration, image placeholders and the managed-identity
+existing-Secret correction are intentional differences from the upstream
+application. The [saved renders README](../charts/testdata/azure-compatibility/README.md)
+records the chart comparison and attribution.
+
+For local checks and validation boundaries, see [testing](testing.md).
+
+## Import verification
 
 Run `hack/verify-upstream.sh` with Git, Python 3, Go 1.26 and network access.
-It verifies the first three commits and reports later commits separately.
-It does not claim later application changes are identical to upstream.
+Use a full-history checkout of the working branch. Routine CI skips this check.
+It checks the first three commits against the pinned upstream files, path map
+and allowed module substitutions. It reports later changes separately.
 
 <!-- import-manifest
 {
