@@ -1,4 +1,4 @@
-{{- if or ( or .Values.autoDiscovery.clusterName .Values.autoDiscovery.namespace .Values.autoDiscovery.labels ) .Values.autoscalingGroups }}
+{{- if or .Values.autoDiscovery.clusterName .Values.autoscalingGroups }}
 
 To verify that cluster-autoscaler has started, run:
 
@@ -7,12 +7,13 @@ To verify that cluster-autoscaler has started, run:
 {{- else -}}
 
 ##############################################################################
-####   ERROR: You must specify values for either                          ####
-####   autoDiscovery or autoscalingGroups[]                   ####
+#### ERROR: Set autoDiscovery.clusterName or autoscalingGroups[]          ####
 ##############################################################################
 
-The deployment and pod will not be created and the installation is not functional
-See README:
-  open https://github.com/kubernetes/autoscaler/tree/master/charts/cluster-autoscaler
+No Deployment is rendered without a discovery cluster name or an explicit
+autoscaling group. Set autoDiscovery.clusterName to your Azure VMSS discovery
+cluster name, or provide autoscalingGroups[] entries with name, minSize and
+maxSize. See the repository's Azure configuration guidance:
+  https://github.com/willie-yao/cluster-autoscaler-provider-azure
 
 {{- end -}}

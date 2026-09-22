@@ -149,7 +149,7 @@ spec:
     spec:
       serviceAccountName: cluster-autoscaler
       containers:
-        - image: cluster-autoscaler
+        - image: cluster-autoscaler-azure
           imagePullPolicy: Always
           name: cluster-autoscaler
           args:
