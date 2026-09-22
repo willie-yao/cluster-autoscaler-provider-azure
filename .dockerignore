@@ -17,8 +17,5 @@ OWNERS_ALIASES
 CONTRIBUTING.md
 SECURITY_CONTACTS
 code-of-conduct.md
-cloudbuild.yaml
 Makefile
-push_image.sh
-update_toc.py
 *.txt

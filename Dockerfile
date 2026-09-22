@@ -27,15 +27,10 @@ COPY . .
 
 ARG GOARCH
 ARG LDFLAGS
-ARG BUILD_TAGS
 
 RUN --mount=type=cache,target=/root/.cache/go-build \
     --mount=type=cache,target=/go/pkg/mod \
-    if [ -n "$BUILD_TAGS" ]; then \
-        CGO_ENABLED=0 GOOS=linux go build -o cluster-autoscaler-$GOARCH -ldflags="$LDFLAGS" -tags="$BUILD_TAGS"; \
-    else \
-        CGO_ENABLED=0 GOOS=linux go build -o cluster-autoscaler-$GOARCH -ldflags="$LDFLAGS"; \
-    fi
+    CGO_ENABLED=0 GOOS=linux go build -o cluster-autoscaler-$GOARCH -ldflags="$LDFLAGS"
 
 FROM gcr.io/distroless/static:nonroot
 ARG GOARCH
