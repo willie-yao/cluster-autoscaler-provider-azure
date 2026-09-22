@@ -26,13 +26,13 @@ git diff --check
 On macOS, use `make test-ci GOOS=darwin`. Start with a targeted test while
 iterating, then run the applicable checks before requesting review. The
 [testing guide](docs/testing.md) explains which targets enter the nested API
-module. A root `go test ./...` does not test nested modules.
+and E2E modules. A root `go test ./...` does not test those modules.
 
 For API changes, use the existing `apis/Makefile` targets (`manifests`,
 `generate`, `clients`) as appropriate and include the resulting generated
 changes. Do not hand-edit generated clients to hide a generator mismatch.
 
-## Chart changes
+## Chart and E2E changes
 
 Chart changes must pass `make test-chart`. The frozen upstream YAML is an
 independent oracle, not output to regenerate from the chart under test. Explain
@@ -41,6 +41,10 @@ intentional compatibility changes and preserve the
 Chart/app version changes are separate release decisions; the existing PR
 chart-version check is not waived by a local test pass.
 
+The maintained E2E module uses an explicitly prepared disposable environment.
+Use `make test-e2e-local` for development without cloud credentials. Never use
+legacy setup targets as a substitute for the
+[operator contract](cloudprovider/azure/test/README.md#operator-contract).
 Live runs need separate authorization, ownership, budget and cleanup planning.
 Keep credentials, kubeconfigs and private run artifacts out of commits.
 
