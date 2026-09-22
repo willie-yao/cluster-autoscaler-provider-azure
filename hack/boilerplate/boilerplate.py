@@ -159,7 +159,7 @@ skipped_names = [
     "cluster-autoscaler/cloudprovider/oci",
     "cluster-autoscaler/cloudprovider/volcengine/volcengine-go-sdk",
     "cluster-autoscaler/cloudprovider/aws/ec2_instance_types/gen.go",
-    "cluster-autoscaler/cloudprovider/azure/azure_instance_types/gen.go",
+    "pkg/cloudprovider/azure/azure_instance_types/gen.go",
     "vertical-pod-autoscaler/hack/emit-metrics.py",
 ]
 

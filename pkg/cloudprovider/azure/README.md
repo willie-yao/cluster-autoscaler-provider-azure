@@ -94,7 +94,7 @@ Prerequisites:
 - Get Azure credentials from the [**Permissions**](#permissions) step above.
 - Get the name of the VM scale set associated with the cluster's node pool. You can find this in the [Azure Portal][] or with the `az vmss list` command.
 
-Make a copy of [cluster-autoscaler-vmss.yaml](examples/cluster-autoscaler-vmss.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
+Make a copy of [cluster-autoscaler-vmss.yaml](../../../deploy/cluster-autoscaler-vmss.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
 
 - ClientID: `<base64-encoded-client-id>`
 - ClientSecret: `<base64-encoded-client-secret>`
@@ -117,8 +117,10 @@ Note that:
 * There are no `--nodes` flags passed to cluster-autoscaler because the node groups are automatically discovered by tags
 * No min/max values are provided when using Auto-Discovery, cluster-autoscaler will detect the "min" and "max" tags on the VMSS resource in Azure, adjusting the desired number of nodes within these limits.
 
+From the repository root, apply the deployment manifest:
+
 ```
-kubectl apply -f examples/cluster-autoscaler-autodiscover.yaml
+kubectl apply -f deploy/cluster-autoscaler-autodiscover.yaml
 ```
 
 #### Explicit setup
@@ -155,9 +157,9 @@ kubectl create -f cluster-autoscaler-vmss.yaml
 ```
 
 <!--TODO: Remove "previously referred to as master" references from this doc once this terminology is fully removed from k8s-->
-To run a cluster autoscaler pod on a control plane (previously referred to as master) node, the deployment should tolerate the `master` taint, and `nodeSelector` should be used to schedule pods. Use [cluster-autoscaler-vmss-control-plane.yaml](examples/cluster-autoscaler-vmss-control-plane.yaml) in this case.
+To run a cluster autoscaler pod on a control plane (previously referred to as master) node, the deployment should tolerate the `master` taint, and `nodeSelector` should be used to schedule pods. Use [cluster-autoscaler-vmss-control-plane.yaml](../../../deploy/cluster-autoscaler-vmss-control-plane.yaml) in this case.
 
-To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-vmss-msi.yaml](examples/cluster-autoscaler-vmss-msi.yaml) instead.
+To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-vmss-msi.yaml](../../../deploy/cluster-autoscaler-vmss-msi.yaml) instead.
 
 #### Azure API Throttling
 Azure has hard limits on the number of read and write requests against Azure APIs *per subscription, per region*. Running lots of clusters in a single subscription, or running a single large, dynamic cluster in a subscription can produce side effects that exceed the number of calls permitted within a given time window for a particular category of requests. See the following documents for more detail on Azure API throttling in general:
@@ -212,7 +214,7 @@ Prerequisites:
 - Get Azure credentials from the [**Permissions**](#permissions) step above.
 - Get the name of the initial Azure deployment resource for the cluster. You can find this in the [Azure Portal](https://portal.azure.com) or with the `az deployment list` command. If there are multiple deployments, get the name of the first one.
 
-Make a copy of [cluster-autoscaler-standard-control-plane.yaml](examples/cluster-autoscaler-standard-control-plane.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
+Make a copy of [cluster-autoscaler-standard-control-plane.yaml](../../../deploy/cluster-autoscaler-standard-control-plane.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
 
 - ClientID: `<base64-encoded-client-id>`
 - ClientSecret: `<base64-encoded-client-secret>`
@@ -251,7 +253,7 @@ Then deploy cluster-autoscaler by running:
 kubectl create -f cluster-autoscaler-standard-control-plane.yaml
 ```
 
-To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-standard-msi.yaml](examples/cluster-autoscaler-standard-msi.yaml) instead.
+To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-standard-msi.yaml](../../../deploy/cluster-autoscaler-standard-msi.yaml) instead.
 
 > **_WARNING_**: Cluster autoscaler depends on user-provided deployment parameters to provision new nodes. After upgrading your Kubernetes cluster, cluster autoscaler must also be redeployed with new parameters to prevent provisioning nodes with an old version.
 

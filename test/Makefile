@@ -1,6 +1,6 @@
 REPO_ROOT:=$(shell git rev-parse --show-toplevel)
 CAS_ROOT:=$(REPO_ROOT)/cluster-autoscaler
-DEV_DIR:=$(CAS_ROOT)/cloudprovider/azure/examples/dev
+DEV_DIR:=$(CAS_ROOT)/deploy/dev
 
 BUILD_TAGS=azure
 
@@ -70,11 +70,11 @@ setup-cluster: ## Create AKS cluster + ACR + workload identity for e2e testing
 
 .PHONY: deploy-local
 deploy-local: ## Build CAS and deploy to cluster via skaffold
-	cd $(CAS_ROOT) && skaffold run --filename cloudprovider/azure/examples/dev/skaffold.yaml
+	cd $(CAS_ROOT) && skaffold run --filename deploy/dev/skaffold.yaml
 
 .PHONY: deploy-local-dev
 deploy-local-dev: ## Build + deploy CAS in watch mode (auto-redeploy on changes)
-	cd $(CAS_ROOT) && skaffold dev --filename cloudprovider/azure/examples/dev/skaffold.yaml
+	cd $(CAS_ROOT) && skaffold dev --filename deploy/dev/skaffold.yaml
 
 ##@ E2E Testing
 
