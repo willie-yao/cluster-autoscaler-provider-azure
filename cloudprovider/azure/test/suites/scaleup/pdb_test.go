@@ -296,4 +296,49 @@ func TestPDBFixtureDiagnostics(t *testing.T) {
 			t.Fatalf("unexpected replacement report: %#v", report)
 		}
 	})
+
+	t.Run("acknowledges the processed relaxed budget through eviction", func(t *testing.T) {
+		const blockedGeneration = int64(3)
+		for _, tt := range []struct {
+			name   string
+			change func(*policyv1.PodDisruptionBudget)
+			valid  bool
+		}{
+			{name: "relaxed before eviction", valid: true},
+			{name: "eviction decremented allowance before first sample", valid: true, change: func(pdb *policyv1.PodDisruptionBudget) {
+				pdb.Status.CurrentHealthy = 2
+				pdb.Status.DisruptionsAllowed = 0
+			}},
+			{name: "one healthy replacement in flight before first sample", valid: true, change: func(pdb *policyv1.PodDisruptionBudget) {
+				pdb.Status.CurrentHealthy = 1
+				pdb.Status.DisruptionsAllowed = 0
+			}},
+			{name: "replaced UID", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.UID = "replacement" }},
+			{name: "unrelaxed generation", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.Generation = blockedGeneration }},
+			{name: "unprocessed generation", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.Status.ObservedGeneration = blockedGeneration }},
+			{name: "unrelaxed minimum", change: func(pdb *policyv1.PodDisruptionBudget) {
+				pdb.Spec.MinAvailable = ptr.To(intstr.FromInt32(2))
+			}},
+			{name: "unprocessed desired health", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.Status.DesiredHealthy = 2 }},
+			{name: "no healthy Pod", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.Status.CurrentHealthy = 0 }},
+			{name: "excess allowance", change: func(pdb *policyv1.PodDisruptionBudget) { pdb.Status.DisruptionsAllowed = 2 }},
+		} {
+			t.Run(tt.name, func(t *testing.T) {
+				pdb := policyv1.PodDisruptionBudget{
+					ObjectMeta: metav1.ObjectMeta{UID: "expected", Generation: blockedGeneration + 1},
+					Spec:       policyv1.PodDisruptionBudgetSpec{MinAvailable: ptr.To(intstr.FromInt32(1))},
+					Status: policyv1.PodDisruptionBudgetStatus{
+						ObservedGeneration: blockedGeneration + 1, CurrentHealthy: 2,
+						DesiredHealthy: 1, DisruptionsAllowed: 1,
+					},
+				}
+				if tt.change != nil {
+					tt.change(&pdb)
+				}
+				if err := relaxedPDBProcessed(pdb, "expected", blockedGeneration); (err == nil) != tt.valid {
+					t.Fatalf("relaxedPDBProcessed() error=%v, want valid=%t; budget=%#v", err, tt.valid, pdb)
+				}
+			})
+		}
+	})
 }

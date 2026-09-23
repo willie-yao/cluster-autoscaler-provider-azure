@@ -33,6 +33,7 @@ import (
 	policyv1 "k8s.io/api/policy/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -173,11 +174,7 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 			}
 			var relaxed policyv1.PodDisruptionBudget
 			g.Expect(env.K8s.Get(ctx, client.ObjectKeyFromObject(expectedPDB), &relaxed)).To(Succeed())
-			g.Expect(relaxed.UID).To(Equal(expectedPDB.UID))
-			g.Expect(relaxed.Generation).To(BeNumerically(">", blockedGeneration))
-			g.Expect(relaxed.Status.ObservedGeneration).To(Equal(relaxed.Generation))
-			g.Expect(relaxed.Status.CurrentHealthy).To(Equal(int32(2)))
-			g.Expect(relaxed.Status.DisruptionsAllowed).To(Equal(int32(1)))
+			g.Expect(relaxedPDBProcessed(relaxed, expectedPDB.UID, blockedGeneration)).To(Succeed())
 		}, time.Minute, time.Second).Should(Succeed())
 		reportPDBDiagnostics(ctx, "after-relaxation", expectedPDB, protected.Spec.Selector.MatchLabels)
 		Eventually(ctx, func(g Gomega) {
@@ -224,6 +221,24 @@ func protectedReadyPods(ctx context.Context, namespace string, labels map[string
 		}
 	}
 	return healthy, nil
+}
+
+func relaxedPDBProcessed(pdb policyv1.PodDisruptionBudget, expectedUID types.UID, blockedGeneration int64) error {
+	if pdb.UID != expectedUID || pdb.Generation <= blockedGeneration {
+		return fmt.Errorf("relaxed PDB identity or generation does not match the created fixture")
+	}
+	if pdb.Spec.MinAvailable == nil || *pdb.Spec.MinAvailable != intstr.FromInt32(1) {
+		return fmt.Errorf("relaxed PDB must require exactly one available Pod")
+	}
+	if pdb.Status.ObservedGeneration != pdb.Generation || pdb.Status.DesiredHealthy != 1 {
+		return fmt.Errorf("relaxed PDB status has not processed the one-Pod budget")
+	}
+	if pdb.Status.CurrentHealthy < 1 || pdb.Status.DisruptionsAllowed < 0 ||
+		pdb.Status.DisruptionsAllowed > pdb.Status.CurrentHealthy-pdb.Status.DesiredHealthy ||
+		pdb.Status.DisruptionsAllowed > 1 {
+		return fmt.Errorf("relaxed PDB status does not reflect a valid one-Pod budget")
+	}
+	return nil
 }
 
 func readSnapshot(ctx context.Context) (environment.Snapshot, error) {
