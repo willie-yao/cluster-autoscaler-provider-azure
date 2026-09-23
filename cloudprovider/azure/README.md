@@ -8,6 +8,102 @@ This README will help you get cluster autoscaler running on your Azure Kubernete
 
 Build a local image from the root-level source tree with `make image IMAGE=cluster-autoscaler-azure TAG=dev`. Make an image built from your intended source available to the cluster before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that image reference. This source tree does not define an official image registry or release channel. See the [root build guide](../../README.md#build-and-image-configuration).
 
+## Local provider-only deallocate prototype
+
+`"providerOnlyDeallocate": true` in cloud-config opts into a local experimental
+alternative. The default remains physical Delete. This mode supports only
+non-hosted, non-AKS-managed Uniform VMSS pools with regular-priority VMs and
+managed non-ephemeral OS disks. It is not an AKS compatibility release.
+It requires Kubernetes `delete` permission on Nodes, which the existing Helm
+ClusterRole does not grant. No RBAC changes are included in this local spike.
+
+Normal core scale-down still chooses and drains Nodes. The provider waits for
+Azure deallocation, then deletes the old Node with a UID precondition. Before
+deallocation it records one Node annotation binding the authorized Node name and
+UID to the Azure resource path and immutable VM ID. If Node deletion fails after
+the stop, ordinary provider refresh revalidates that receipt against a
+successfully deallocated instance and retries only the same UID-preconditioned
+deletion. Recovery never repeats Deallocate, adopts a replacement Node UID or
+removes finalizers. A receipt whose VM is running or has a different VM ID fails
+closed for operator diagnosis.
+
+Parked VMs do not appear as expected Nodes to core, and active target is
+physical VMSS capacity minus parked and accepted-deallocating instances,
+counting each excluded instance once. An ordinary scale-up starts
+parked VMs before requesting additional physical capacity, but still refuses
+reuse while any Node conflicts by provider ID or registration name. A rejected
+Start or a missing operation poller is an error, not permission to grow instead.
+For each accepted Start, the provider records the immutable-VM-ID capacity charge
+before continuing. `IncreaseSize` returns success only after every requested
+increase has been accepted and reflected in target size; it does not wait for
+Start completion. If a later Start submission in the same batch fails, earlier
+accepted portions remain charged and observed, while the batch returns an error
+instead of claiming full acceptance.
+
+Accepted Start completion is observed in the background under the existing
+30-minute Azure operation timeout. Successful and failed observations invalidate
+instance inventory. A terminal Azure failure and an ambiguous observation
+failure are logged separately, and neither releases the accepted capacity
+charge. In provider-only mode, a failed provisioning state with non-running
+power is reported as a failed Start independently of the ordinary fast-delete
+option.
+
+Core represents failed-creation and long-unregistered cleanup as synthetic Nodes
+with no Kubernetes UID. The provider recognizes only those core reasons, resolves
+the current VMSS instance and immutable VM ID, rejects any conflicting real Node,
+and submits Azure Deallocate without fabricating a receipt or Node identity.
+`DeleteNodes` preserves its minimum constraint; `ForceDeleteNodes` bypasses that
+constraint but still deallocates rather than physically deleting the VM.
+Real Nodes use the same receipt, UID, VM-incarnation and finalizer safeguards in
+both routes; Force bypasses only the minimum check.
+
+Accepted synthetic cleanup is reported as deleting and excluded from adjusted
+active target while completion is observed under the existing 30-minute
+background timeout. The physical VM, disk and VMID operation ownership remain
+tracked, and the cleanup slot is not eligible for Start. `IncreaseSize` uses the
+adjusted target for maximum enforcement, so physical VM count may exceed the
+active maximum by retained cleanup or parked slots.
+
+Confirmed completion changes the same VM ID from cleanup exclusion to parked
+exclusion without subtracting it twice. An explicit terminal Deallocate failure
+restores the slot to active accounting and permits ordinary cleanup retry;
+future increases still enforce the adjusted maximum. Ambiguous observation
+failure keeps the exclusion and deallocating marker until authoritative
+inventory proves the VM parked or absent. Later reuse requires a new accepted
+Start of the retained VM.
+Atomic scale-up is not implemented for this mode.
+
+A fresh manager can rediscover settled parked VMs from Azure without an old
+Node. If the old Node remains after a completed stop, its deletion receipt lets
+a fresh manager finish only that exact deletion. A replacement UID or VM
+incarnation mismatch remains protected and blocks reuse. The receipt is not a
+general operation journal or Node metadata backup.
+
+The returning kubelet must restart and register a **new Node UID**. Its configured
+registration labels and taints, plus normal CCM initialization, must match the
+pool's scheduling template. VMSS node-template tags describe simulation; they do
+not themselves configure kubelet registration. Arbitrary labels, annotations,
+taints and administrator cordons applied only to the old Node are lost. Updating
+pool configuration does not prove a retained VM has received that update.
+
+Readiness follows ordinary new-Node initialization and Kubernetes taints, not a
+provider-owned Azure-Start-plus-fresh-heartbeat gate. Core records its scale-up
+request when Start acceptance returns, so the configured node provisioning
+allowance begins before Azure LRO completion rather than after it. A new Node's
+reported readiness is not proof of Azure operation success, and Azure completion
+is not proof of Node registration or readiness. A process restart unrelated to
+health can still lose process-local accepted-Start bookkeeping; this prototype
+does not persist Start operations or reconstruct core requests.
+
+Local tests run the stock core builder, planner, cluster-state registry, actuator
+and scheduler predicates with the real Azure provider. Azure operations and Node
+registration are simulated. They do not establish live kubelet/CCM or scheduler
+acceptance, arbitrary Node-metadata preservation, or parity with a retained-Node
+design.
+Deleting a Node can also release Node-scoped network allocations. Compatibility
+with the retained VM's CNI/IPAM state is unverified; a successful local loop or a
+live result with a different network does not establish that compatibility.
+
 ## Permissions
 
 Get Azure credentials by running the following [Azure CLI][] command:
