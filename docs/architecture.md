@@ -21,8 +21,10 @@ connects that registration to `BuildAzure`. The Azure adapter discovers groups,
 builds node templates and issues scaling operations; configuration and operator
 examples are described in the [provider guide](../cloudprovider/azure/README.md).
 
-Ordinary scale-down uses Azure Delete operations. This source tree does not
-add stopped-VM reuse or AKS deallocate-mode behavior.
+Ordinary scale-down uses Azure Delete operations by default. The experimental
+[provider-only deallocate mode](../cloudprovider/azure/README.md#local-provider-only-deallocate-prototype)
+parks and reuses supported self-managed Uniform VMSS instances; it does not
+establish AKS deallocate-mode parity.
 
 ## AKS settings file
 
