@@ -30,6 +30,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/kubernetes"
 	kretry "k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
 	providerazureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
@@ -85,6 +86,8 @@ type AzureManager struct {
 
 	autoDiscoverySpecs   []labelAutoDiscoveryConfig
 	explicitlyConfigured map[string]bool
+
+	kubeClient kubernetes.Interface
 }
 
 // createAzureManagerInternal allows for a custom azClient to be passed in by tests.
@@ -278,10 +281,15 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 // Refresh is called before every main loop and can be used to dynamically update cloud provider state.
 // In particular the list of node groups returned by NodeGroups can change as a result of CloudProvider.Refresh().
 func (m *AzureManager) Refresh() error {
-	if m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
-		return nil
+	if !m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
+		if err := m.forceRefresh(); err != nil {
+			return err
+		}
 	}
-	return m.forceRefresh()
+	if m.config.ProviderOnlyDeallocate {
+		return m.reconcileProviderOnlyDeleteReceipts()
+	}
+	return nil
 }
 
 func (m *AzureManager) forceRefresh() error {
@@ -361,6 +369,13 @@ func (m *AzureManager) UnregisterNodeGroup(nodeGroup cloudprovider.NodeGroup) bo
 
 // GetNodeGroupForInstance returns the NodeGroup of the given Instance
 func (m *AzureManager) GetNodeGroupForInstance(instance *azureRef) (cloudprovider.NodeGroup, error) {
+	if m.config.ProviderOnlyDeallocate {
+		group, err := m.providerOnlyGroup(instance.Name)
+		if err != nil || group == nil {
+			return nil, err
+		}
+		return group, nil
+	}
 	return m.azureCache.FindForInstance(instance, m.config.VMType)
 }
 

@@ -117,6 +117,9 @@ type Config struct {
 	// VMSS PUTs so concurrent modifications are rejected with 412 instead of overwritten.
 	// Disabled by default; set to true to opt in.
 	EnableVMSSEtag bool `json:"enableVMSSEtag,omitempty" yaml:"enableVMSSEtag,omitempty"`
+
+	// ProviderOnlyDeallocate parks Uniform VMSS instances and deletes their Node objects.
+	ProviderOnlyDeallocate bool `json:"providerOnlyDeallocate,omitempty" yaml:"providerOnlyDeallocate,omitempty"`
 }
 
 // These are only here for backward compabitility. Their equivalent exists in providerazure.Config with a different name.
@@ -380,6 +383,11 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 }
 
 func (cfg *Config) validate() error {
+	if cfg.ProviderOnlyDeallocate {
+		if err := cfg.validateProviderOnlyDeallocate(); err != nil {
+			return err
+		}
+	}
 	if cfg.ResourceGroup == "" {
 		return fmt.Errorf("resource group not set")
 	}

@@ -22,6 +22,7 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 )
@@ -161,5 +162,25 @@ func TestInstanceStatusFromVM(t *testing.T) {
 			assert.Equal(t, cloudprovider.InstanceCreating, status.State)
 			assert.NotNil(t, status.ErrorInfo)
 		})
+	})
+
+	t.Run("provider-only Deallocate classifies failed Start without fast delete", func(t *testing.T) {
+		provider := newTestProvider(t)
+		provider.azureManager.config.ProviderOnlyDeallocate = true
+		scaleSet := newTestScaleSet(provider.azureManager, "testScaleSet")
+		require.False(t, scaleSet.enableFastDeleteOnFailedProvisioning)
+
+		failed := newVMObjectWithState(string(armcompute.GalleryProvisioningStateFailed), vmPowerStateDeallocated)
+		status := scaleSet.instanceStatusFromVM(failed)
+		require.NotNil(t, status)
+		require.Equal(t, cloudprovider.InstanceCreating, status.State)
+		require.NotNil(t, status.ErrorInfo)
+		require.Equal(t, "start-deallocated-failed", status.ErrorInfo.ErrorCode)
+
+		running := newVMObjectWithState(string(armcompute.GalleryProvisioningStateFailed), vmPowerStateRunning)
+		status = scaleSet.instanceStatusFromVM(running)
+		require.NotNil(t, status)
+		require.Equal(t, cloudprovider.InstanceRunning, status.State)
+		require.Nil(t, status.ErrorInfo)
 	})
 }
