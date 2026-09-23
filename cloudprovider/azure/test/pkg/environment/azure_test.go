@@ -220,6 +220,55 @@ func TestAzureReadChecksReceivedInstancePageBounds(t *testing.T) {
 	}
 }
 
+func TestAzureCloudNICExists(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		status    int
+		transport error
+		exists    bool
+		wantError bool
+	}{
+		{name: "NIC exists", status: http.StatusOK, exists: true},
+		{name: "NIC deleted", status: http.StatusNotFound},
+		{name: "authorization error is not absence", status: http.StatusForbidden, wantError: true},
+		{name: "transport error is not absence", transport: errors.New("transport unavailable"), wantError: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			nicID := c.PoolID(c.MainPool) + "/virtualMachines/0/networkInterfaces/nic"
+			requests := 0
+			armClient, err := arm.NewClient("autoscaler-e2e", "v0.0.0", &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{
+					Retry: policy.RetryOptions{MaxRetries: -1},
+					Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+						requests++
+						if request.Method != http.MethodGet || request.URL.Path != nicID ||
+							request.URL.Host != "management.azure.com" || request.URL.RawQuery != "api-version=2018-10-01" {
+							t.Fatalf("unexpected NIC request: %s %s", request.Method, request.URL)
+						}
+						if tt.transport != nil {
+							return nil, tt.transport
+						}
+						return &http.Response{
+							StatusCode: tt.status, Header: http.Header{"Content-Type": []string{"application/json"}},
+							Body: io.NopCloser(strings.NewReader("{}")), Request: request,
+						}, nil
+					}),
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			exists, err := (&azureCloud{config: c, arm: armClient}).NICExists(context.Background(), nicID)
+			if exists != tt.exists || (err != nil) != tt.wantError || requests != 1 {
+				t.Fatalf("NICExists() exists=%t, error=%v, requests=%d; want exists=%t, error=%t, requests=1",
+					exists, err, requests, tt.exists, tt.wantError)
+			}
+		})
+	}
+}
+
 func TestCheckScaleDownTags(t *testing.T) {
 	t.Parallel()
 	const prefix = "k8s.io_cluster-autoscaler_node-template_autoscaling-options_"

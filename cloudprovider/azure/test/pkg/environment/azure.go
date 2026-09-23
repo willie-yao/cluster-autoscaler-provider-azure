@@ -267,7 +267,7 @@ func (a *azureCloud) NICExists(ctx context.Context, id string) (bool, error) {
 		!strings.Contains(strings.ToLower(id), "/networkinterfaces/") || strings.ContainsAny(id, "?#") {
 		return false, fmt.Errorf("NIC ID is outside the authorized worker resource group")
 	}
-	request, err := runtime.NewRequest(ctx, http.MethodGet, a.arm.Endpoint()+id+"?api-version=2023-09-01")
+	request, err := runtime.NewRequest(ctx, http.MethodGet, a.arm.Endpoint()+id+"?api-version=2018-10-01")
 	if err != nil {
 		return false, err
 	}
