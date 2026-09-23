@@ -236,7 +236,17 @@ func (scaleSet *ScaleSet) instanceStatusFromVM(vm *armcompute.VirtualMachineScal
 		status.State = cloudprovider.InstanceRunning
 
 		klog.V(3).Infof("VM %s reports failed provisioning state with power state: %s, eligible for fast delete: %s", ptr.Deref(vm.ID, ""), powerState, strconv.FormatBool(scaleSet.enableFastDeleteOnFailedProvisioning))
-		if scaleSet.enableFastDeleteOnFailedProvisioning {
+		if scaleSet.providerOnlyDeallocate() && !isRunningVmPowerState(powerState) {
+			// Provider-only mode always reports this failure, because its cleanup
+			// deallocates the VM instead of deleting it. It covers failed Starts and
+			// failed new VMs.
+			status.State = cloudprovider.InstanceCreating
+			status.ErrorInfo = &cloudprovider.InstanceErrorInfo{
+				ErrorClass:   cloudprovider.OutOfResourcesErrorClass,
+				ErrorCode:    "start-deallocated-failed",
+				ErrorMessage: "Azure failed to provision or start a node for this node group",
+			}
+		} else if scaleSet.enableFastDeleteOnFailedProvisioning {
 			// Provisioning can fail both during instance creation or after the instance is running.
 			// Per https://learn.microsoft.com/en-us/azure/virtual-machines/states-billing#provisioning-states,
 			// ProvisioningState represents the most recent provisioning state, therefore only report

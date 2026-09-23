@@ -249,6 +249,41 @@ To run a cluster autoscaler pod with Azure managed service identity (MSI), use [
 
 > **_WARNING_**: Cluster autoscaler depends on user-provided deployment parameters to provision new nodes. After upgrading your Kubernetes cluster, cluster autoscaler must also be redeployed with new parameters to prevent provisioning nodes with an old version.
 
+## Provider-only deallocate (experimental)
+
+This optional mode deallocates VMSS instances on scale-down instead of
+deleting them, and starts them again on scale-up. Delete remains the default.
+The mode is a design proposal. It doesn't follow how AKS deallocates nodes.
+
+To use it for one pool, give that pool a `min:max:Deallocate:name` spec in
+`--nodes`, or a node group with `"scaleDownPolicy": "Deallocate"` in the AKS
+settings file. The global setting uses it for every VMSS pool, including pools
+whose spec says `Delete`, so leave the global setting off when pools use
+different policies.
+
+| Config Name            | Default | Environment Variable           | Cloud Config File      |
+|------------------------|---------|--------------------------------|------------------------|
+| providerOnlyDeallocate | false   | AZURE_PROVIDER_ONLY_DEALLOCATE | providerOnlyDeallocate |
+
+The mode supports only self-managed Uniform VMSS pools with regular-priority
+VMs and managed OS disks that aren't ephemeral. A `Deallocate` spec for any
+other pool, including an AKS-managed scale set or a VMs pool, logs the reason
+and leaves that pool out of autoscaling. With the global setting, the provider
+doesn't start when VMs pools, VMSS Flex support, standard VMs or a hosted
+configuration are enabled, and an unsupported VMSS pool doesn't fall back to
+Delete: its scaling calls fail.
+
+The autoscaler deletes the Node object of each parked VM, so its service
+account needs `delete` on Nodes. The Helm chart's ClusterRole doesn't grant it.
+
+A restarted VM registers a new Node with a new UID. Labels, annotations, taints
+and cordons that were added only to the old Node object are lost. The kubelet's
+registration labels and taints must match the pool's node template, and the
+node network setup must accept a VM that comes back with a new PodCIDR.
+
+[Architecture](../../docs/architecture.md#provider-only-deallocate) describes
+how the mode works.
+
 ## AKS Autoscaler
 
 Node Pool Autoscaling is a first class feature of your AKS cluster. The option to enable cluster autoscaler is available in the [Azure Portal][] or with the [Azure CLI][]:

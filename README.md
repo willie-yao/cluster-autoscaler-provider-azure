@@ -3,7 +3,9 @@
 An Azure-only Cluster Autoscaler application for Kubernetes. It connects the
 shared autoscaling core to the Azure cloud provider, growing worker pools for
 unschedulable workloads and removing unneeded workers through ordinary Azure
-Delete-mode operations.
+Delete-mode operations by default. An experimental
+[provider-only deallocate mode](docs/architecture.md#provider-only-deallocate)
+parks and reuses VMSS instances instead.
 
 The executable lives at the repository root and registers only Azure.
 `--cloud-provider` defaults to `azure`. The autoscaling algorithm comes from

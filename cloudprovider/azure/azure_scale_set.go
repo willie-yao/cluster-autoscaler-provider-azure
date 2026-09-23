@@ -65,10 +65,11 @@ type ScaleSet struct {
 	azureRef
 	manager *AzureManager
 
-	minSize int
-	maxSize int
-	labels  map[string]string
-	taints  string
+	minSize    int
+	maxSize    int
+	labels     map[string]string
+	taints     string
+	deallocate bool
 
 	enableForceDelete         bool
 	enableDynamicInstanceList bool
@@ -101,6 +102,27 @@ type ScaleSet struct {
 	enableFastDeleteOnFailedProvisioning bool
 
 	enableLabelPredictionsOnTemplate bool
+
+	// parkMutex serializes the provider-only checks and submissions that park,
+	// start and clean up VMs. It isn't held while an operation runs.
+	parkMutex sync.Mutex
+	// powerMutex protects powerOverrides, syntheticDeallocating,
+	// nextSyntheticDeallocation and parking. When both are held, instanceMutex
+	// is taken first.
+	powerMutex sync.Mutex
+	// powerOverrides holds, by VM ID, the power state of an accepted operation
+	// until the instance view shows it. True means parked.
+	powerOverrides map[string]bool
+	// syntheticDeallocating holds, by VM ID, the accepted cleanups of VMs that
+	// never registered. They count as deallocating until they finish.
+	syntheticDeallocating     map[string]uint64
+	nextSyntheticDeallocation uint64
+	// parking holds, by VM ID, the accepted parks whose Node isn't deleted yet.
+	// They count as deallocating.
+	parking map[string]bool
+	// parkingVMs holds the VMs from the last instance cache refresh in
+	// provider-only mode. instanceMutex protects it.
+	parkingVMs []*armcompute.VirtualMachineScaleSetVM
 }
 
 // NewScaleSet creates a new NewScaleSet.
@@ -277,6 +299,9 @@ func (scaleSet *ScaleSet) getCurSize() (int64, *GetVMSSFailedError) {
 
 // getScaleSetSize gets Scale Set size.
 func (scaleSet *ScaleSet) getScaleSetSize() (int64, error) {
+	if scaleSet.providerOnlyDeallocate() {
+		return scaleSet.providerOnlyTargetSize()
+	}
 	// First, get the current size of the ScaleSet
 	size, getVMSSError := scaleSet.getCurSize()
 	if getVMSSError != nil {
@@ -348,6 +373,9 @@ func (scaleSet *ScaleSet) canIncreaseSize(delta int) (int64, error) {
 
 // IncreaseSize increases Scale Set size
 func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
+	if scaleSet.providerOnlyDeallocate() {
+		return scaleSet.increaseWithParked(ctx, delta)
+	}
 	size, err := scaleSet.canIncreaseSize(delta)
 	if err != nil {
 		return err
@@ -369,6 +397,9 @@ func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
 // for atomic-scale-up ProvisioningRequest support to provide a capacity guarantee
 // before workloads are admitted.
 func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) error {
+	if scaleSet.providerOnlyDeallocate() {
+		return cloudprovider.ErrNotImplemented
+	}
 	size, err := scaleSet.canIncreaseSize(delta)
 	if err != nil {
 		return err
@@ -438,7 +469,10 @@ func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) err
 func (scaleSet *ScaleSet) GetScaleSetVms() ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	ctx, cancel := getContextWithTimeout(vmssContextTimeout)
 	defer cancel()
+	return scaleSet.getScaleSetVms(ctx)
+}
 
+func (scaleSet *ScaleSet) getScaleSetVms(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	vmList, err := scaleSet.manager.azClient.virtualMachineScaleSetVMsClient.ListVMInstanceView(ctx, scaleSet.manager.config.ResourceGroup,
 		scaleSet.Name)
 
@@ -887,6 +921,19 @@ func (scaleSet *ScaleSet) waitForDeleteInstances(poller *runtime.Poller[armcompu
 
 // DeleteNodes deletes the nodes from the group.
 func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	if scaleSet.providerOnlyDeallocate() {
+		if !isProviderOnlySyntheticCleanup(nodes) {
+			return scaleSet.parkNodes(ctx, nodes)
+		}
+		size, err := scaleSet.getScaleSetSize()
+		if err != nil {
+			return err
+		}
+		if int(size) <= scaleSet.MinSize(context.TODO()) {
+			return fmt.Errorf("min size reached, nodes will not be deleted")
+		}
+		return scaleSet.deallocateSyntheticNodes(ctx, nodes)
+	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	size, err := scaleSet.getScaleSetSize()
 	if err != nil {
@@ -904,6 +951,12 @@ func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) 
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
 func (scaleSet *ScaleSet) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
+	if scaleSet.providerOnlyDeallocate() {
+		if isProviderOnlySyntheticCleanup(nodes) {
+			return scaleSet.deallocateSyntheticNodes(ctx, nodes)
+		}
+		return scaleSet.parkNodesWithMinimum(ctx, nodes, false)
+	}
 	klog.V(3).Infof("Delete nodes requested: %q\n", nodes)
 	refs := make([]*azureRef, 0, len(nodes))
 	hasUnregisteredNodes := false
@@ -962,6 +1015,9 @@ func (scaleSet *ScaleSet) TemplateNodeInfo(ctx context.Context) (*framework.Node
 
 // Nodes returns a list of all nodes that belong to this node group.
 func (scaleSet *ScaleSet) Nodes(ctx context.Context) ([]cloudprovider.Instance, error) {
+	if scaleSet.providerOnlyDeallocate() {
+		return scaleSet.providerOnlyNodes()
+	}
 	curSize, getVMSSError := scaleSet.getCurSize()
 	if getVMSSError != nil {
 		klog.Errorf("Failed to get current size for vmss %q: %v", scaleSet.Name, getVMSSError.error)
@@ -1072,6 +1128,9 @@ func (scaleSet *ScaleSet) buildScaleSetCacheForUniform() error {
 	}
 
 	scaleSet.instanceCache = instances
+	if scaleSet.providerOnlyDeallocate() {
+		scaleSet.parkingVMs = vms
+	}
 	scaleSet.lastInstanceRefresh = lastRefresh
 
 	return nil

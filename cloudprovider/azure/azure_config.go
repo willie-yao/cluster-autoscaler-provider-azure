@@ -117,6 +117,11 @@ type Config struct {
 	// VMSS PUTs so concurrent modifications are rejected with 412 instead of overwritten.
 	// Disabled by default; set to true to opt in.
 	EnableVMSSEtag bool `json:"enableVMSSEtag,omitempty" yaml:"enableVMSSEtag,omitempty"`
+
+	// ProviderOnlyDeallocate deallocates VMSS instances on scale-down, deletes their
+	// Node objects, and starts them again on scale-up, for every VMSS group.
+	// Disabled by default.
+	ProviderOnlyDeallocate bool `json:"providerOnlyDeallocate,omitempty" yaml:"providerOnlyDeallocate,omitempty"`
 }
 
 // These are only here for backward compabitility. Their equivalent exists in providerazure.Config with a different name.
@@ -149,6 +154,7 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 	cfg.StrictCacheUpdates = false
 	cfg.EnableLabelPredictionsOnTemplate = true
 	cfg.EnableVMSSEtag = false
+	cfg.ProviderOnlyDeallocate = false
 
 	// Config file overrides defaults
 	if configReader != nil {
@@ -292,6 +298,9 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableVMSSEtag, "AZURE_ENABLE_VMSS_ETAG"); err != nil {
 		return nil, err
 	}
+	if _, err = assignBoolFromEnvIfExists(&cfg.ProviderOnlyDeallocate, "AZURE_PROVIDER_ONLY_DEALLOCATE"); err != nil {
+		return nil, err
+	}
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableDynamicInstanceList, "AZURE_ENABLE_DYNAMIC_INSTANCE_LIST"); err != nil {
 		return nil, err
 	}
@@ -380,6 +389,11 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 }
 
 func (cfg *Config) validate() error {
+	if cfg.ProviderOnlyDeallocate {
+		if err := cfg.validateProviderOnlyDeallocate(); err != nil {
+			return err
+		}
+	}
 	if cfg.ResourceGroup == "" {
 		return fmt.Errorf("resource group not set")
 	}

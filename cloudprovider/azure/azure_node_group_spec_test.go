@@ -113,14 +113,14 @@ func TestParseAzureNodeGroupSpec(t *testing.T) {
 	}
 }
 
-func TestBuildNodeGroupFromSpecUnsupportedDeallocate(t *testing.T) {
+func TestBuildNodeGroupFromSpecMissingDeallocateVMSS(t *testing.T) {
 	manager := newTestAzureManager(t)
 	group, err := manager.buildNodeGroupFromSpec("1:5:Deallocate:paused-vmss:{}|")
 	require.Nil(t, group)
 	var policyErr *unsupportedDeallocateError
 	require.True(t, errors.As(err, &policyErr))
 	require.Equal(t, "paused-vmss", policyErr.name)
-	require.Equal(t, `Deallocate scale-down is not supported by this build, so node group "paused-vmss" is not autoscaled`, err.Error())
+	require.Equal(t, `Deallocate node group "paused-vmss" is not autoscaled: could not find vmss: paused-vmss`, err.Error())
 }
 
 func TestExtendedScaleSetNodeTemplate(t *testing.T) {

@@ -21,8 +21,10 @@ connects that registration to `BuildAzure`. The Azure adapter discovers groups,
 builds node templates and issues scaling operations; configuration and operator
 examples are described in the [provider guide](../cloudprovider/azure/README.md).
 
-Ordinary scale-down uses Azure Delete operations. This source tree does not
-add stopped-VM reuse or the AKS deallocate mode.
+Ordinary scale-down uses Azure Delete operations by default. The experimental
+[provider-only deallocate mode](#provider-only-deallocate) parks and reuses
+supported self-managed Uniform VMSS instances. It doesn't match the AKS
+deallocate mode.
 
 ## AKS settings file
 
@@ -62,20 +64,88 @@ labels are a JSON object with string values, and taints use
 `min:max:policy:name` also works. The settings file uses the same fields as
 separate JSON properties and defaults the policy to `Delete`.
 
-The provider accepts `Deallocate` in both the settings file and extended
-specs, but it logs an error and skips each well-formed `Deallocate` group.
-It does not register the group through auto-discovery either. Other groups
-continue to autoscale. A malformed `--nodes` spec still causes a startup error.
-An invalid settings file follows the startup behavior described above.
-Deallocate would keep a stopped VM and its Node object, but the unchanged
-autoscaler core does not support that flow. Treating it as Delete would
-remove Nodes and VMs instead.
+The provider uses `Deallocate` in either input to opt a supported VMSS group
+into [provider-only deallocation](#provider-only-deallocate). It logs the
+eligibility error and skips an unsupported group, including in auto-discovery,
+while other groups continue to autoscale. A malformed `--nodes` spec still
+causes a startup error. An invalid settings file follows the startup behavior
+described above.
 
 The reference AKS provider applies labels and taints from extended specs to
 both VMs pools and VMSS templates. For VMSS pools, nonempty spec labels replace
 labels from node template tags, and spec taints replace tag taints. Without
 these fields, VMSS tags work as before. For VMs pools, spec labels override
 matching agent pool labels, and spec taints are added to agent pool taints.
+
+## Provider-only deallocate
+
+This optional mode is in
+[`azure_provider_only_deallocate.go`](../cloudprovider/azure/azure_provider_only_deallocate.go).
+It changes only the Azure provider. The core still picks, drains and cleans up
+nodes as it does in Delete mode. The
+[provider guide](../cloudprovider/azure/README.md#provider-only-deallocate-experimental)
+lists the settings and requirements.
+
+A group uses the mode when its spec has the `Deallocate` policy or when the
+global `providerOnlyDeallocate` setting is on. The global setting applies to
+every VMSS group, even one whose spec says `Delete`. A `Deallocate` spec for a
+group that can't be parked skips the group. Only self-managed Uniform VMSS
+groups with regular-priority VMs and managed OS disks that aren't ephemeral
+can be parked.
+
+**Park.** When the core scales down a registered node, the provider checks the
+Node and its VM, writes a deletion receipt to the Node as an annotation, and
+sends one Deallocate request. The receipt holds the Node name and UID, the
+provider ID and the VM ID. The provider holds the group's lock only while it
+checks the nodes and sends the requests, so a scale-up of the same group
+doesn't wait for a deallocation. While the VM deallocates, the provider reports
+it as deleting and leaves it out of the target size. When Azure reports the VM
+deallocated, the provider deletes the Node with a UID precondition. The parked
+VM stays in the scale set with its OS disk. The provider doesn't report it to
+the core, and the target size is the VMSS capacity minus the parked and
+deallocating VMs.
+
+If Azure rejects the request, including when it throttles it, the provider
+removes the receipt and the scale-down fails. If the result is unclear, the
+receipt stays. Before each loop, the provider looks for Nodes with a receipt
+and deletes each one once its VM is deallocated with the same VM ID. It never
+sends Deallocate again, uses a different Node UID or removes finalizers. A
+receipt on a running VM blocks that node's scale-down until an operator
+removes the annotation. Errors in this step are logged and don't stop the
+loop.
+
+**Reuse.** `IncreaseSize` starts parked VMs before it adds capacity. It skips a
+VM that is still being parked, and refuses a parked VM that still has a Node
+with the same provider ID or name. It returns once Azure accepts each Start,
+and watches each Start in the background. An accepted Start counts toward the
+target size even when its result is unclear. The restarted VM registers a new
+Node with a new UID, and the core treats it as a new node.
+
+**Failed retention.** If a started or new VM fails, or never registers, the
+core's cleanup calls `DeleteNodes` or `ForceDeleteNodes` with a node that has no
+UID. The provider deallocates that VM instead of deleting it, so the VM and its
+disk stay for a later Start. The VM counts as deleting until the deallocation
+finishes. `ForceDeleteNodes` skips the minimum size check but still
+deallocates.
+
+**Inventory.** `Nodes`, `TargetSize` and `HasInstance` read power states from
+the scale set's instance cache. The cache is read again after its TTL, when its
+size differs from the VMSS capacity, and after each finished power operation.
+A park, Start, cleanup or receipt recovery lists the VMs again first. Until
+Azure shows an accepted operation, the provider keeps its expected power state
+by VM ID.
+
+**Node deletion.** Deleting the old Node lets the unchanged core see the
+returning VM as a new registration, with the usual node startup and readiness
+checks. The cost is that labels, annotations, taints and cordons set only on
+the old Node are lost, and the VM must handle a new PodCIDR. The autoscaler
+also needs `delete` permission on Nodes.
+
+The provider keeps its expected power states and its running parks, Starts
+and cleanups in memory only. After a restart it reads the power states from
+Azure again and finishes Node deletes from receipts. An operation that Azure
+accepted but doesn't show yet counts by its last shown power state until the
+instance view catches up.
 
 ## Module and package boundaries
 
