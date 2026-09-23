@@ -136,16 +136,12 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 		Expect(env.K8s.Create(ctx, grow)).To(Succeed())
 		grown := waitStable(ctx, 2, 0)
 		waitWorkload(ctx, grow.Name, env.Config.MainPool, 2, 0)
-		protected := env.Deployment(namespace.Name, "protected", env.Config.MainLabel, "50m", 2)
-		protected.Spec.Template.Spec.TopologySpreadConstraints = []corev1.TopologySpreadConstraint{{
-			MaxSkew: 1, TopologyKey: "kubernetes.io/hostname", WhenUnsatisfiable: corev1.DoNotSchedule,
-			LabelSelector: protected.Spec.Selector.DeepCopy(),
-		}}
-		pdb := &policyv1.PodDisruptionBudget{
-			ObjectMeta: metav1.ObjectMeta{Name: "protected", Namespace: namespace.Name},
-			Spec:       policyv1.PodDisruptionBudgetSpec{MinAvailable: ptr.To(intstr.FromInt32(2)), Selector: protected.Spec.Selector.DeepCopy()},
-		}
+		protected, pdb := newProtectedPDBFixture(env, namespace.Name)
 		Expect(env.K8s.Create(ctx, pdb)).To(Succeed())
+		expectedPDB := pdb.DeepCopy()
+		DeferCleanup(func(ctx SpecContext) {
+			reportPDBDiagnostics(ctx, "final", expectedPDB, protected.Spec.Selector.MatchLabels)
+		}, NodeTimeout(time.Minute))
 		Expect(env.K8s.Create(ctx, protected)).To(Succeed())
 		pods := waitWorkload(ctx, protected.Name, env.Config.MainPool, 2, 0)
 		Expect(pods[0].Spec.NodeName).NotTo(Equal(pods[1].Spec.NodeName))
@@ -164,20 +160,33 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 			_, err = env.WorkloadState(ctx, namespace.Name, protected.Name, env.Config.MainPool, 2, 0)
 			g.Expect(err).NotTo(HaveOccurred())
 		}, 5*time.Minute, pollInterval).Should(Succeed())
+		reportPDBDiagnostics(ctx, "before-relaxation", expectedPDB, protected.Spec.Selector.MatchLabels)
 		Expect(env.K8s.Get(ctx, client.ObjectKeyFromObject(pdb), pdb)).To(Succeed())
 		pdb.Spec.MinAvailable = ptr.To(intstr.FromInt32(1))
+		blockedGeneration := pdb.Generation
 		Expect(env.K8s.Update(ctx, pdb)).To(Succeed())
 		Eventually(ctx, func(g Gomega) {
-			var current corev1.PodList
-			g.Expect(env.K8s.List(ctx, &current, client.InNamespace(namespace.Name), client.MatchingLabels{"app": protected.Name})).To(Succeed())
-			healthy := 0
-			for _, pod := range current.Items {
-				if environment.PodReady(pod) {
-					healthy++
-				}
+			healthy, err := protectedReadyPods(ctx, namespace.Name, protected.Spec.Selector.MatchLabels)
+			g.Expect(err).NotTo(HaveOccurred())
+			if err == nil {
+				Expect(healthy).To(BeNumerically(">=", 1), "PDB must preserve at least one Ready replica at each observation")
 			}
+			var relaxed policyv1.PodDisruptionBudget
+			g.Expect(env.K8s.Get(ctx, client.ObjectKeyFromObject(expectedPDB), &relaxed)).To(Succeed())
+			g.Expect(relaxed.UID).To(Equal(expectedPDB.UID))
+			g.Expect(relaxed.Generation).To(BeNumerically(">", blockedGeneration))
+			g.Expect(relaxed.Status.ObservedGeneration).To(Equal(relaxed.Generation))
+			g.Expect(relaxed.Status.CurrentHealthy).To(Equal(int32(2)))
+			g.Expect(relaxed.Status.DisruptionsAllowed).To(Equal(int32(1)))
+		}, time.Minute, time.Second).Should(Succeed())
+		reportPDBDiagnostics(ctx, "after-relaxation", expectedPDB, protected.Spec.Selector.MatchLabels)
+		Eventually(ctx, func(g Gomega) {
+			healthy, err := protectedReadyPods(ctx, namespace.Name, protected.Spec.Selector.MatchLabels)
+			g.Expect(err).NotTo(HaveOccurred())
 			// A continuity failure must fail the spec, not merely retry until recovery.
-			Expect(healthy).To(BeNumerically(">=", 1), "PDB must preserve at least one Ready replica at each observation")
+			if err == nil {
+				Expect(healthy).To(BeNumerically(">=", 1), "PDB must preserve at least one Ready replica at each observation")
+			}
 			after, err := readSnapshot(ctx)
 			g.Expect(err).NotTo(HaveOccurred())
 			g.Expect(after.Stable(env.Config, 1, 0)).To(Succeed())
@@ -202,6 +211,20 @@ var _ = Describe("Azure VMSS Uniform", Serial, Label("uniform"), func() {
 		growthAndDelete(ctx)
 	}, NodeTimeout(50*time.Minute))
 })
+
+func protectedReadyPods(ctx context.Context, namespace string, labels map[string]string) (int, error) {
+	var current corev1.PodList
+	if err := env.K8s.List(ctx, &current, client.InNamespace(namespace), client.MatchingLabels(labels)); err != nil {
+		return 0, err
+	}
+	healthy := 0
+	for _, pod := range current.Items {
+		if environment.PodReady(pod) {
+			healthy++
+		}
+	}
+	return healthy, nil
+}
 
 func readSnapshot(ctx context.Context) (environment.Snapshot, error) {
 	snapshot, err := env.Read(ctx)

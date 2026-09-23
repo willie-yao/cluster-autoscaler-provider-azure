@@ -280,6 +280,11 @@ bring the local suite to 27 registered specs; registration is not execution.
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.
+`AZ-P1-004` sets `nodeTaintsPolicy: Honor` on its hard hostname spread
+constraint so a NoSchedule drain candidate does not remain an empty topology
+domain. Structured report entries capture the PDB generation, disruption
+allowance and run-owned Pod placement before and after relaxation, plus a final
+best-effort capture before namespace cleanup.
 `CA-005` and `CA-020` cleanup restores baseline without independently checking
 every removed NIC; cases claiming physical deletion use explicit VM/Node/NIC
 assertions. DRA growth is main-only, not DRA scale-from-zero.
