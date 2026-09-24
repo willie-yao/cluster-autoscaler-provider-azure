@@ -25,12 +25,13 @@ git diff --check
 
 On macOS, use `make test-ci GOOS=darwin`. Start with a targeted test while
 iterating, then run the applicable checks before requesting review. The
-[testing guide](docs/testing.md) explains which targets enter the nested API
-module. A root `go test ./...` does not test nested modules.
+[testing guide](docs/testing.md) explains which targets enter nested modules.
+A root `go test ./...` does not test nested modules.
 
-For API changes, use the existing `apis/Makefile` targets (`manifests`,
-`generate`, `clients`) as appropriate and include the resulting generated
-changes. Do not hand-edit generated clients to hide a generator mismatch.
+The CapacityBuffer, CapacityQuota and ProvisioningRequest APIs come from the
+published `k8s.io/autoscaler/cluster-autoscaler/apis` module. Make API changes
+upstream in `kubernetes/autoscaler`, then update the module version together
+with the extracted core.
 
 ## Chart changes
 

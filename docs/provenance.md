@@ -6,10 +6,12 @@
 | --- | --- |
 | Upstream application and chart | [`kubernetes/autoscaler@c85f5afed954f7ecdbfb9091da2202426806d8d8`](https://github.com/kubernetes/autoscaler/tree/c85f5afed954f7ecdbfb9091da2202426806d8d8) |
 | Extracted autoscaling core | [`kubernetes-sigs/cluster-autoscaler@3d1c7137cdac`](https://github.com/kubernetes-sigs/cluster-autoscaler/commit/3d1c7137cdac), module `sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac` |
+| Autoscaler APIs | [`kubernetes/autoscaler@eec9bc4dc1d2`](https://github.com/kubernetes/autoscaler/tree/eec9bc4dc1d2/cluster-autoscaler/apis), module `k8s.io/autoscaler/cluster-autoscaler/apis v0.0.0-20260717085528-eec9bc4dc1d2`, the version required by the extracted core |
 
-The application keeps `k8s.io/autoscaler/cluster-autoscaler` and its local
-`./apis` replacement. Upstream history, source licenses and copyrights are
-retained.
+The application keeps the `k8s.io/autoscaler/cluster-autoscaler` module path.
+It uses the published API module rather than a local copy; that module's Go
+source is identical to the API source at the upstream application pin.
+Upstream history, source licenses and copyrights are retained.
 
 The Azure-only source omits the GCE-only fault-injection utility and unused
 protobuf-generator module; active build, verification and Kubernetes

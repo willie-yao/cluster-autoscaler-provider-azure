@@ -15,7 +15,7 @@
 
   "onCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends libseccomp-dev",
 
-  "postCreateCommand": "go mod download && cd apis && go mod download && cd .. && hack/install-verify-tools.sh && go install sigs.k8s.io/kind@latest",
+  "postCreateCommand": "go mod download && hack/install-verify-tools.sh && go install sigs.k8s.io/kind@latest",
 
   "customizations": {
     "vscode": {

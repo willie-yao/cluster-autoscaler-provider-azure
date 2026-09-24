@@ -17,7 +17,6 @@ WORKDIR /workspace
 
 # Copy go.mod and go.sum files first to cache dependencies
 COPY go.mod go.sum ./
-COPY apis/go.mod apis/go.sum ./apis/
 
 # Download dependencies
 RUN go mod download

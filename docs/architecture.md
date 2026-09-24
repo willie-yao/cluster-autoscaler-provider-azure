@@ -29,19 +29,19 @@ add stopped-VM reuse or AKS deallocate-mode behavior.
 | Location | Responsibility |
 | --- | --- |
 | Root [go.mod](../go.mod) | Application module `k8s.io/autoscaler/cluster-autoscaler` and Azure adapter dependencies |
-| [apis](../apis) | Local module for CapacityBuffer, CapacityQuota and ProvisioningRequest APIs, generated clients and informers |
 | [cloudprovider/azure](../cloudprovider/azure) | Azure provider, configuration, caches, node groups and Azure-client boundaries |
 | [charts](../charts) | Deployment packaging and frozen render compatibility tests |
 | [cloudprovider/azure/test](../cloudprovider/azure/test) | Separate E2E Go module, not entered by the root local checks |
 
-The root module replaces `k8s.io/autoscaler/cluster-autoscaler/apis` with
-`./apis`. It pins extracted core to
+The root module pins extracted core to
 `sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac`, sourced
 from `kubernetes-sigs/cluster-autoscaler`, not the old autoscaler monorepo.
-Repository location and Go import identity are distinct.
+The CapacityBuffer, CapacityQuota and ProvisioningRequest APIs come from the
+published `k8s.io/autoscaler/cluster-autoscaler/apis` module at the version
+that core requires. Repository location and Go import identity are distinct.
 
 Kubernetes dependencies are pinned to `1.37.0-rc.1`. This source dependency pin
-does not establish cluster-version support. Nested modules retain their own
+does not establish cluster-version support. The E2E module retains its own
 dependency pins.
 
 ## Compatibility contracts
@@ -49,11 +49,6 @@ dependency pins.
 [`azure_config_test.go`](../cloudprovider/azure/azure_config_test.go) covers
 default, file, legacy-field and environment precedence, including conflicting
 authentication choices.
-
-[`informers_test.go`](../apis/integration/informers_test.go) checks six API
-versions: scheme round trips, typed events, namespace indexing and shared
-typed/legacy caches. These fake-client checks do not establish API-server
-admission or server-side apply support.
 
 [`azure_migration_test.go`](../cloudprovider/azure/azure_migration_test.go)
 exercises real provider methods with mocked Azure clients. It checks tagged

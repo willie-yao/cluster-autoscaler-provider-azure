@@ -84,6 +84,8 @@ scope.
 ## Source and license
 
 The application is derived from `kubernetes/autoscaler` and retains its
-`k8s.io/autoscaler/cluster-autoscaler` Go module identity and local `./apis`
-replacement. Existing upstream history and attribution are retained.
+`k8s.io/autoscaler/cluster-autoscaler` Go module identity. Autoscaler APIs
+come from the published `k8s.io/autoscaler/cluster-autoscaler/apis` module
+that the extracted core requires. Existing upstream history and attribution
+are retained.
 See [LICENSE](LICENSE).

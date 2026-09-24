@@ -234,8 +234,6 @@ replace k8s.io/kms => k8s.io/kms v0.37.0-rc.1
 
 replace k8s.io/endpointslice => k8s.io/endpointslice v0.37.0-rc.1
 
-replace k8s.io/autoscaler/cluster-autoscaler/apis => ./apis
-
 replace k8s.io/cri-client => k8s.io/cri-client v0.37.0-rc.1
 
 replace k8s.io/externaljwt => k8s.io/externaljwt v0.37.0-rc.1
