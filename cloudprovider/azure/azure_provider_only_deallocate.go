@@ -436,6 +436,7 @@ func (s *ScaleSet) activeTarget(parked map[string]bool, deallocating map[string]
 	if err != nil {
 		return 0, err.error
 	}
+	physicalTarget := physical
 	for _, isParked := range parked {
 		if isParked {
 			physical--
@@ -449,6 +450,13 @@ func (s *ScaleSet) activeTarget(parked map[string]bool, deallocating map[string]
 	if physical < 0 {
 		return 0, fmt.Errorf("parked and deallocating inventory exceeds VMSS capacity for %s", s.Name)
 	}
+	klog.V(4).InfoS("Provider-only target accounting",
+		"nodeGroup", s.Id(),
+		"physicalTarget", physicalTarget,
+		"parkedByInstanceID", parked,
+		"syntheticDeallocatingByInstanceID", deallocating,
+		"adjustedTarget", physical,
+	)
 	return physical, nil
 }
 
