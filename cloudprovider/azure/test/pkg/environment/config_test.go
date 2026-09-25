@@ -69,6 +69,7 @@ func TestConfigValidate(t *testing.T) {
 		}},
 		{name: "resource path injection", change: func(c *Config) { c.ResourceGroup = "workers/other" }},
 		{name: "nonpositive demand", change: func(c *Config) { c.DemandCPU = "0" }},
+		{name: "invalid disk class", change: func(c *Config) { c.DiskStorageClass = "wrong/class" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()

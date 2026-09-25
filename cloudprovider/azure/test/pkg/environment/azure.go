@@ -146,7 +146,10 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			if value(set.Properties.ProvisioningState) != "Succeeded" || set.Properties.Overprovision == nil || *set.Properties.Overprovision {
 				return result, fmt.Errorf("VMSS %s must be Succeeded with overprovision disabled", name)
 			}
-			pool := PoolState{Capacity: int(*set.SKU.Capacity), Instances: map[string]Instance{}}
+			pool := PoolState{
+				Capacity: int(*set.SKU.Capacity), Instances: map[string]Instance{},
+				TemplateTaint: value(set.Tags[ZeroPoolTaintTag]),
+			}
 			instanceIDs := map[string]struct{}{}
 			instances := a.vms.NewListPager(c.ResourceGroup, name, nil)
 			for instances.More() {

@@ -19,5 +19,6 @@
   "mainLabel": "main",
   "zeroLabel": "zero",
   "demandCPU": "1200m",
-  "workloadImage": "REPLACE-WITH-PINNED-BUSYBOX-IMAGE"
+  "workloadImage": "REPLACE-WITH-PINNED-BUSYBOX-IMAGE",
+  "diskStorageClass": ""
 }

@@ -11,7 +11,7 @@ zero min/max `0/1`, and one control plane outside both groups. Its ceiling is
 four VMs and eight vCPUs, counted using Azure instances, requested capacity and
 SKU core counts. This fixture limitation is not a provider support restriction:
 standard pools, Flex, VMs-pool and AKS need their own qualified fixtures and
-execution evidence. Priority, scheduler, system-namespace and DRA cases require
+execution evidence. Priority, scheduler, system-namespace, DRA, taint and disk cases require
 the additional operator preparation described below.
 Before any workload, the configured maximum of two main workers, one zero-pool
 worker and the control plane must also fit eight vCPUs. A zero-capacity pool
@@ -120,7 +120,9 @@ before any workload mutation. This marker is explicit opt-in and consistency
 checking, not independent security authorization.
 
 Supply a non-secret JSON file based on [environment.example.json](environment.example.json).
-Every field is required, unknown fields fail, and kubeconfig must be absolute.
+The base fields are required, unknown fields fail, and kubeconfig must be absolute.
+Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
+It may be empty for other cases.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
 keys. Azure observations use the existing SDK's `DefaultAzureCredential`.
 Azure errors retain HTTP status/code but omit response bodies that might
@@ -240,12 +242,42 @@ and the frozen Azure provider template supplies no ResourceSlices. This case
 does not prove DRA scale-from-zero or three-worker DRA growth and does not warm
 the zero-pool cache or change pool maxima.
 
+`AZ-P1-005` requires the zero VMSS tag
+`k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run=<runID>:NoSchedule`.
+Configure that pool's kubelet to register with the same
+`autoscaler-e2e-run=<runID>:NoSchedule` taint. The suite checks the VMSS tag
+before and during the five-minute blocked-demand window, then checks the taint
+on the new Node. The baseline main worker must remain untainted by this key.
+Run other zero-pool cases on an untainted fixture because their Pods do not
+tolerate this taint. The runner does not change VMSS tags or kubelet settings.
+
+`AZ-P1-006` requires the Azure Disk CSI driver and a StorageClass named by
+`diskStorageClass`. Install the driver before the run, and verify that
+`disk.csi.azure.com` is registered on both main workers. Put both workers in
+the same zone so either worker can mount the other's disk. Create a
+run-labeled StorageClass with provisioner `disk.csi.azure.com`,
+`volumeBindingMode: WaitForFirstConsumer`, `reclaimPolicy: Delete`, and
+parameters `skuName: StandardSSD_LRS`, `subscriptionID: <subscriptionID>`,
+`resourceGroup: <resourceGroup>`, and `tags: autoscaler-e2e-run=<runID>`.
+Set `allow-disk-fixture: AZ-P1-006` in the operator
+marker after checking the driver, class and disk permissions. The runner
+checks the class, marker, CSIDriver and baseline CSINode before growing main.
+It checks that both main workers share a zone and waits up to three minutes
+for driver registration before creating the StatefulSet.
+Its client needs read access to StorageClasses, CSIDrivers, CSINodes, PVs and
+VolumeAttachments, plus permission to exec into its own Pods. The class
+provisions two one-GiB claims in the authorized worker resource group. Check
+that both disks are removed after namespace cleanup, since a namespace can
+finish deleting before the CSI driver finishes deleting its disks.
+
 | Test ID | Assertions |
 | --- | --- |
 | `AZ-P1-001` | Exact fresh discovery, one leader, Azure ownership/bounds, five-minute `1/0` idle stability |
 | `AZ-P1-002` | CPU geometry, main `1 -> 2`, two Ready Pods on distinct real workers, third scheduler-rejected Pod stays Pending for two minutes at max, physical return to `1` |
 | `AZ-P1-003` | Zero-pool `0 -> 1`, predicted label matches actual Ready Node/workload, physical `1 -> 0` |
 | `AZ-P1-004` | Two protected Pods on separate workers, zero allowed disruptions blocks deletion for five minutes, one allowed disruption permits physical deletion and rescheduling while at least one replica remains Ready at each observation |
+| `AZ-P1-005` | A zero-pool VMSS tag blocks demand without a matching taint toleration for five minutes, then tolerated demand grows the pool and the tainted Node runs the Pod; physical return to zero |
+| `AZ-P1-006` | Main `1 -> 2 -> 1`, two Ready StatefulSet Pods use distinct Azure Disks, one Pod and its disk move to the survivor without losing the file, and VM/Node/NIC deletion is verified |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -264,8 +296,9 @@ The public scenario source is
 `Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`, a public 1.35-line
 test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
-source-disabled/flaky and is not implemented. The five supplemental cases above
-bring the local suite to 27 registered specs; registration is not execution.
+source-disabled/flaky and is not implemented. One disk case adapts a separate
+public source, and six supplemental cases bring the local suite to 29
+registered specs; registration is not execution.
 
 | Cases | Maintained intent | Source file |
 | --- | --- | --- |
@@ -277,6 +310,8 @@ bring the local suite to 27 registered specs; registration is not execution.
 | `CA-012` through `CA-016` | Expendable and non-expendable demand, preemption and retention | [priority_test.go](suites/scaleup/priority_test.go) |
 | `CA-017` through `CA-019` | Bypassed and unconfigured scheduler demand | [scheduler_test.go](suites/scaleup/scheduler_test.go) |
 | `CA-020` through `CA-022` | Synthetic DRA growth, oversized claim refusal, deletion and reallocation | [dra_test.go](suites/scaleup/dra_test.go) |
+| `AZ-P1-005` | Zero-pool template taint blocks demand without a toleration and permits tolerated demand | [zero_taint_test.go](suites/scaleup/zero_taint_test.go) |
+| `AZ-P1-006` | Azure Disk StatefulSet Pods retain claims and data when a worker is deleted | [disk_test.go](suites/scaleup/disk_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.
@@ -287,12 +322,13 @@ allowance and run-owned Pod placement before and after relaxation, plus a final
 best-effort capture before namespace cleanup.
 `CA-005` and `CA-020` cleanup restores baseline without independently checking
 every removed NIC; cases claiming physical deletion use explicit VM/Node/NIC
-assertions. DRA growth is main-only, not DRA scale-from-zero.
+assertions. DRA growth and the Azure Disk case are main-only, not
+scale-from-zero.
 
-This suite covers public Delete-mode intents, not internal AKS product parity,
-deallocate behavior or every Azure backend. Historical live outcomes must be
-read at their recorded test and runtime checkpoints. New source changes do not
-inherit live credit from an earlier run.
+The suite covers public Delete-mode cases and the specified taint case. It does
+not cover all AKS behavior, deallocate mode or every Azure backend. Read older
+live outcomes at their recorded test and runtime commits. New source changes
+do not inherit live credit from an earlier run.
 
 See [source provenance](../../../docs/provenance.md) for upstream source
 attribution and compatibility scope.

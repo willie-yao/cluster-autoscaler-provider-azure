@@ -62,6 +62,7 @@ type Config struct {
 	ZeroLabel            string `json:"zeroLabel"`
 	DemandCPU            string `json:"demandCPU"`
 	WorkloadImage        string `json:"workloadImage"`
+	DiskStorageClass     string `json:"diskStorageClass,omitempty"`
 }
 
 // LoadConfig rejects misspelled inputs instead of selecting a default cluster.
@@ -133,6 +134,9 @@ func (c Config) Validate() error {
 	cpu, err := resource.ParseQuantity(c.DemandCPU)
 	if err != nil || cpu.MilliValue() <= 0 {
 		return fmt.Errorf("demandCPU must be a positive CPU quantity")
+	}
+	if c.DiskStorageClass != "" && len(validation.IsDNS1123Subdomain(c.DiskStorageClass)) != 0 {
+		return fmt.Errorf("diskStorageClass must be a valid StorageClass name")
 	}
 	return nil
 }
