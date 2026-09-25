@@ -99,6 +99,7 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	result := Snapshot{Pools: map[string]PoolState{}}
 	poolCores := map[string]int{}
 	bounds := c.Pools()
+	balanceTags := map[string]map[string]*string{}
 	pager := a.sets.NewListPager(c.ResourceGroup, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
@@ -151,17 +152,19 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			for _, zone := range set.Zones {
 				pool.Zone += value(zone) + ","
 			}
-			if set.Properties.VirtualMachineProfile != nil && set.Properties.VirtualMachineProfile.OSProfile != nil {
-				pool.TemplateCustomData = set.Properties.VirtualMachineProfile.OSProfile.CustomData != nil
+			if set.Properties.VirtualMachineProfile != nil && set.Properties.VirtualMachineProfile.StorageProfile != nil {
+				pool.Image = imageReference(set.Properties.VirtualMachineProfile.StorageProfile.ImageReference)
 			}
 			if c.Phase == "no-join" && name == c.ZeroPool &&
-				(set.Properties.VirtualMachineProfile == nil || set.Properties.VirtualMachineProfile.OSProfile == nil ||
-					pool.TemplateCustomData) {
-				return result, fmt.Errorf("no-join pool must have an OS profile without custom data")
+				value(set.Tags["autoscaler-e2e-no-join"]) != c.RunID {
+				return result, fmt.Errorf("no-join pool needs the operator's run-owned no-join tag")
 			}
 			if c.Phase == "balance" && (name == c.BalancePoolA || name == c.BalancePoolB) &&
 				value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.BalanceLabel {
 				return result, fmt.Errorf("balance pool %s lacks its shared node-template label", name)
+			}
+			if c.Phase == "balance" && (name == c.BalancePoolA || name == c.BalancePoolB) {
+				balanceTags[name] = set.Tags
 			}
 			instanceIDs := map[string]struct{}{}
 			instances := a.vms.NewListPager(c.ResourceGroup, name, nil)
@@ -217,6 +220,11 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	if len(result.Pools) != len(bounds) {
 		return result, fmt.Errorf("expected exactly %d authorized scale sets", len(bounds))
 	}
+	if c.Phase == "balance" {
+		if err := checkBalanceTemplateTags(balanceTags[c.BalancePoolA], balanceTags[c.BalancePoolB]); err != nil {
+			return result, err
+		}
+	}
 	standalone := a.other.NewListPager(c.ResourceGroup, nil)
 	for standalone.More() {
 		page, err := standalone.NextPage(ctx)
@@ -258,6 +266,38 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	return result, result.CheckBounds(c)
 }
 
+func checkBalanceTemplateTags(a, b map[string]*string) error {
+	const prefix = "k8s.io_cluster-autoscaler_node-template_"
+	for _, pair := range [][2]map[string]*string{{a, b}, {b, a}} {
+		for key, tag := range pair[0] {
+			if strings.HasPrefix(key, prefix) {
+				other, found := pair[1][key]
+				if !found || tag == nil || other == nil || *other != *tag {
+					return fmt.Errorf("balance pools need matching node-template scheduling tags")
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func imageReference(image *armcompute.ImageReference) string {
+	if image == nil {
+		return ""
+	}
+	parts := []string{
+		value(image.CommunityGalleryImageID), value(image.ID), value(image.SharedGalleryImageID),
+		value(image.Publisher), value(image.Offer), value(image.SKU), value(image.Version),
+		value(image.ExactVersion),
+	}
+	for _, part := range parts {
+		if part != "" {
+			return strings.Join(parts, "|")
+		}
+	}
+	return ""
+}
+
 func checkScaleDownTags(tags map[string]*string) error {
 	const prefix = "k8s.io_cluster-autoscaler_node-template_autoscaling-options_"
 	if raw := tags[prefix+"scaledownunneededtime"]; raw != nil {
@@ -285,6 +325,38 @@ func checkPeakEnvelope(mainCores, zeroCores, controlPlaneCores int) error {
 		return fmt.Errorf("%w: configured pool maxima and control plane require %d vCPUs, exceeding %d", ErrBounds, peak, MaxVCPUs)
 	}
 	return nil
+}
+
+// InstanceRunning checks one captured VMSS instance without reading guest settings.
+func (e *Environment) InstanceRunning(ctx context.Context, pool, id string) (bool, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok {
+		return false, fmt.Errorf("Azure instance-view reader is unavailable")
+	}
+	return cloud.instanceRunning(ctx, pool, id)
+}
+
+func (a *azureCloud) instanceRunning(ctx context.Context, pool, id string) (bool, error) {
+	if _, ok := a.config.Pools()[pool]; !ok {
+		return false, fmt.Errorf("VMSS instance belongs to an unauthorized pool")
+	}
+	prefix := normalizeID(a.config.PoolID(pool)) + "/virtualmachines/"
+	normalized := normalizeID(id)
+	if !strings.HasPrefix(normalized, prefix) || strings.ContainsAny(strings.TrimPrefix(normalized, prefix), "/?#") ||
+		len(normalized) == len(prefix) {
+		return false, fmt.Errorf("VMSS instance ID is outside the authorized pool")
+	}
+	instanceID := strings.TrimPrefix(normalized, prefix)
+	view, err := a.vms.GetInstanceView(ctx, a.config.ResourceGroup, pool, instanceID, nil)
+	if err != nil {
+		return false, azureError("read VMSS instance power state", err)
+	}
+	for _, status := range view.Statuses {
+		if status != nil && strings.EqualFold(value(status.Code), "PowerState/running") {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func (a *azureCloud) NICExists(ctx context.Context, id string) (bool, error) {

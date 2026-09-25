@@ -170,8 +170,8 @@ if it exceeds four actual VMs or eight vCPUs.
 
 For `AZ-P1-007`, set main to `1/1` and zero to `0/0`. Add two run-tagged
 VMSS named by `balancePoolA` and `balancePoolB` in the worker resource
-group. Give both `min=0`, `max=2`, and matching SKU, zone, join setup
-and taints. Both future Nodes must get `<poolLabel>=<balanceLabel>` from
+group. Give both `min=0`, `max=2`, and matching SKU, image, zone,
+join setup and node-template scheduling tags. Both future Nodes must get `<poolLabel>=<balanceLabel>` from
 their kubelet setup. Set the same value on each VMSS tag
 `k8s.io_cluster-autoscaler_node-template_label_<poolLabel>`.
 The controller must discover all four groups and use
@@ -184,18 +184,25 @@ operator marker. Prepare the Deployment with zero replicas. The case
 creates two unschedulable Pods and then creates `start-controller` in
 its test namespace. Start one controller replica only after that signal.
 The case checks one plan that adds one node to each pool, Ready Pods
-on both Nodes, and physical deletion back to zero. Remove the extra
+on both Nodes, and physical deletion back to zero. The runner compares
+returned image, zone, SKU and template tags. It cannot compare
+bootstrap data, so both workers joining and becoming Ready provides
+that check. Remove the extra
 VMSS and verify their deletion before the next phase.
 
 For `AZ-P1-008`, set main to `1/2` and zero to `0/1`. The zero VMSS
-OS profile must have no `customData`, so its new VM cannot run the
-join bootstrap. Do not use guest fault injection or RunCommand.
+must not include the join bootstrap. Give it the operator tag
+`autoscaler-e2e-no-join=<runID>`. Azure GET redacts `customData`,
+so the runner cannot read or verify the VMSS bootstrap content.
+The operator must check the template before starting the case.
+Do not use guest fault injection or RunCommand.
 Set `--max-node-provision-time=3m` and
 `--initial-node-group-backoff-duration=5m` on the running controller.
 Set `allow-no-join-fixture: AZ-P1-008` in the marker. The runner
-checks the absent bootstrap, observes one VM with no Kubernetes Node,
-checks the timeout event and group backoff, and verifies deletion
-of the VM and NIC when capacity returns to zero.
+checks the operator tag, observes the VM in Running state without
+a Kubernetes Node during the provision window, checks the timeout
+event and group backoff, and verifies deletion of the VM and NIC
+when capacity returns to zero.
 
 For `AZ-P1-009`, set main's discovery tags to `min=2`, `max=2`,
 but leave its Azure capacity at one with one Ready worker. Keep zero

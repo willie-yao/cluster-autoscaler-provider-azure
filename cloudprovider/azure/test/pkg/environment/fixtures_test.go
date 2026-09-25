@@ -214,8 +214,8 @@ func TestCheckBalancePools(t *testing.T) {
 	c := testConfig()
 	c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "pair-a", "pair-b", "balanced"
 	baseline := Snapshot{Pools: map[string]PoolState{
-		"pair-a": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true},
-		"pair-b": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true},
+		"pair-a": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Image: "community-image", Zone: "1,"},
+		"pair-b": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Image: "community-image", Zone: "1,"},
 	}}
 	if err := CheckBalancePools(baseline, c); err != nil {
 		t.Fatal(err)
@@ -225,8 +225,8 @@ func TestCheckBalancePools(t *testing.T) {
 		change func(*PoolState)
 	}{
 		{name: "wrong SKU", change: func(p *PoolState) { p.SKU = "Standard_D4s_v5" }},
+		{name: "wrong image", change: func(p *PoolState) { p.Image = "different-image" }},
 		{name: "wrong zone", change: func(p *PoolState) { p.Zone = "2," }},
-		{name: "no join template", change: func(p *PoolState) { p.TemplateCustomData = false }},
 		{name: "tainted template", change: func(p *PoolState) { p.TemplateTaint = "foreign:NoSchedule" }},
 		{name: "already growing", change: func(p *PoolState) { p.Capacity = 1 }},
 	} {
@@ -237,7 +237,7 @@ func TestCheckBalancePools(t *testing.T) {
 			if err := CheckBalancePools(baseline, c); err == nil {
 				t.Fatal("accepted unmatched balance pool")
 			}
-			baseline.Pools[c.BalancePoolB] = PoolState{Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true}
+			baseline.Pools[c.BalancePoolB] = PoolState{Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Image: "community-image", Zone: "1,"}
 		})
 	}
 }

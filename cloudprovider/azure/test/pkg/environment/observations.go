@@ -38,12 +38,12 @@ type Instance struct {
 
 // PoolState separates requested capacity from actual cloud instances.
 type PoolState struct {
-	Capacity           int
-	Instances          map[string]Instance
-	TemplateTaint      string
-	TemplateCustomData bool
-	SKU                string
-	Zone               string
+	Capacity      int
+	Instances     map[string]Instance
+	TemplateTaint string
+	SKU           string
+	Image         string
+	Zone          string
 }
 
 // Snapshot contains no credentials, bootstrap settings, Pod specs or logs.

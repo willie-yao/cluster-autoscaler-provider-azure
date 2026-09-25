@@ -243,12 +243,37 @@ var _ = Describe("Phased Azure VMSS cases", Serial, func() {
 		}, waitTimeout, pollInterval).Should(Succeed())
 		AddReportEntry("unregistered-vm", created.Pools[c.ZeroPool])
 
+		var instanceID string
+		for id := range created.Pools[c.ZeroPool].Instances {
+			instanceID = id
+		}
+		running := false
 		Eventually(ctx, func() error {
-			if err := f.env.Controller(ctx); err != nil {
+			current, err := f.active(ctx)
+			if err != nil {
 				return err
 			}
-			return f.env.CheckTimeoutBackoff(ctx, c.ZeroPool)
+			if len(environment.PoolNodes(current.Nodes, c.PoolID(c.ZeroPool))) != 0 {
+				StopTrying("unregistered VM became a Kubernetes Node").Now()
+			}
+			backoffErr := f.env.CheckTimeoutBackoff(ctx, c.ZeroPool)
+			if _, exists := current.Pools[c.ZeroPool].Instances[instanceID]; exists &&
+				current.Pools[c.ZeroPool].Capacity == 1 && backoffErr != nil {
+				nowRunning, err := f.env.InstanceRunning(ctx, c.ZeroPool, instanceID)
+				if err != nil {
+					return err
+				}
+				if running && !nowRunning {
+					StopTrying("unregistered VM stopped before timeout backoff").Now()
+				}
+				running = nowRunning
+			}
+			if !running {
+				return fmt.Errorf("waiting for the unregistered VM to reach Running")
+			}
+			return backoffErr
 		}, 12*time.Minute, pollInterval).Should(Succeed())
+		AddReportEntry("unregistered-power", "captured VM reached Running before the provision timeout")
 		Eventually(ctx, func() error {
 			var events corev1.EventList
 			if err := f.env.K8s.List(ctx, &events, client.InNamespace(c.AutoscalerNamespace)); err != nil {

@@ -62,9 +62,9 @@ func CheckBalancePools(snapshot Snapshot, c Config) error {
 	b, bFound := snapshot.Pools[c.BalancePoolB]
 	if c.Phase != "balance" || !aFound || !bFound ||
 		a.Capacity != 0 || b.Capacity != 0 || len(a.Instances) != 0 || len(b.Instances) != 0 ||
-		a.SKU == "" || a.SKU != b.SKU || a.Zone == "" || a.Zone != b.Zone ||
-		a.TemplateTaint != "" || b.TemplateTaint != "" || !a.TemplateCustomData || !b.TemplateCustomData {
-		return fmt.Errorf("balance pools must be empty, identically zoned and sized, untainted and able to join")
+		a.SKU == "" || a.SKU != b.SKU || a.Image == "" || a.Image != b.Image ||
+		a.Zone == "" || a.Zone != b.Zone || a.TemplateTaint != b.TemplateTaint {
+		return fmt.Errorf("balance pools must be empty and share the SKU, image, zone and taints")
 	}
 	return nil
 }

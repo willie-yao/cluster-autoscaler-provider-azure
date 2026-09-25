@@ -133,38 +133,160 @@ func TestAzureReadBalancePoolBoundBeforeConvergence(t *testing.T) {
 	}
 }
 
-func TestAzureReadNoJoinRejectsCustomData(t *testing.T) {
+func TestAzureReadNoJoinRequiresOperatorTag(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, tag string
+		valid     bool
+	}{
+		{name: "missing tag"},
+		{name: "wrong run", tag: "other"},
+		{name: "operator declaration", tag: "owned-run", valid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = "no-join"
+			tags := map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+				"min": ptr.To("0"), "max": ptr.To("1")}
+			if tt.tag != "" {
+				tags["autoscaler-e2e-no-join"] = ptr.To(tt.tag)
+			}
+			page := armcompute.VirtualMachineScaleSetListResult{Value: []*armcompute.VirtualMachineScaleSet{{
+				Name: ptr.To(c.ZeroPool), SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(int64(0))}, Tags: tags,
+				Properties: &armcompute.VirtualMachineScaleSetProperties{
+					ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+				},
+			}}}
+			setBody, err := json.Marshal(page)
+			if err != nil {
+				t.Fatal(err)
+			}
+			instanceBody, err := json.Marshal(armcompute.VirtualMachineScaleSetVMListResult{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					body := setBody
+					if requests == 2 {
+						body = instanceBody
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, sets: factory.NewVirtualMachineScaleSetsClient(),
+				vms: factory.NewVirtualMachineScaleSetVMsClient(), cores: map[string]int{"standard_d2s_v5": 2}}
+			_, err = cloud.Read(context.Background())
+			if tt.valid {
+				if err == nil || !strings.Contains(err.Error(), "expected exactly 2 authorized scale sets") || requests != 2 {
+					t.Fatalf("declared no-join tag did not pass preflight: error=%v requests=%d", err, requests)
+				}
+			} else if err == nil || !strings.Contains(err.Error(), "operator's run-owned no-join tag") || requests != 1 {
+				t.Fatalf("undeclared no-join fixture accepted: error=%v requests=%d", err, requests)
+			}
+		})
+	}
+}
+
+func TestCheckBalanceTemplateTags(t *testing.T) {
+	t.Parallel()
+	labels := "k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"
+	taints := "k8s.io_cluster-autoscaler_node-template_taint_dedicated"
+	a := map[string]*string{labels: ptr.To("balanced"), taints: ptr.To("test:NoSchedule")}
+	b := map[string]*string{labels: ptr.To("balanced"), taints: ptr.To("test:NoSchedule")}
+	if err := checkBalanceTemplateTags(a, b); err != nil {
+		t.Fatal(err)
+	}
+	b[taints] = ptr.To("other:NoSchedule")
+	if err := checkBalanceTemplateTags(a, b); err == nil {
+		t.Fatal("accepted different taint tags")
+	}
+	delete(b, taints)
+	if err := checkBalanceTemplateTags(a, b); err == nil {
+		t.Fatal("accepted a missing taint tag")
+	}
+	b[taints] = ptr.To("test:NoSchedule")
+	a["k8s.io_cluster-autoscaler_node-template_label_empty"] = ptr.To("")
+	if err := checkBalanceTemplateTags(a, b); err == nil {
+		t.Fatal("accepted a missing empty-valued label tag")
+	}
+	b["k8s.io_cluster-autoscaler_node-template_label_empty"] = ptr.To("")
+	if err := checkBalanceTemplateTags(a, b); err != nil {
+		t.Fatal(err)
+	}
+	delete(a, "k8s.io_cluster-autoscaler_node-template_label_empty")
+	delete(b, "k8s.io_cluster-autoscaler_node-template_label_empty")
+	b[taints] = ptr.To("test:NoSchedule")
+	b["k8s.io_cluster-autoscaler_node-template_resources_gpu"] = ptr.To("1")
+	if err := checkBalanceTemplateTags(a, b); err == nil {
+		t.Fatal("accepted an extra resource template tag")
+	}
+}
+
+func TestImageReferenceIncludesResolvedVersion(t *testing.T) {
+	t.Parallel()
+	a := &armcompute.ImageReference{Publisher: ptr.To("test"), Offer: ptr.To("linux"),
+		SKU: ptr.To("vm"), Version: ptr.To("latest"), ExactVersion: ptr.To("1.0.0")}
+	b := *a
+	if imageReference(a) == "" || imageReference(a) != imageReference(&b) {
+		t.Fatal("matching returned image references differ")
+	}
+	b.ExactVersion = ptr.To("1.0.1")
+	if imageReference(a) == imageReference(&b) {
+		t.Fatal("different resolved image versions matched")
+	}
+	if imageReference(nil) != "" || imageReference(&armcompute.ImageReference{}) != "" {
+		t.Fatal("missing image reference must not pass balance preflight")
+	}
+}
+
+func TestAzureInstanceRunning(t *testing.T) {
 	t.Parallel()
 	c := testConfig()
-	c.Phase = "no-join"
-	page := armcompute.VirtualMachineScaleSetListResult{Value: []*armcompute.VirtualMachineScaleSet{{
-		Name: ptr.To(c.ZeroPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(0))},
-		Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
-			"min": ptr.To("0"), "max": ptr.To("1")},
-		Properties: &armcompute.VirtualMachineScaleSetProperties{
-			ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
-			VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{OSProfile: &armcompute.VirtualMachineScaleSetOSProfile{
-				CustomData: ptr.To("not logged"),
-			}},
-		},
-	}}}
-	body, err := json.Marshal(page)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
-		ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
-			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
-				Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
-		})},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	cloud := &azureCloud{config: c, sets: sets}
-	_, err = cloud.Read(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "without custom data") || strings.Contains(err.Error(), "not logged") {
-		t.Fatalf("no-join custom-data check = %v", err)
+	path := c.PoolID(c.ZeroPool) + "/virtualMachines/0/instanceView"
+	for _, tt := range []struct {
+		name, power string
+		running     bool
+	}{
+		{name: "running", power: "PowerState/running", running: true},
+		{name: "starting", power: "PowerState/starting"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(armcompute.VirtualMachineScaleSetVMInstanceView{
+				Statuses: []*armcompute.InstanceViewStatus{{Code: ptr.To(tt.power)}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					if request.Method != http.MethodGet || !strings.EqualFold(request.URL.Path, path) {
+						t.Fatalf("unexpected instance view request %s %s", request.Method, request.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, vms: factory.NewVirtualMachineScaleSetVMsClient()}
+			running, err := cloud.instanceRunning(context.Background(), c.ZeroPool, c.PoolID(c.ZeroPool)+"/virtualMachines/0")
+			if err != nil || running != tt.running || requests != 1 {
+				t.Fatalf("instance running=%t error=%v requests=%d", running, err, requests)
+			}
+			if _, err := cloud.instanceRunning(context.Background(), c.ZeroPool, c.PoolID(c.MainPool)+"/virtualMachines/0"); err == nil || requests != 1 {
+				t.Fatal("accepted an instance in another pool")
+			}
+		})
 	}
 }
 
