@@ -238,6 +238,14 @@ func TestCheckPhaseArguments(t *testing.T) {
 		{name: "long provision timeout", phase: "no-join", args: []string{"--max-node-provision-time=15m"}},
 		{name: "minimum flag", phase: "minimum", valid: true, args: []string{"--enforce-node-group-min-size=true", "--v=1"}},
 		{name: "minimum disabled", phase: "minimum", args: []string{"--enforce-node-group-min-size=false", "--v=1"}},
+		{name: "Spot limit", phase: "spot", valid: true, args: []string{"--max-nodes-total=4"}},
+		{name: "Spot cap too high", phase: "spot", args: []string{"--max-nodes-total=5"}},
+		{name: "large limit and timings", phase: "large", valid: true, args: []string{
+			"--max-nodes-total=52", "--max-node-provision-time=20m", "--scan-interval=10s",
+		}},
+		{name: "large cap too high", phase: "large", args: []string{
+			"--max-nodes-total=55", "--max-node-provision-time=20m", "--scan-interval=10s",
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()

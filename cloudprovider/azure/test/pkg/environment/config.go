@@ -67,6 +67,10 @@ type Config struct {
 	BalancePoolA         string `json:"balancePoolA,omitempty"`
 	BalancePoolB         string `json:"balancePoolB,omitempty"`
 	BalanceLabel         string `json:"balanceLabel,omitempty"`
+	SpotPool             string `json:"spotPool,omitempty"`
+	SpotLabel            string `json:"spotLabel,omitempty"`
+	ScalePool            string `json:"scalePool,omitempty"`
+	ScaleLabel           string `json:"scaleLabel,omitempty"`
 }
 
 // PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
@@ -91,6 +95,21 @@ func (c Config) Pools() map[string]PoolBounds {
 	if c.Phase == "minimum" {
 		main.TagMin = 2
 	}
+	if c.Phase == "spot" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.SpotPool: {Max: 1, Label: c.SpotLabel},
+		}
+	}
+	if c.Phase == "large" {
+		main.Max = 1
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.ScalePool: {Max: 50, Label: c.ScaleLabel},
+		}
+	}
 	return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
 }
 
@@ -100,7 +119,21 @@ func (c Config) PoolNames() []string {
 	if c.Phase == "balance" {
 		names = append(names, c.BalancePoolA, c.BalancePoolB)
 	}
+	if c.Phase == "spot" {
+		names = append(names, c.SpotPool)
+	}
+	if c.Phase == "large" {
+		names = append(names, c.ScalePool)
+	}
 	return names
+}
+
+// Limits applies the larger bound only to the large-pool phase.
+func (c Config) Limits() (int, int) {
+	if c.Phase == "large" {
+		return 55, 60
+	}
+	return MaxVMs, MaxVCPUs
 }
 
 // LoadConfig rejects misspelled inputs instead of selecting a default cluster.
@@ -178,9 +211,6 @@ func (c Config) Validate() error {
 	}
 	switch c.Phase {
 	case "":
-		if c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "" {
-			return fmt.Errorf("balance pools and label require the balance phase")
-		}
 	case "balance":
 		if c.BalancePoolA == "" || c.BalancePoolB == "" || c.BalanceLabel == "" {
 			return fmt.Errorf("balance phase requires two pools and one shared label")
@@ -197,11 +227,36 @@ func (c Config) Validate() error {
 			seen[strings.ToLower(name)] = true
 		}
 	case "no-join", "minimum":
-		if c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "" {
-			return fmt.Errorf("balance pools and label require the balance phase")
+	case "spot":
+		if err := c.validateAdditionalPool(c.SpotPool, c.SpotLabel); err != nil {
+			return fmt.Errorf("spot phase: %w", err)
+		}
+	case "large":
+		if err := c.validateAdditionalPool(c.ScalePool, c.ScaleLabel); err != nil {
+			return fmt.Errorf("large phase: %w", err)
 		}
 	default:
 		return fmt.Errorf("unknown fixture phase %q", c.Phase)
+	}
+	if c.Phase != "balance" && (c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "") {
+		return fmt.Errorf("balance pools and label require the balance phase")
+	}
+	if c.Phase != "spot" && (c.SpotPool != "" || c.SpotLabel != "") {
+		return fmt.Errorf("Spot pool and label require the spot phase")
+	}
+	if c.Phase != "large" && (c.ScalePool != "" || c.ScaleLabel != "") {
+		return fmt.Errorf("scale pool and label require the large phase")
+	}
+	return nil
+}
+
+func (c Config) validateAdditionalPool(name, label string) error {
+	if name == "" || label == "" ||
+		!regexp.MustCompile(`^[a-zA-Z0-9_.()-]+$`).MatchString(name) ||
+		strings.EqualFold(name, c.MainPool) || strings.EqualFold(name, c.ZeroPool) ||
+		len(validation.IsValidLabelValue(label)) != 0 ||
+		label == c.MainLabel || label == c.ZeroLabel {
+		return fmt.Errorf("optional pool requires a distinct valid name and label")
 	}
 	return nil
 }

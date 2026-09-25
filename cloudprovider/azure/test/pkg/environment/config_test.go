@@ -84,6 +84,18 @@ func TestConfigValidate(t *testing.T) {
 		{name: "balance data in no-join phase", change: func(c *Config) {
 			c.Phase, c.BalancePoolA = "no-join", "a"
 		}},
+		{name: "spot pool not bound", change: func(c *Config) { c.Phase = "spot" }},
+		{name: "Spot pool overlaps main", change: func(c *Config) {
+			c.Phase, c.SpotPool, c.SpotLabel = "spot", "MAIN", "spot"
+		}},
+		{name: "Spot label overlaps zero", change: func(c *Config) {
+			c.Phase, c.SpotPool, c.SpotLabel = "spot", "spot-pool", c.ZeroLabel
+		}},
+		{name: "scale pool not bound", change: func(c *Config) { c.Phase = "large" }},
+		{name: "scale pool in Spot phase", change: func(c *Config) {
+			c.Phase, c.SpotPool, c.SpotLabel, c.ScalePool = "spot", "spot-pool", "spot", "large-pool"
+		}},
+		{name: "scale pool without phase", change: func(c *Config) { c.ScalePool = "large-pool" }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -111,12 +123,20 @@ func TestConfigPhasePools(t *testing.T) {
 		{name: "balance", phase: "balance", names: 4, mainTagMin: 1, mainMax: 1, zeroMax: 0},
 		{name: "no-join", phase: "no-join", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 1},
 		{name: "minimum", phase: "minimum", names: 2, mainTagMin: 2, mainMax: 2, zeroMax: 1},
+		{name: "Spot", phase: "spot", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "large", phase: "large", names: 3, mainTagMin: 1, mainMax: 1, zeroMax: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
 			c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = tt.phase, "a", "b", "balanced"
 			if tt.phase != "balance" {
 				c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "", "", ""
+			}
+			if tt.phase == "spot" {
+				c.SpotPool, c.SpotLabel = "spot-pool", "spot"
+			}
+			if tt.phase == "large" {
+				c.ScalePool, c.ScaleLabel = "large-pool", "large"
 			}
 			if err := c.Validate(); err != nil {
 				t.Fatal(err)
@@ -129,6 +149,14 @@ func TestConfigPhasePools(t *testing.T) {
 			}
 			if tt.phase == "minimum" && pools[c.MainPool].ObservedMin != 1 {
 				t.Fatal("minimum phase must allow the below-minimum starting capacity")
+			}
+			vms, cpus := c.Limits()
+			if tt.phase == "large" {
+				if pools[c.ScalePool].Max != 50 || vms != 55 || cpus != 60 {
+					t.Fatalf("large phase has wrong caps: pools=%+v VMs=%d vCPUs=%d", pools, vms, cpus)
+				}
+			} else if vms != MaxVMs || cpus != MaxVCPUs {
+				t.Fatalf("ordinary phase limits changed: %d VMs, %d vCPUs", vms, cpus)
 			}
 		})
 	}

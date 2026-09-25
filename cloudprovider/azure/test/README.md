@@ -25,9 +25,10 @@ Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
 
-Three additional cases run in `suites/scalephase` with `TEST_SUITE=scalephase`.
-They use separate operator phases under the same four-VM and eight-vCPU
-limits. The 29 default `scaleup` cases keep their two-pool fixture.
+Five additional cases run in `suites/scalephase` with
+`TEST_SUITE=scalephase`. The large-pool case alone has higher limits:
+55 VMs and 60 vCPUs. All other cases remain at four VMs and eight
+vCPUs. The 29 default `scaleup` cases keep their two-pool fixture.
 Do not select a default case while the pools or controller flags are set
 for a phase.
 
@@ -76,8 +77,9 @@ and the control-plane VM must have the `autoscaler-e2e-run=<runID>` Azure tag.
 The dedicated worker resource group may contain only the two selected VMSS,
 and optionally the named control-plane VM. Other infrastructure is not deleted
 or inventoried by these tests.
-The balance phase is the one exception. It requires exactly the main,
-zero and two named balance VMSS in that group.
+The balance phase requires exactly the main, zero and two named
+balance VMSS in that group. Spot and large phases each require only
+main, zero and the selected optional VMSS.
 
 Both VMSS must have `cluster-autoscaler-name=<discoveryValue>`, and `min`/`max`
 tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:
@@ -133,9 +135,12 @@ The base fields are required, unknown fields fail, and kubeconfig must be absolu
 Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
 For a phased case, use a separate copy of the binding and set `phase` to
-`balance`, `no-join`, or `minimum`. The balance phase also requires
+`balance`, `no-join`, `minimum`, `spot` or `large`. The balance phase also requires
 `balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
-in the other phases. A missing phase skips the new cases. A wrong marker
+in the other phases. Spot requires `spotPool` and `spotLabel`. Large
+requires `scalePool` and `scaleLabel`. Omit those fields outside their
+phase. Use an operator-measured `demandCPU` for one Pod per B1ms worker
+in the large phase. A missing phase skips the new cases. A wrong marker
 or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
 keys. Azure observations use the existing SDK's `DefaultAzureCredential`.
@@ -160,19 +165,23 @@ in all environments. It does not change the application's managed identity.
 
 ### Phased fixtures
 
-Run the three phased cases separately on one fresh, owned fixture. Stop the
+Run phased cases separately on a fresh, owned fixture. Stop the
 single autoscaler before changing pool tags or its Deployment. Wait until
 the old Pod is gone, then check the next phase's pools and flags. The runner
 does not change Azure pools or restart the controller. It creates only
 namespaced test objects and reads Azure and Kubernetes state. Keep one
-control plane and use `Standard_D2s_v5` workers in zone 1. Stop the run
-if it exceeds four actual VMs or eight vCPUs.
+control plane and use zone 1. Main and Spot workers use
+`Standard_D2s_v5`. The large phase uses `Standard_B1ms` for its
+own pool. Stop any ordinary phase if it exceeds four actual VMs
+or eight vCPUs. The large phase alone stops above 55 VMs or
+60 vCPUs.
 
 For `AZ-P1-007`, set main to `1/1` and zero to `0/0`. Add two run-tagged
 VMSS named by `balancePoolA` and `balancePoolB` in the worker resource
 group. Give both `min=0`, `max=2`, and matching SKU, image, zone,
-join setup and node-template scheduling tags. Both future Nodes must get `<poolLabel>=<balanceLabel>` from
-their kubelet setup. Set the same value on each VMSS tag
+join setup and node-template scheduling tags. Both future Nodes
+must get `<poolLabel>=<balanceLabel>` from their kubelet setup.
+Set the same value on each VMSS tag
 `k8s.io_cluster-autoscaler_node-template_label_<poolLabel>`.
 The controller must discover all four groups and use
 `--balance-similar-node-groups=true`, `--balancing-label=<poolLabel>`,
@@ -221,6 +230,66 @@ signal. The case rejects unrelated Pending Pods and checks the
 controller's minimum-size scale-up plan. It then checks that the first
 worker remains, a second joins and both stay at the tagged minimum.
 Leave both workers in place until the operator's workers-first cleanup.
+
+For `AZ-P1-010`, keep main at `1/2` and zero at `0/0`.
+Create one run-tagged `spotPool` VMSS with `min=0`, `max=1`,
+`Standard_D2s_v5`, zone 1 and a node-template tag for
+`<poolLabel>=<spotLabel>`. Set its VM priority to `Spot`,
+eviction policy to `Delete`, maximum price to `-1`, and
+automatic Spot restore off. The `-1` setting limits the
+price to the on-demand VM price without price-based eviction.
+Capacity eviction can still happen. Use
+`--max-nodes-total=4` on the one controller. Set
+`allow-spot-fixture: AZ-P1-010` in the marker. The runner
+checks Spot settings, then requires one Ready Spot Node and
+one Ready Pod before removing demand. It records the
+VM resource ID, unique Azure VMID, Node UID and NIC IDs.
+It then requires a completed
+autoscaler scale-down event for that Node and physical
+removal of its VM, Node and NIC. A VM replacement or loss
+of Node readiness while demand remains is reported as
+an infrastructure event and skipped, never passed.
+An unexpected deletion without a matching autoscaler
+event is also skipped. The operator must check Azure
+eviction and resource-health records for the captured VM
+before reporting a pass. Scheduled eviction notices are
+best effort, so an observed eviction takes precedence over
+a passing test report. For the ordinary USD 20 cap, budget
+USD 1.25 per hour over at most ten hours, plus a USD 5
+cleanup reserve. The USD 17.50 estimate leaves room for
+price and traffic variance.
+
+For `AZ-P1-011`, keep main at `1/1` and zero at `0/0`.
+Create one `scalePool` VMSS with `min=0`, `max=50`,
+`Standard_B1ms`, zone 1 and a node-template tag for
+`<poolLabel>=<scaleLabel>`. Start it at one Ready worker
+while CA is paused. Measure that worker's free CPU after
+all addons are running. Set `demandCPU` high enough that
+two test Pods cannot fit together, but low enough that
+one fits. Use `--max-nodes-total=52`,
+`--max-node-provision-time=20m` and
+`--scan-interval=10s`. Set
+`allow-large-fixture: AZ-P1-011` in the marker.
+The runner creates five Pods, observes one Ready and
+four unschedulable, and signals `start-controller` in
+its test namespace. Start one CA replica only after
+the signal. The test adds five Pods per step to 50
+and checks 50 distinct Ready workers and Pods. It
+records their VM, Node and NIC IDs before removing demand.
+then removes demand and checks physical deletion of
+all 50 VMs, Nodes and NICs as the pool returns to
+zero. The configured peak is 52 VMs and 54 vCPUs,
+within the large-phase cap. Use a worker subnet with
+at least 50 free IP addresses, a Pod CIDR large enough
+for 50 nodes and NAT capacity for image pulls.
+Recheck regional and B-series vCPU quota just before
+this phase. Select `TEST_TIMEOUT=5h` and enforce an
+operator deadline that leaves time for cleanup.
+If the case fails, stop CA and return this pool physically
+to zero before any other fixture change.
+At a conservative USD 2.25 per hour for ten hours,
+plus a USD 5 cleanup reserve, the estimate is
+USD 27.50, below the USD 30 large-phase cap.
 
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested
@@ -359,6 +428,8 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-007` | One two-node plan splits across two similar zero pools, each grows to one Ready Node and runs a Pod, then both return to zero with physical deletion |
 | `AZ-P1-008` | A Running VM never registers, CA emits `DeleteUnregistered`, and the first and any replacement VMs and NICs are gone after the demand is removed |
 | `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
+| `AZ-P1-010` | A VMSS tagged Spot grows from zero for a Ready Pod, then CA scales it down with a Node event and physical VM/Node/NIC deletion; an observed eviction is not a pass |
+| `AZ-P1-011` | A B1ms pool grows in five-node steps to 50 Ready nodes and Pods, then returns physically to zero with all VM/Node/NIC deletions checked |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -379,7 +450,7 @@ test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
 public source, and six supplemental cases bring the default suite to 29
-registered specs. Three phased cases bring the full module to 32
+registered specs. Five phased cases bring the full module to 34
 registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |
@@ -397,6 +468,8 @@ registered specs. Registration is not execution.
 | `AZ-P1-007` | Balance two similar zero pools with one two-node plan | [phase_test.go](suites/scalephase/phase_test.go) |
 | `AZ-P1-008` | Delete an unregistered zero-pool VM after a provision timeout | [phase_test.go](suites/scalephase/phase_test.go) |
 | `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-010` | Grow and remove a Spot VM without counting an observed eviction as a pass | [spot_test.go](suites/scalephase/spot_test.go) |
+| `AZ-P1-011` | Grow B1ms workers in steps of five to 50, then delete all of them | [large_test.go](suites/scalephase/large_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.

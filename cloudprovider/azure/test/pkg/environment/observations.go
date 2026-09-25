@@ -84,7 +84,8 @@ func WorkerNodes(nodes []corev1.Node, c Config) []corev1.Node {
 
 // CheckBounds checks observed pools before any convergence checks.
 func (s Snapshot) CheckBounds(c Config) error {
-	if s.VMs > MaxVMs || s.VCPUs > MaxVCPUs {
+	maxVMs, maxVCPUs := c.Limits()
+	if s.VMs > maxVMs || s.VCPUs > maxVCPUs {
 		return fmt.Errorf("%w: %d VMs, %d vCPUs", ErrBounds, s.VMs, s.VCPUs)
 	}
 	for name, bounds := range c.Pools() {

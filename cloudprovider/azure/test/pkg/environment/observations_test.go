@@ -154,6 +154,44 @@ func TestSnapshotStableBalancePools(t *testing.T) {
 	}
 }
 
+func TestSnapshotLargePhaseBounds(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase, c.ScalePool, c.ScaleLabel = "large", "large-pool", "large"
+	snapshot := Snapshot{Pools: map[string]PoolState{
+		c.MainPool:  {Capacity: 1, Instances: map[string]Instance{"main": {}}},
+		c.ZeroPool:  {Instances: map[string]Instance{}},
+		c.ScalePool: {Capacity: 50, Instances: map[string]Instance{}},
+	}, VMs: 52, VCPUs: 54}
+	if err := snapshot.CheckBounds(c); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name      string
+		vms, cpus int
+		scaleSize int
+	}{
+		{name: "VM limit", vms: 56, cpus: 54, scaleSize: 50},
+		{name: "vCPU limit", vms: 52, cpus: 61, scaleSize: 50},
+		{name: "pool limit", vms: 52, cpus: 54, scaleSize: 51},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			copy := snapshot
+			copy.VMs, copy.VCPUs = tt.vms, tt.cpus
+			copy.Pools = map[string]PoolState{}
+			for name, pool := range snapshot.Pools {
+				copy.Pools[name] = pool
+			}
+			pool := copy.Pools[c.ScalePool]
+			pool.Capacity = tt.scaleSize
+			copy.Pools[c.ScalePool] = pool
+			if err := copy.CheckBounds(c); !errors.Is(err, ErrBounds) {
+				t.Fatalf("observed over-limit state accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestValidateDemand(t *testing.T) {
 	t.Parallel()
 	node := testNode(testConfig())

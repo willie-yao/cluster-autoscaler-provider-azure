@@ -67,7 +67,7 @@ e2etests: ## Run E2Es on a prepared fixture with CAS deployed (ENVIRONMENT=<JSON
 .PHONY: test-local
 test-local: ## Validate harness logic and E2E registration without cloud credentials
 	go test -mod=readonly -race ./pkg/...
-	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage|PDBFixtureDiagnostics|DiskStatefulSetManifest|BalancedPlan|MinimumPlan|UnregisteredDeletionEvent)$$'
+	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage|PDBFixtureDiagnostics|DiskStatefulSetManifest|BalancedPlan|MinimumPlan|UnregisteredDeletionEvent|SpotScaleDownEvent|SpotDisruptionEvent)$$'
 	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
 	go test -mod=readonly -tags=e2e ./suites/... -run '^Test(ScaleUp|ScalePhase)$$' -count=1 -args -ginkgo.dry-run
 

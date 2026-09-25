@@ -166,6 +166,17 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			if c.Phase == "balance" && (name == c.BalancePoolA || name == c.BalancePoolB) {
 				balanceTags[name] = set.Tags
 			}
+			if c.Phase == "spot" && name == c.SpotPool {
+				if err := checkSpotPool(set, c); err != nil {
+					return result, err
+				}
+			}
+			if c.Phase == "large" && name == c.ScalePool {
+				if value(set.SKU.Name) != "Standard_B1ms" || len(set.Zones) != 1 || value(set.Zones[0]) != "1" ||
+					value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.ScaleLabel {
+					return result, fmt.Errorf("large pool must use zonal B1ms and its run-owned node-template label")
+				}
+			}
 			instanceIDs := map[string]struct{}{}
 			instances := a.vms.NewListPager(c.ResourceGroup, name, nil)
 			for instances.More() {
@@ -191,7 +202,7 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 						return result, fmt.Errorf("VMSS %s instance lacks identity/network evidence", name)
 					}
 					instance := Instance{ID: normalizeID(*vm.ID), VMID: value(vm.Properties.VMID)}
-					if c.Phase == "no-join" && instance.VMID == "" {
+					if (c.Phase == "no-join" || c.Phase == "spot" && name == c.SpotPool) && instance.VMID == "" {
 						return result, fmt.Errorf("VMSS %s instance lacks its unique VM ID", name)
 					}
 					for _, nic := range vm.Properties.NetworkProfile.NetworkInterfaces {
@@ -263,10 +274,46 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 		if MaxVMs*cores > MaxVCPUs {
 			return result, fmt.Errorf("%w: four control-plane VMs of this SKU exceed the vCPU limit", ErrBounds)
 		}
+	} else if c.Phase == "spot" || c.Phase == "large" {
+		if err := checkPhasePeakEnvelope(c, poolCores, cores); err != nil {
+			return result, err
+		}
 	} else if err := checkPeakEnvelope(poolCores[c.MainPool], poolCores[c.ZeroPool], cores); err != nil {
 		return result, err
 	}
 	return result, result.CheckBounds(c)
+}
+
+func checkSpotPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
+	profile := set.Properties.VirtualMachineProfile
+	if value(set.SKU.Name) != "Standard_D2s_v5" || len(set.Zones) != 1 || value(set.Zones[0]) != "1" ||
+		value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.SpotLabel ||
+		profile == nil || profile.Priority == nil || *profile.Priority != armcompute.VirtualMachinePriorityTypesSpot ||
+		profile.EvictionPolicy == nil || *profile.EvictionPolicy != armcompute.VirtualMachineEvictionPolicyTypesDelete ||
+		profile.BillingProfile == nil || profile.BillingProfile.MaxPrice == nil || *profile.BillingProfile.MaxPrice != -1 ||
+		set.Properties.SpotRestorePolicy != nil && set.Properties.SpotRestorePolicy.Enabled != nil &&
+			*set.Properties.SpotRestorePolicy.Enabled {
+		return fmt.Errorf("Spot pool must be zonal D2s_v5 with Delete eviction, on-demand price cap, no automatic restore and its template label")
+	}
+	return nil
+}
+
+func checkPhasePeakEnvelope(c Config, poolCores map[string]int, controlPlaneCores int) error {
+	maxVMs, maxVCPUs := c.Limits()
+	vms, cpus := 1, controlPlaneCores
+	for name, bounds := range c.Pools() {
+		cores := poolCores[name]
+		if cores <= 0 {
+			return fmt.Errorf("no SKU core count for pool %s", name)
+		}
+		vms += bounds.Max
+		cpus += bounds.Max * cores
+	}
+	if vms > maxVMs || cpus > maxVCPUs {
+		return fmt.Errorf("%w: configured pool maxima need %d VMs and %d vCPUs, exceeding %d/%d", ErrBounds,
+			vms, cpus, maxVMs, maxVCPUs)
+	}
+	return nil
 }
 
 func checkBalanceTemplateTags(a, b map[string]*string) error {

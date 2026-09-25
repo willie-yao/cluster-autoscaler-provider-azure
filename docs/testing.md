@@ -60,18 +60,19 @@ The [operator guide](../cloudprovider/azure/test/README.md) is the entry point
 for the explicit prepared-environment JSON contract, optional fixture
 requirements, focused execution and cleanup ownership.
 
-The module registers 32 specs. The default `scaleup` suite still has
+The module registers 34 specs. The default `scaleup` suite still has
 29 specs: 22 active intents from the Azure autoscaler inventory,
 one public Azure Disk intent and six supplements. The separate
-`scalephase` suite adds three optional fixture cases for balancing,
-unregistered VM cleanup and minimum pool size. `CA-003` is disabled
+`scalephase` suite adds five optional fixture cases for balancing,
+unregistered VM cleanup, minimum pool size, Spot VMs and growth
+to 50 B1ms workers. `CA-003` is disabled
 in the source inventory and is not implemented. Current dry-run
 registration runs neither setup hooks nor live test bodies;
 filtered-out and skipped cases are not passes.
 
 The suite covers CPU/memory demand, placement constraints, PDBs, priority,
 scheduler bypass, synthetic system workloads, synthetic DRA, zero-pool
-template taints, Azure Disk StatefulSet movement and the three phased
+template taints, Azure Disk StatefulSet movement and the five phased
 cases on bounded Linux VMSS Uniform fixtures. Scope adaptations include
 real expendable demand in `CA-012`, sampled readiness in PDB/priority windows and eight-device,
 main-only DRA growth in `CA-020`. DRA scale-from-zero and AKS deallocate are

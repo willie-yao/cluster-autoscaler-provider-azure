@@ -133,6 +133,138 @@ func TestAzureReadBalancePoolBoundBeforeConvergence(t *testing.T) {
 	}
 }
 
+func TestAzureReadOptionalPoolBoundBeforeConvergence(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase, pool, label string
+		capacity                 int64
+	}{
+		{name: "Spot pool", phase: "spot", pool: "spot-pool", label: "spot", capacity: 2},
+		{name: "large pool", phase: "large", pool: "large-pool", label: "large", capacity: 51},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = tt.phase
+			if c.Phase == "spot" {
+				c.SpotPool, c.SpotLabel = tt.pool, tt.label
+			} else {
+				c.ScalePool, c.ScaleLabel = tt.pool, tt.label
+			}
+			page := armcompute.VirtualMachineScaleSetListResult{
+				Value: []*armcompute.VirtualMachineScaleSet{
+					{Name: ptr.To(c.MainPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(1))},
+						Tags:       map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue)},
+						Properties: &armcompute.VirtualMachineScaleSetProperties{ProvisioningState: ptr.To("Updating")}},
+					{Name: ptr.To(tt.pool), SKU: &armcompute.SKU{Capacity: ptr.To(tt.capacity)},
+						Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue)}},
+				},
+				NextLink: ptr.To("https://example.invalid/unread-page"),
+			}
+			body, err := json.Marshal(page)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := (&azureCloud{config: c, sets: sets}).Read(context.Background()); !errors.Is(err, ErrBounds) || requests != 1 {
+				t.Fatalf("optional pool bound before convergence = %v, requests=%d", err, requests)
+			}
+		})
+	}
+}
+
+func TestCheckSpotPool(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name   string
+		change func(*armcompute.VirtualMachineScaleSet)
+		valid  bool
+	}{
+		{name: "Spot Delete up to on-demand", valid: true},
+		{name: "ordinary VM", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.Properties.VirtualMachineProfile.Priority = nil
+		}},
+		{name: "deallocated on eviction", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.Properties.VirtualMachineProfile.EvictionPolicy = ptr.To(armcompute.VirtualMachineEvictionPolicyTypesDeallocate)
+		}},
+		{name: "higher max price", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.Properties.VirtualMachineProfile.BillingProfile.MaxPrice = ptr.To(0.20)
+		}},
+		{name: "Spot restore on", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.Properties.SpotRestorePolicy = &armcompute.SpotRestorePolicy{Enabled: ptr.To(true)}
+		}},
+		{name: "wrong zero template label", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.Tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] = ptr.To("other")
+		}},
+		{name: "wrong SKU", change: func(s *armcompute.VirtualMachineScaleSet) {
+			s.SKU.Name = ptr.To("Standard_B1ms")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.SpotPool, c.SpotLabel = "spot", "spot-pool", "spot"
+			set := &armcompute.VirtualMachineScaleSet{
+				SKU:   &armcompute.SKU{Name: ptr.To("Standard_D2s_v5")},
+				Zones: []*string{ptr.To("1")},
+				Tags:  map[string]*string{"k8s.io_cluster-autoscaler_node-template_label_acceptance-pool": ptr.To(c.SpotLabel)},
+				Properties: &armcompute.VirtualMachineScaleSetProperties{
+					VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{
+						Priority:       ptr.To(armcompute.VirtualMachinePriorityTypesSpot),
+						EvictionPolicy: ptr.To(armcompute.VirtualMachineEvictionPolicyTypesDelete),
+						BillingProfile: &armcompute.BillingProfile{MaxPrice: ptr.To(-1.0)},
+					},
+				},
+			}
+			if tt.change != nil {
+				tt.change(set)
+			}
+			if err := checkSpotPool(set, c); (err == nil) != tt.valid {
+				t.Fatalf("CheckSpotPool = %v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckPhasePeakEnvelope(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase string
+		spot, scale int
+		valid       bool
+	}{
+		{name: "Spot at four two-core VMs", phase: "spot", spot: 2, valid: true},
+		{name: "Spot SKU over cap", phase: "spot", spot: 4},
+		{name: "fifty B1ms and two D2s", phase: "large", scale: 1, valid: true},
+		{name: "fifty two-core workers exceed cap", phase: "large", scale: 2},
+		{name: "missing pool cores", phase: "large"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = tt.phase
+			cores := map[string]int{c.MainPool: 2, c.ZeroPool: 2}
+			if tt.phase == "spot" {
+				c.SpotPool, c.SpotLabel = "spot-pool", "spot"
+				cores[c.SpotPool] = tt.spot
+			} else {
+				c.ScalePool, c.ScaleLabel = "large-pool", "large"
+				cores[c.ScalePool] = tt.scale
+			}
+			if err := checkPhasePeakEnvelope(c, cores, 2); (err == nil) != tt.valid {
+				t.Fatalf("phase peak = %v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
 func TestAzureReadNoJoinRequiresOperatorTag(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

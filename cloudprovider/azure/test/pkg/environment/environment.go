@@ -183,6 +183,12 @@ func CheckPhaseArguments(args []string, c Config) error {
 	case "minimum":
 		required["enforce-node-group-min-size"] = "true"
 		required["v"] = "1"
+	case "spot":
+		required["max-nodes-total"] = "4"
+	case "large":
+		required["max-nodes-total"] = "52"
+		required["max-node-provision-time"] = "20m"
+		required["scan-interval"] = "10s"
 	}
 	for key, value := range required {
 		found := 0
