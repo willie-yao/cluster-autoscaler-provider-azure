@@ -20,22 +20,190 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/yaml"
 )
 
 const (
 	ZeroPoolTaintTag = "k8s.io_cluster-autoscaler_node-template_taint_" + RunLabel
 	DiskCSIDriver    = "disk.csi.azure.com"
 )
+
+// CheckPhaseMarker requires an operator opt-in for each optional fixture.
+func (e *Environment) CheckPhaseMarker(ctx context.Context, phase, caseID string) error {
+	if e.Config.Phase != phase {
+		return fmt.Errorf("%s requires the %s phase", caseID, phase)
+	}
+	var marker corev1.ConfigMap
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: "kube-system", Name: MarkerName}, &marker); err != nil {
+		return fmt.Errorf("read %s fixture marker: %w", phase, err)
+	}
+	if marker.Data["allow-"+phase+"-fixture"] != caseID {
+		return fmt.Errorf("operator marker must allow the %s fixture for %s", phase, caseID)
+	}
+	return nil
+}
+
+// CheckBalancePools requires two matching empty groups for the balance case.
+func CheckBalancePools(snapshot Snapshot, c Config) error {
+	a, aFound := snapshot.Pools[c.BalancePoolA]
+	b, bFound := snapshot.Pools[c.BalancePoolB]
+	if c.Phase != "balance" || !aFound || !bFound ||
+		a.Capacity != 0 || b.Capacity != 0 || len(a.Instances) != 0 || len(b.Instances) != 0 ||
+		a.SKU == "" || a.SKU != b.SKU || a.Zone == "" || a.Zone != b.Zone ||
+		a.TemplateTaint != "" || b.TemplateTaint != "" || !a.TemplateCustomData || !b.TemplateCustomData {
+		return fmt.Errorf("balance pools must be empty, identically zoned and sized, untainted and able to join")
+	}
+	return nil
+}
+
+// CheckPausedController checks the planned flags before the operator starts the controller.
+func (e *Environment) CheckPausedController(ctx context.Context) error {
+	c := e.Config
+	var deployment appsv1.Deployment
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.AutoscalerDeployment}, &deployment); err != nil {
+		return fmt.Errorf("read paused autoscaler: %w", err)
+	}
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 0 || deployment.Status.ReadyReplicas != 0 {
+		return fmt.Errorf("autoscaler must remain paused until the case records its starting state")
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return err
+	}
+	var pods corev1.PodList
+	if err := e.K8s.List(ctx, &pods, client.InNamespace(c.AutoscalerNamespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return err
+	}
+	if len(pods.Items) != 0 {
+		return fmt.Errorf("autoscaler Pods must stop before recording the starting state")
+	}
+	found := 0
+	for _, container := range deployment.Spec.Template.Spec.Containers {
+		if container.Name != c.AutoscalerContainer {
+			continue
+		}
+		found++
+		if container.Image != c.ExpectedImage {
+			return fmt.Errorf("paused autoscaler image differs from the candidate")
+		}
+		if err := checkControllerScope(container.Env, c); err != nil {
+			return err
+		}
+		args := append(append([]string{}, container.Command...), container.Args...)
+		if err := CheckControllerArguments(args, c.DiscoveryValue); err != nil {
+			return err
+		}
+		if err := CheckPhaseArguments(args, c); err != nil {
+			return err
+		}
+	}
+	if found != 1 {
+		return fmt.Errorf("paused autoscaler must have one expected container")
+	}
+	return nil
+}
+
+// CheckTimeoutBackoff reads the fresh group status after a provision timeout.
+func (e *Environment) CheckTimeoutBackoff(ctx context.Context, pool string) error {
+	var status corev1.ConfigMap
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: e.Config.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
+		return err
+	}
+	return CheckTimeoutBackoff(status.Data["status"], pool)
+}
+
+// CheckTimeoutBackoff requires the pinned controller's timeout backoff state.
+func CheckTimeoutBackoff(status, pool string) error {
+	var parsed struct {
+		NodeGroups []struct {
+			Name    string `json:"name"`
+			ScaleUp struct {
+				Status      string `json:"status"`
+				BackoffInfo struct {
+					ErrorCode string `json:"errorCode"`
+				} `json:"backoffInfo"`
+			} `json:"scaleUp"`
+		} `json:"nodeGroups"`
+	}
+	if err := yaml.Unmarshal([]byte(status), &parsed); err != nil {
+		return fmt.Errorf("decode autoscaler backoff status: %w", err)
+	}
+	found := 0
+	for _, group := range parsed.NodeGroups {
+		if group.Name == pool {
+			found++
+			if group.ScaleUp.Status != "Backoff" || group.ScaleUp.BackoffInfo.ErrorCode != "timeout" {
+				return fmt.Errorf("pool %s has no provision-timeout backoff", pool)
+			}
+		}
+	}
+	if found != 1 {
+		return fmt.Errorf("expected one backoff status for pool %s", pool)
+	}
+	return nil
+}
+
+// ReadControllerLogsSince returns bounded, private log text for the balance-plan assertion.
+func (e *Environment) ReadControllerLogsSince(ctx context.Context, since time.Time) (string, error) {
+	c := e.Config
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: c.Kubeconfig},
+		&clientcmd.ConfigOverrides{CurrentContext: c.Context},
+	).ClientConfig()
+	if err != nil {
+		return "", fmt.Errorf("load autoscaler log kubeconfig: %w", err)
+	}
+	config.Timeout = 30 * time.Second
+	k8s, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", fmt.Errorf("create autoscaler log client: %w", err)
+	}
+	var deployment appsv1.Deployment
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.AutoscalerDeployment}, &deployment); err != nil {
+		return "", err
+	}
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return "", err
+	}
+	var pods corev1.PodList
+	if err := e.K8s.List(ctx, &pods, client.InNamespace(c.AutoscalerNamespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return "", err
+	}
+	if len(pods.Items) != 1 {
+		return "", fmt.Errorf("expected one autoscaler Pod for plan evidence")
+	}
+	timestamp := metav1.NewTime(since)
+	stream, err := k8s.CoreV1().Pods(c.AutoscalerNamespace).GetLogs(pods.Items[0].Name, &corev1.PodLogOptions{
+		Container: c.AutoscalerContainer, SinceTime: &timestamp,
+	}).Stream(ctx)
+	if err != nil {
+		return "", fmt.Errorf("read autoscaler plan log: %w", err)
+	}
+	defer stream.Close()
+	const maxLogBytes = 8 << 20
+	raw, err := io.ReadAll(io.LimitReader(stream, maxLogBytes+1))
+	if err != nil {
+		return "", fmt.Errorf("read autoscaler plan log: %w", err)
+	}
+	if len(raw) > maxLogBytes {
+		return "", fmt.Errorf("autoscaler plan log exceeds the allowed size")
+	}
+	return string(raw), nil
+}
 
 // CheckZeroPoolTaint requires the exact run-owned taint on the empty pool template.
 func CheckZeroPoolTaint(snapshot Snapshot, c Config) error {

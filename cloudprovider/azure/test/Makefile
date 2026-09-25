@@ -5,13 +5,13 @@ DEV_DIR:=$(CAS_ROOT)/cloudprovider/azure/examples/dev
 CLUSTER_AUTOSCALER_NAMESPACE?=default
 CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME?=cluster-autoscaler
 
-# TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scaleup).
-# When unset, all suites under suites/ are run.
-TEST_SUITE?=
+# TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scalephase).
+# Default live runs keep the original scaleup selection.
+TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
 ENVIRONMENT?=
 
-# Compute ginkgo suite path: ./suites/... (all) or ./suites/<name>/... (single)
+# Compute the selected suite path.
 SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/...,./suites/...)
 FOCUS?=
 LABEL_FILTER?=
@@ -67,9 +67,9 @@ e2etests: ## Run E2Es on a prepared fixture with CAS deployed (ENVIRONMENT=<JSON
 .PHONY: test-local
 test-local: ## Validate harness logic and E2E registration without cloud credentials
 	go test -mod=readonly -race ./pkg/...
-	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage|PDBFixtureDiagnostics|DiskStatefulSetManifest)$$'
+	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage|PDBFixtureDiagnostics|DiskStatefulSetManifest|BalancedPlan|MinimumPlan)$$'
 	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
-	go test -mod=readonly -tags=e2e ./suites/... -run '^TestScaleUp$$' -count=1 -args -ginkgo.dry-run
+	go test -mod=readonly -tags=e2e ./suites/... -run '^Test(ScaleUp|ScalePhase)$$' -count=1 -args -ginkgo.dry-run
 
 ##@ Current suite utilities
 

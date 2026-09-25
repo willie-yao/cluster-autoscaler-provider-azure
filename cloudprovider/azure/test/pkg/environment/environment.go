@@ -111,7 +111,11 @@ func (e *Environment) Controller(ctx context.Context) error {
 		if err := checkControllerScope(container.Env, c); err != nil {
 			return err
 		}
-		if err := CheckControllerArguments(append(append([]string{}, container.Command...), container.Args...), c.DiscoveryValue); err != nil {
+		args := append(append([]string{}, container.Command...), container.Args...)
+		if err := CheckControllerArguments(args, c.DiscoveryValue); err != nil {
+			return err
+		}
+		if err := CheckPhaseArguments(args, c); err != nil {
 			return err
 		}
 	}
@@ -142,6 +146,9 @@ func (e *Environment) Controller(ctx context.Context) error {
 		if err := checkControllerScope(container.Env, c); err != nil {
 			return err
 		}
+		if err := CheckPhaseArguments(append(append([]string{}, container.Command...), container.Args...), c); err != nil {
+			return err
+		}
 	}
 	if !found {
 		return fmt.Errorf("running autoscaler container is missing")
@@ -157,7 +164,59 @@ func (e *Environment) Controller(ctx context.Context) error {
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
 		return err
 	}
-	return CheckStatus(status.Data["status"], []string{c.MainPool, c.ZeroPool}, time.Now())
+	return CheckStatus(status.Data["status"], c.PoolNames(), time.Now())
+}
+
+// CheckPhaseArguments requires the flags that make each optional case meaningful.
+func CheckPhaseArguments(args []string, c Config) error {
+	required := map[string]string{}
+	switch c.Phase {
+	case "balance":
+		required["balance-similar-node-groups"] = "true"
+		required["balancing-label"] = c.PoolLabel
+		required["max-nodes-total"] = "4"
+		required["parallel-scale-up"] = "false"
+		required["salvo-scale-up"] = "false"
+		required["v"] = "1"
+	case "no-join":
+		required["max-node-provision-time"] = "3m"
+		required["initial-node-group-backoff-duration"] = "5m"
+	case "minimum":
+		required["enforce-node-group-min-size"] = "true"
+		required["v"] = "1"
+	}
+	for key, value := range required {
+		found := 0
+		for _, arg := range args {
+			if arg == "--"+key {
+				return fmt.Errorf("%s needs an explicit value", key)
+			}
+			if strings.HasPrefix(arg, "--"+key+"=") {
+				found++
+				if arg != "--"+key+"="+value {
+					return fmt.Errorf("%s must equal %s in the %s phase", key, value, c.Phase)
+				}
+			}
+		}
+		if found != 1 {
+			return fmt.Errorf("%s must occur once in the %s phase", key, c.Phase)
+		}
+	}
+	return nil
+}
+
+// CheckNoPendingDemand rejects unscheduled Pods while proving minimum-size growth.
+func (e *Environment) CheckNoPendingDemand(ctx context.Context) error {
+	var pods corev1.PodList
+	if err := e.K8s.List(ctx, &pods); err != nil {
+		return err
+	}
+	for _, pod := range pods.Items {
+		if pod.Status.Phase == corev1.PodPending && pod.Spec.NodeName == "" && pod.DeletionTimestamp == nil {
+			return fmt.Errorf("unscheduled Pod %s/%s could cause demand-based growth", pod.Namespace, pod.Name)
+		}
+	}
+	return nil
 }
 
 func checkLeaderLease(pod corev1.Pod, lease coordinationv1.Lease, now time.Time) error {
@@ -270,8 +329,11 @@ func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
 			}
 			continue
 		}
-		if len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(e.Config.MainPool)))+
-			len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(e.Config.ZeroPool))) != 1 {
+		owned := 0
+		for _, name := range e.Config.PoolNames() {
+			owned += len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(name)))
+		}
+		if owned != 1 {
 			return result, fmt.Errorf("Node %s belongs to an unexpected cloud resource", node.Name)
 		}
 	}
@@ -284,7 +346,7 @@ func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
 // CheckWorkerIsolation rejects unrelated non-DaemonSet Pods on either worker pool.
 func (e *Environment) CheckWorkerIsolation(ctx context.Context, snapshot Snapshot, namespace string) error {
 	workers := map[string]bool{}
-	for _, pool := range []string{e.Config.MainPool, e.Config.ZeroPool} {
+	for _, pool := range e.Config.PoolNames() {
 		for _, node := range PoolNodes(snapshot.Nodes, e.Config.PoolID(pool)) {
 			workers[node.Name] = true
 		}

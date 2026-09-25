@@ -98,6 +98,7 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	c := a.config
 	result := Snapshot{Pools: map[string]PoolState{}}
 	poolCores := map[string]int{}
+	bounds := c.Pools()
 	pager := a.sets.NewListPager(c.ResourceGroup, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
@@ -110,13 +111,11 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				value(set.Tags[RunLabel]) != c.RunID || value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue {
 				continue
 			}
-			minimum, maximum := 1, 2
-			if *set.Name == c.ZeroPool {
-				minimum, maximum = 0, 1
-			} else if *set.Name != c.MainPool {
+			limit, ok := bounds[*set.Name]
+			if !ok {
 				continue
 			}
-			if err := checkCapacity(*set.Name, int(*set.SKU.Capacity), minimum, maximum); err != nil {
+			if err := checkCapacity(*set.Name, int(*set.SKU.Capacity), limit.ObservedMin, limit.Max); err != nil {
 				return result, err
 			}
 		}
@@ -125,15 +124,13 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 				return result, fmt.Errorf("incomplete VMSS observation")
 			}
 			name := *set.Name
-			minimum, maximum := 1, 2
-			if name == c.ZeroPool {
-				minimum, maximum = 0, 1
-			} else if name != c.MainPool {
+			limit, ok := bounds[name]
+			if !ok {
 				return result, fmt.Errorf("unexpected VMSS %s in dedicated worker resource group", name)
 			}
 			if value(set.Tags[RunLabel]) != c.RunID ||
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
-				value(set.Tags["min"]) != strconv.Itoa(minimum) || value(set.Tags["max"]) != strconv.Itoa(maximum) {
+				value(set.Tags["min"]) != strconv.Itoa(limit.TagMin) || value(set.Tags["max"]) != strconv.Itoa(limit.Max) {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization", name)
 			}
 			if err := checkScaleDownTags(set.Tags); err != nil {
@@ -149,6 +146,22 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			pool := PoolState{
 				Capacity: int(*set.SKU.Capacity), Instances: map[string]Instance{},
 				TemplateTaint: value(set.Tags[ZeroPoolTaintTag]),
+				SKU:           value(set.SKU.Name),
+			}
+			for _, zone := range set.Zones {
+				pool.Zone += value(zone) + ","
+			}
+			if set.Properties.VirtualMachineProfile != nil && set.Properties.VirtualMachineProfile.OSProfile != nil {
+				pool.TemplateCustomData = set.Properties.VirtualMachineProfile.OSProfile.CustomData != nil
+			}
+			if c.Phase == "no-join" && name == c.ZeroPool &&
+				(set.Properties.VirtualMachineProfile == nil || set.Properties.VirtualMachineProfile.OSProfile == nil ||
+					pool.TemplateCustomData) {
+				return result, fmt.Errorf("no-join pool must have an OS profile without custom data")
+			}
+			if c.Phase == "balance" && (name == c.BalancePoolA || name == c.BalancePoolB) &&
+				value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.BalanceLabel {
+				return result, fmt.Errorf("balance pool %s lacks its shared node-template label", name)
 			}
 			instanceIDs := map[string]struct{}{}
 			instances := a.vms.NewListPager(c.ResourceGroup, name, nil)
@@ -165,9 +178,9 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 						}
 					}
 				}
-				if len(instanceIDs) > maximum {
+				if len(instanceIDs) > limit.Max {
 					return result, fmt.Errorf("%w: pool %s actual=%d exceeds maximum %d",
-						ErrBounds, name, len(instanceIDs), maximum)
+						ErrBounds, name, len(instanceIDs), limit.Max)
 				}
 				for _, vm := range page.Value {
 					if vm == nil || vm.ID == nil || vm.Properties == nil ||
@@ -201,8 +214,8 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			}
 		}
 	}
-	if len(result.Pools) != 2 {
-		return result, fmt.Errorf("expected exactly the two authorized scale sets")
+	if len(result.Pools) != len(bounds) {
+		return result, fmt.Errorf("expected exactly %d authorized scale sets", len(bounds))
 	}
 	standalone := a.other.NewListPager(c.ResourceGroup, nil)
 	for standalone.More() {
@@ -230,7 +243,16 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 	}
 	result.VMs++
 	result.VCPUs += cores
-	if err := checkPeakEnvelope(poolCores[c.MainPool], poolCores[c.ZeroPool], cores); err != nil {
+	if c.Phase == "balance" {
+		for _, size := range poolCores {
+			if MaxVMs*size > MaxVCPUs {
+				return result, fmt.Errorf("%w: four workers of this SKU exceed the vCPU limit", ErrBounds)
+			}
+		}
+		if MaxVMs*cores > MaxVCPUs {
+			return result, fmt.Errorf("%w: four control-plane VMs of this SKU exceed the vCPU limit", ErrBounds)
+		}
+	} else if err := checkPeakEnvelope(poolCores[c.MainPool], poolCores[c.ZeroPool], cores); err != nil {
 		return result, err
 	}
 	return result, result.CheckBounds(c)

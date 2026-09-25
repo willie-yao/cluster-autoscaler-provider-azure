@@ -38,9 +38,12 @@ type Instance struct {
 
 // PoolState separates requested capacity from actual cloud instances.
 type PoolState struct {
-	Capacity      int
-	Instances     map[string]Instance
-	TemplateTaint string
+	Capacity           int
+	Instances          map[string]Instance
+	TemplateTaint      string
+	TemplateCustomData bool
+	SKU                string
+	Zone               string
 }
 
 // Snapshot contains no credentials, bootstrap settings, Pod specs or logs.
@@ -83,21 +86,17 @@ func (s Snapshot) CheckBounds(c Config) error {
 	if s.VMs > MaxVMs || s.VCPUs > MaxVCPUs {
 		return fmt.Errorf("%w: %d VMs, %d vCPUs", ErrBounds, s.VMs, s.VCPUs)
 	}
-	for _, name := range []string{c.MainPool, c.ZeroPool} {
+	for name, bounds := range c.Pools() {
 		pool, ok := s.Pools[name]
 		if !ok {
 			continue
 		}
-		minimum, maximum := 1, 2
-		if name == c.ZeroPool {
-			minimum, maximum = 0, 1
-		}
-		if err := checkCapacity(name, pool.Capacity, minimum, maximum); err != nil {
+		if err := checkCapacity(name, pool.Capacity, bounds.ObservedMin, bounds.Max); err != nil {
 			return err
 		}
-		if len(pool.Instances) < minimum || len(pool.Instances) > maximum {
+		if len(pool.Instances) < bounds.ObservedMin || len(pool.Instances) > bounds.Max {
 			return fmt.Errorf("%w: pool %s actual=%d, bounds %d..%d",
-				ErrBounds, name, len(pool.Instances), minimum, maximum)
+				ErrBounds, name, len(pool.Instances), bounds.ObservedMin, bounds.Max)
 		}
 	}
 	return nil
@@ -112,34 +111,39 @@ func checkCapacity(name string, capacity, minimum, maximum int) error {
 
 // Stable requires a one-to-one mapping between Azure instances and Ready Nodes.
 func (s Snapshot) Stable(c Config, main, zero int) error {
+	return s.StablePools(c, map[string]int{c.MainPool: main, c.ZeroPool: zero})
+}
+
+// StablePools checks the exact phase pool distribution and registered workers.
+func (s Snapshot) StablePools(c Config, expected map[string]int) error {
 	if err := s.CheckBounds(c); err != nil {
 		return err
 	}
-	for name, expected := range map[string]int{c.MainPool: main, c.ZeroPool: zero} {
+	bounds := c.Pools()
+	if len(expected) != len(bounds) {
+		return fmt.Errorf("expected capacity for every authorized pool")
+	}
+	for name, count := range expected {
 		pool, ok := s.Pools[name]
-		minimum, maximum := 1, 2
-		if name == c.ZeroPool {
-			minimum, maximum = 0, 1
+		limit, authorized := bounds[name]
+		if !authorized {
+			return fmt.Errorf("unexpected pool %s in stable check", name)
 		}
-		if expected < minimum || expected > maximum {
-			return fmt.Errorf("pool %s: expected=%d violates bounds %d..%d", name, expected, minimum, maximum)
+		if count < limit.ObservedMin || count > limit.Max {
+			return fmt.Errorf("pool %s: expected=%d violates bounds %d..%d", name, count, limit.ObservedMin, limit.Max)
 		}
-		if !ok || pool.Capacity != expected || len(pool.Instances) != expected {
-			return fmt.Errorf("pool %s: desired=%d actual=%d, want %d", name, pool.Capacity, len(pool.Instances), expected)
+		if !ok || pool.Capacity != count || len(pool.Instances) != count {
+			return fmt.Errorf("pool %s: desired=%d actual=%d, want %d", name, pool.Capacity, len(pool.Instances), count)
 		}
 		nodes := PoolNodes(s.Nodes, c.PoolID(name))
-		if len(nodes) != expected {
-			return fmt.Errorf("pool %s: %d registered Nodes, want %d", name, len(nodes), expected)
+		if len(nodes) != count {
+			return fmt.Errorf("pool %s: %d registered Nodes, want %d", name, len(nodes), count)
 		}
 		seen := map[string]bool{}
-		label := c.MainLabel
-		if name == c.ZeroPool {
-			label = c.ZeroLabel
-		}
 		for _, node := range nodes {
 			id := normalizeID(node.Spec.ProviderID)
 			if _, ok := pool.Instances[id]; !ok || seen[id] || !Ready(node) ||
-				node.Spec.Unschedulable || node.DeletionTimestamp != nil || node.Labels[c.PoolLabel] != label {
+				node.Spec.Unschedulable || node.DeletionTimestamp != nil || node.Labels[c.PoolLabel] != limit.Label {
 				return fmt.Errorf("pool %s: Node %s is not a unique Ready schedulable instance with expected label", name, node.Name)
 			}
 			seen[id] = true

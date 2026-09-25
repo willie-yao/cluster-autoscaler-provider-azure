@@ -17,6 +17,7 @@ limitations under the License.
 package environment
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -115,6 +116,41 @@ func TestSnapshotStable(t *testing.T) {
 				t.Fatal("invalid cloud/Node state accepted")
 			}
 		})
+	}
+}
+
+func TestSnapshotStableBalancePools(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "pair-a", "pair-b", "balanced"
+	s := testSnapshot(c)
+	s.Pools[c.BalancePoolA] = PoolState{Instances: map[string]Instance{}}
+	s.Pools[c.BalancePoolB] = PoolState{Instances: map[string]Instance{}}
+	s.Nodes[0].Labels[c.PoolLabel] = c.MainLabel
+	baseline := map[string]int{c.MainPool: 1, c.ZeroPool: 0, c.BalancePoolA: 0, c.BalancePoolB: 0}
+	if err := s.StablePools(c, baseline); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Stable(c, 1, 0); err == nil {
+		t.Fatal("balance phase cannot omit the two extra pool counts")
+	}
+	for _, name := range []string{c.BalancePoolA, c.BalancePoolB} {
+		node := testNode(c)
+		node.Name = name + "-0"
+		node.Spec.ProviderID = "azure://" + c.PoolID(name) + "/virtualMachines/0"
+		node.Labels[c.PoolLabel] = c.BalanceLabel
+		s.Nodes = append(s.Nodes, node)
+		id := normalizeID(node.Spec.ProviderID)
+		s.Pools[name] = PoolState{Capacity: 1, Instances: map[string]Instance{id: {ID: id}}}
+	}
+	s.VMs, s.VCPUs = 4, 8
+	grown := map[string]int{c.MainPool: 1, c.ZeroPool: 0, c.BalancePoolA: 1, c.BalancePoolB: 1}
+	if err := s.StablePools(c, grown); err != nil {
+		t.Fatal(err)
+	}
+	s.VMs = 5
+	if err := s.StablePools(c, grown); !errors.Is(err, ErrBounds) {
+		t.Fatalf("extra VM not rejected: %v", err)
 	}
 }
 

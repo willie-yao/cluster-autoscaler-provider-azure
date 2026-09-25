@@ -20,5 +20,9 @@
   "zeroLabel": "zero",
   "demandCPU": "1200m",
   "workloadImage": "REPLACE-WITH-PINNED-BUSYBOX-IMAGE",
-  "diskStorageClass": ""
+  "diskStorageClass": "",
+  "phase": "",
+  "balancePoolA": "",
+  "balancePoolB": "",
+  "balanceLabel": ""
 }

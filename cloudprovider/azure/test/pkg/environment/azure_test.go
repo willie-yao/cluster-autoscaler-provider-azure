@@ -95,6 +95,79 @@ func TestAzureReadChecksReceivedPageBounds(t *testing.T) {
 	}
 }
 
+func TestAzureReadBalancePoolBoundBeforeConvergence(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "pair-a", "pair-b", "balanced"
+	page := armcompute.VirtualMachineScaleSetListResult{
+		Value: []*armcompute.VirtualMachineScaleSet{
+			{Name: ptr.To(c.MainPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(1))},
+				Tags:       map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue)},
+				Properties: &armcompute.VirtualMachineScaleSetProperties{ProvisioningState: ptr.To("Updating")}},
+			{Name: ptr.To(c.BalancePoolA), SKU: &armcompute.SKU{Capacity: ptr.To(int64(3))},
+				Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue)}},
+		},
+		NextLink: ptr.To("https://example.invalid/unread-page"),
+	}
+	body, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	requests := 0
+	sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+			requests++
+			if requests != 1 {
+				return nil, fmt.Errorf("unexpected second page")
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloud := &azureCloud{config: c, sets: sets}
+	if _, err := cloud.Read(context.Background()); !errors.Is(err, ErrBounds) || requests != 1 {
+		t.Fatalf("balance bound before convergence = %v, requests=%d", err, requests)
+	}
+}
+
+func TestAzureReadNoJoinRejectsCustomData(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase = "no-join"
+	page := armcompute.VirtualMachineScaleSetListResult{Value: []*armcompute.VirtualMachineScaleSet{{
+		Name: ptr.To(c.ZeroPool), SKU: &armcompute.SKU{Capacity: ptr.To(int64(0))},
+		Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+			"min": ptr.To("0"), "max": ptr.To("1")},
+		Properties: &armcompute.VirtualMachineScaleSetProperties{
+			ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+			VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{OSProfile: &armcompute.VirtualMachineScaleSetOSProfile{
+				CustomData: ptr.To("not logged"),
+			}},
+		},
+	}}}
+	body, err := json.Marshal(page)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloud := &azureCloud{config: c, sets: sets}
+	_, err = cloud.Read(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "without custom data") || strings.Contains(err.Error(), "not logged") {
+		t.Fatalf("no-join custom-data check = %v", err)
+	}
+}
+
 func TestAzureReadChecksReceivedInstancePageBounds(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

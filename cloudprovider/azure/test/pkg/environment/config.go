@@ -63,6 +63,44 @@ type Config struct {
 	DemandCPU            string `json:"demandCPU"`
 	WorkloadImage        string `json:"workloadImage"`
 	DiskStorageClass     string `json:"diskStorageClass,omitempty"`
+	Phase                string `json:"phase,omitempty"`
+	BalancePoolA         string `json:"balancePoolA,omitempty"`
+	BalancePoolB         string `json:"balancePoolB,omitempty"`
+	BalanceLabel         string `json:"balanceLabel,omitempty"`
+}
+
+// PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
+type PoolBounds struct {
+	TagMin, ObservedMin, Max int
+	Label                    string
+}
+
+// Pools lists the scale sets authorized for the selected phase.
+func (c Config) Pools() map[string]PoolBounds {
+	main := PoolBounds{TagMin: 1, ObservedMin: 1, Max: 2, Label: c.MainLabel}
+	zero := PoolBounds{TagMin: 0, ObservedMin: 0, Max: 1, Label: c.ZeroLabel}
+	if c.Phase == "balance" {
+		main.Max = 1
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.BalancePoolA: {Max: 2, Label: c.BalanceLabel},
+			c.BalancePoolB: {Max: 2, Label: c.BalanceLabel},
+		}
+	}
+	if c.Phase == "minimum" {
+		main.TagMin = 2
+	}
+	return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
+}
+
+// PoolNames lists the exact groups expected in the controller's status.
+func (c Config) PoolNames() []string {
+	names := []string{c.MainPool, c.ZeroPool}
+	if c.Phase == "balance" {
+		names = append(names, c.BalancePoolA, c.BalancePoolB)
+	}
+	return names
 }
 
 // LoadConfig rejects misspelled inputs instead of selecting a default cluster.
@@ -137,6 +175,33 @@ func (c Config) Validate() error {
 	}
 	if c.DiskStorageClass != "" && len(validation.IsDNS1123Subdomain(c.DiskStorageClass)) != 0 {
 		return fmt.Errorf("diskStorageClass must be a valid StorageClass name")
+	}
+	switch c.Phase {
+	case "":
+		if c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "" {
+			return fmt.Errorf("balance pools and label require the balance phase")
+		}
+	case "balance":
+		if c.BalancePoolA == "" || c.BalancePoolB == "" || c.BalanceLabel == "" {
+			return fmt.Errorf("balance phase requires two pools and one shared label")
+		}
+		if len(validation.IsValidLabelValue(c.BalanceLabel)) != 0 ||
+			c.BalanceLabel == c.MainLabel || c.BalanceLabel == c.ZeroLabel {
+			return fmt.Errorf("balanceLabel must be a distinct label value")
+		}
+		seen := map[string]bool{}
+		for _, name := range c.PoolNames() {
+			if !regexp.MustCompile(`^[a-zA-Z0-9_.()-]+$`).MatchString(name) || seen[strings.ToLower(name)] {
+				return fmt.Errorf("balance pools must have distinct valid Azure resource names")
+			}
+			seen[strings.ToLower(name)] = true
+		}
+	case "no-join", "minimum":
+		if c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "" {
+			return fmt.Errorf("balance pools and label require the balance phase")
+		}
+	default:
+		return fmt.Errorf("unknown fixture phase %q", c.Phase)
 	}
 	return nil
 }

@@ -70,6 +70,20 @@ func TestConfigValidate(t *testing.T) {
 		{name: "resource path injection", change: func(c *Config) { c.ResourceGroup = "workers/other" }},
 		{name: "nonpositive demand", change: func(c *Config) { c.DemandCPU = "0" }},
 		{name: "invalid disk class", change: func(c *Config) { c.DiskStorageClass = "wrong/class" }},
+		{name: "unknown phase", change: func(c *Config) { c.Phase = "foreign" }},
+		{name: "balance data without phase", change: func(c *Config) { c.BalancePoolA = "extra" }},
+		{name: "missing balance pool", change: func(c *Config) {
+			c.Phase, c.BalancePoolA, c.BalanceLabel = "balance", "a", "balanced"
+		}},
+		{name: "overlapping balance pool", change: func(c *Config) {
+			c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "a", "MAIN", "balanced"
+		}},
+		{name: "overlapping balance label", change: func(c *Config) {
+			c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "a", "b", "main"
+		}},
+		{name: "balance data in no-join phase", change: func(c *Config) {
+			c.Phase, c.BalancePoolA = "no-join", "a"
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -79,6 +93,42 @@ func TestConfigValidate(t *testing.T) {
 			tt.change(&c)
 			if err := c.Validate(); err == nil {
 				t.Fatal("invalid configuration accepted")
+			}
+		})
+	}
+}
+
+func TestConfigPhasePools(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase string
+		names       int
+		mainTagMin  int
+		mainMax     int
+		zeroMax     int
+	}{
+		{name: "default", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 1},
+		{name: "balance", phase: "balance", names: 4, mainTagMin: 1, mainMax: 1, zeroMax: 0},
+		{name: "no-join", phase: "no-join", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 1},
+		{name: "minimum", phase: "minimum", names: 2, mainTagMin: 2, mainMax: 2, zeroMax: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = tt.phase, "a", "b", "balanced"
+			if tt.phase != "balance" {
+				c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "", "", ""
+			}
+			if err := c.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			pools := c.Pools()
+			if len(pools) != tt.names || len(c.PoolNames()) != tt.names ||
+				pools[c.MainPool].TagMin != tt.mainTagMin || pools[c.MainPool].Max != tt.mainMax ||
+				pools[c.ZeroPool].Max != tt.zeroMax {
+				t.Fatalf("unexpected phase pools: %+v", pools)
+			}
+			if tt.phase == "minimum" && pools[c.MainPool].ObservedMin != 1 {
+				t.Fatal("minimum phase must allow the below-minimum starting capacity")
 			}
 		})
 	}

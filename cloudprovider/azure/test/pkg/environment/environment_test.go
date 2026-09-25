@@ -217,6 +217,139 @@ func TestCheckControllerArguments(t *testing.T) {
 	}
 }
 
+func TestCheckPhaseArguments(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase string
+		args        []string
+		valid       bool
+	}{
+		{name: "default fixture", valid: true},
+		{name: "balance requires flags", phase: "balance"},
+		{name: "balance flags", phase: "balance", valid: true, args: []string{
+			"--balance-similar-node-groups=true", "--balancing-label=acceptance-pool", "--max-nodes-total=4",
+			"--parallel-scale-up=false", "--salvo-scale-up=false", "--v=1",
+		}},
+		{name: "extra balance flag", phase: "balance", args: []string{
+			"--balance-similar-node-groups=true", "--balancing-label=acceptance-pool", "--max-nodes-total=4",
+			"--parallel-scale-up=false", "--salvo-scale-up=false", "--v=1", "--max-nodes-total=5",
+		}},
+		{name: "no-join flags", phase: "no-join", valid: true, args: []string{
+			"--max-node-provision-time=3m", "--initial-node-group-backoff-duration=5m",
+		}},
+		{name: "long provision timeout", phase: "no-join", args: []string{
+			"--max-node-provision-time=15m", "--initial-node-group-backoff-duration=5m",
+		}},
+		{name: "minimum flag", phase: "minimum", valid: true, args: []string{"--enforce-node-group-min-size=true", "--v=1"}},
+		{name: "minimum disabled", phase: "minimum", args: []string{"--enforce-node-group-min-size=false", "--v=1"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = tt.phase
+			if err := CheckPhaseArguments(tt.args, c); (err == nil) != tt.valid {
+				t.Fatalf("CheckPhaseArguments = %v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckTimeoutBackoff(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, status string
+		valid        bool
+	}{
+		{name: "timeout backoff", valid: true, status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
+		{name: "wrong error", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: quota\n"},
+		{name: "no backoff", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: NoActivity\n"},
+		{name: "wrong pool", status: "nodeGroups:\n- name: foreign\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
+		{name: "duplicate pool", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if err := CheckTimeoutBackoff(tt.status, "zero"); (err == nil) != tt.valid {
+				t.Fatalf("CheckTimeoutBackoff = %v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestCheckPausedController(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name string
+		edit func(*appsv1.Deployment)
+		pod  bool
+		pass bool
+	}{
+		{name: "prepared minimum controller", pass: true},
+		{name: "already running", edit: func(d *appsv1.Deployment) { d.Spec.Replicas = ptr.To(int32(1)) }},
+		{name: "missing minimum flag", edit: func(d *appsv1.Deployment) {
+			d.Spec.Template.Spec.Containers[0].Args = d.Spec.Template.Spec.Containers[0].Args[:4]
+		}},
+		{name: "old Pod still running", pod: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = "minimum"
+			labels := map[string]string{"app": "autoscaler"}
+			container := corev1.Container{Name: c.AutoscalerContainer, Image: c.ExpectedImage,
+				Env: []corev1.EnvVar{{Name: "ARM_SUBSCRIPTION_ID", Value: c.SubscriptionID}, {Name: "ARM_RESOURCE_GROUP", Value: c.ResourceGroup}},
+				Args: []string{"--node-group-auto-discovery=label:cluster-autoscaler-name=" + c.DiscoveryValue,
+					"--scale-down-delay-after-add=10s", "--scale-down-unneeded-time=10s",
+					"--unremovable-node-recheck-timeout=10s", "--enforce-node-group-min-size=true", "--v=1"},
+			}
+			deployment := &appsv1.Deployment{
+				ObjectMeta: metav1.ObjectMeta{Name: c.AutoscalerDeployment, Namespace: c.AutoscalerNamespace},
+				Spec: appsv1.DeploymentSpec{Replicas: ptr.To(int32(0)), Selector: &metav1.LabelSelector{MatchLabels: labels},
+					Template: corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{container}}}},
+			}
+			if tt.edit != nil {
+				tt.edit(deployment)
+			}
+			objects := []client.Object{deployment}
+			if tt.pod {
+				objects = append(objects, &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+					Name: "old-autoscaler", Namespace: c.AutoscalerNamespace, Labels: labels,
+				}})
+			}
+			e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(objects...).Build()}
+			if err := e.CheckPausedController(context.Background()); (err == nil) != tt.pass {
+				t.Fatalf("CheckPausedController = %v, pass=%t", err, tt.pass)
+			}
+		})
+	}
+}
+
+func TestCheckNoPendingDemand(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name      string
+		phase     corev1.PodPhase
+		node      string
+		deleting  bool
+		hasDemand bool
+	}{
+		{name: "no pending demand", phase: corev1.PodRunning, node: "worker-0"},
+		{name: "unscheduled Pod", phase: corev1.PodPending, hasDemand: true},
+		{name: "Pod starting on assigned Node", phase: corev1.PodPending, node: "worker-0"},
+		{name: "deleting unscheduled Pod", phase: corev1.PodPending, deleting: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "other", Namespace: "default"},
+				Spec: corev1.PodSpec{NodeName: tt.node}, Status: corev1.PodStatus{Phase: tt.phase}}
+			if tt.deleting {
+				now := metav1.Now()
+				pod.DeletionTimestamp = &now
+				pod.Finalizers = []string{"test/finalizer"}
+			}
+			e := &Environment{K8s: fake.NewClientBuilder().WithObjects(pod).Build()}
+			if err := e.CheckNoPendingDemand(context.Background()); (err != nil) != tt.hasDemand {
+				t.Fatalf("CheckNoPendingDemand = %v, hasDemand=%t", err, tt.hasDemand)
+			}
+		})
+	}
+}
+
 func TestEnvironmentCheckWorkerIsolation(t *testing.T) {
 	t.Parallel()
 	c := testConfig()

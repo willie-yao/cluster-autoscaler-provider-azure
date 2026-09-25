@@ -6,7 +6,7 @@ Cluster Autoscaler, change cloud resources directly, or destroy infrastructure.
 The operator retains responsibility for setup, single-controller ownership,
 budget monitoring and infrastructure cleanup.
 
-The supported fixture is Linux VMSS Uniform with main min/max `1/2`,
+The default fixture is Linux VMSS Uniform with main min/max `1/2`,
 zero min/max `0/1`, and one control plane outside both groups. Its ceiling is
 four VMs and eight vCPUs, counted using Azure instances, requested capacity and
 SKU core counts. This fixture limitation is not a provider support restriction:
@@ -24,6 +24,12 @@ bound breach, but the lower bound is checked only after the list is complete.
 Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
+
+Three additional cases run in `suites/scalephase` with `TEST_SUITE=scalephase`.
+They use separate operator phases under the same four-VM and eight-vCPU
+limits. The 29 default `scaleup` cases keep their two-pool fixture.
+Do not select a default case while the pools or controller flags are set
+for a phase.
 
 ## Local validation
 
@@ -70,6 +76,8 @@ and the control-plane VM must have the `autoscaler-e2e-run=<runID>` Azure tag.
 The dedicated worker resource group may contain only the two selected VMSS,
 and optionally the named control-plane VM. Other infrastructure is not deleted
 or inventoried by these tests.
+The balance phase is the one exception. It requires exactly the main,
+zero and two named balance VMSS in that group.
 
 Both VMSS must have `cluster-autoscaler-name=<discoveryValue>`, and `min`/`max`
 tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:
@@ -90,6 +98,7 @@ Every negative observation of no-growth, PDB blocking, workload retention,
 scheduler suppression or the maximum-capacity refusal rechecks the same
 controller Pod, lease, status, image and scope contract. Losing the controller
 or observing stale leadership/status fails that negative window.
+In the balance phase, the controller status must list exactly four groups.
 
 Both the Deployment template and its running autoscaler container must contain
 exactly one literal `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` matching the
@@ -123,6 +132,11 @@ Supply a non-secret JSON file based on [environment.example.json](environment.ex
 The base fields are required, unknown fields fail, and kubeconfig must be absolute.
 Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
+For a phased case, use a separate copy of the binding and set `phase` to
+`balance`, `no-join`, or `minimum`. The balance phase also requires
+`balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
+in the other phases. A missing phase skips the new cases. A wrong marker
+or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
 keys. Azure observations use the existing SDK's `DefaultAzureCredential`.
 Azure errors retain HTTP status/code but omit response bodies that might
@@ -143,6 +157,57 @@ env -u AZURE_CLIENT_ID -u AZURE_CLIENT_SECRET -u AZURE_TENANT_ID \
 Do not print credential values or change global shell/CI authentication.
 This is an operator-process option, not a requirement to use CLI credentials
 in all environments. It does not change the application's managed identity.
+
+### Phased fixtures
+
+Run the three phased cases separately on one fresh, owned fixture. Stop the
+single autoscaler before changing pool tags or its Deployment. Wait until
+the old Pod is gone, then check the next phase's pools and flags. The runner
+does not change Azure pools or restart the controller. It creates only
+namespaced test objects and reads Azure and Kubernetes state. Keep one
+control plane and use `Standard_D2s_v5` workers in zone 1. Stop the run
+if it exceeds four actual VMs or eight vCPUs.
+
+For `AZ-P1-007`, set main to `1/1` and zero to `0/0`. Add two run-tagged
+VMSS named by `balancePoolA` and `balancePoolB` in the worker resource
+group. Give both `min=0`, `max=2`, and matching SKU, zone, join setup
+and taints. Both future Nodes must get `<poolLabel>=<balanceLabel>` from
+their kubelet setup. Set the same value on each VMSS tag
+`k8s.io_cluster-autoscaler_node-template_label_<poolLabel>`.
+The controller must discover all four groups and use
+`--balance-similar-node-groups=true`, `--balancing-label=<poolLabel>`,
+`--max-nodes-total=4`, `--parallel-scale-up=false`, `--salvo-scale-up=false`,
+and `--v=1` with text logs. Keep ordinary bounded scale-down settings.
+The configured group maxima exceed four, so also monitor actual VM
+counts independently. Set `allow-balance-fixture: AZ-P1-007` in the
+operator marker. Prepare the Deployment with zero replicas. The case
+creates two unschedulable Pods and then creates `start-controller` in
+its test namespace. Start one controller replica only after that signal.
+The case checks one plan that adds one node to each pool, Ready Pods
+on both Nodes, and physical deletion back to zero. Remove the extra
+VMSS and verify their deletion before the next phase.
+
+For `AZ-P1-008`, set main to `1/2` and zero to `0/1`. The zero VMSS
+OS profile must have no `customData`, so its new VM cannot run the
+join bootstrap. Do not use guest fault injection or RunCommand.
+Set `--max-node-provision-time=3m` and
+`--initial-node-group-backoff-duration=5m` on the running controller.
+Set `allow-no-join-fixture: AZ-P1-008` in the marker. The runner
+checks the absent bootstrap, observes one VM with no Kubernetes Node,
+checks the timeout event and group backoff, and verifies deletion
+of the VM and NIC when capacity returns to zero.
+
+For `AZ-P1-009`, set main's discovery tags to `min=2`, `max=2`,
+but leave its Azure capacity at one with one Ready worker. Keep zero
+at `0/1`. Prepare `--enforce-node-group-min-size=true` and `--v=1`,
+then stop the controller before the case starts. Set
+`allow-minimum-fixture: AZ-P1-009` in the marker. The case reads
+the below-minimum Azure capacity before it creates `start-controller`
+in its test namespace. Start one controller replica only after that
+signal. The case rejects unrelated Pending Pods and checks the
+controller's minimum-size scale-up plan. It then checks that the first
+worker remains, a second joins and both stay at the tagged minimum.
+Leave both workers in place until the operator's workers-first cleanup.
 
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested
@@ -278,6 +343,9 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-004` | Two protected Pods on separate workers, zero allowed disruptions blocks deletion for five minutes, one allowed disruption permits physical deletion and rescheduling while at least one replica remains Ready at each observation |
 | `AZ-P1-005` | A zero-pool VMSS tag blocks demand without a matching taint toleration for five minutes, then tolerated demand grows the pool and the tainted Node runs the Pod; physical return to zero |
 | `AZ-P1-006` | Main `1 -> 2 -> 1`, two Ready StatefulSet Pods use distinct Azure Disks, one Pod and its disk move to the survivor without losing the file, and VM/Node/NIC deletion is verified |
+| `AZ-P1-007` | One two-node plan splits across two similar zero pools, each grows to one Ready Node and runs a Pod, then both return to zero with physical deletion |
+| `AZ-P1-008` | A VM that never registers times out, its group enters backoff, and its VM and NIC are physically deleted |
+| `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -297,8 +365,9 @@ The public scenario source is
 test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
-public source, and six supplemental cases bring the local suite to 29
-registered specs; registration is not execution.
+public source, and six supplemental cases bring the default suite to 29
+registered specs. Three phased cases bring the full module to 32
+registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |
 | --- | --- | --- |
@@ -312,6 +381,9 @@ registered specs; registration is not execution.
 | `CA-020` through `CA-022` | Synthetic DRA growth, oversized claim refusal, deletion and reallocation | [dra_test.go](suites/scaleup/dra_test.go) |
 | `AZ-P1-005` | Zero-pool template taint blocks demand without a toleration and permits tolerated demand | [zero_taint_test.go](suites/scaleup/zero_taint_test.go) |
 | `AZ-P1-006` | Azure Disk StatefulSet Pods retain claims and data when a worker is deleted | [disk_test.go](suites/scaleup/disk_test.go) |
+| `AZ-P1-007` | Balance two similar zero pools with one two-node plan | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-008` | Delete an unregistered zero-pool VM after a provision timeout | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.

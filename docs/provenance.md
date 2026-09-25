@@ -10,6 +10,7 @@
 | Autoscaler APIs | [`kubernetes/autoscaler@eec9bc4dc1d2`](https://github.com/kubernetes/autoscaler/tree/eec9bc4dc1d2/cluster-autoscaler/apis), module `k8s.io/autoscaler/cluster-autoscaler/apis v0.0.0-20260717085528-eec9bc4dc1d2`, the version required by the extracted core |
 | Public Azure E2E inventory | [`Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`](https://github.com/Azure/autoscaler/tree/d892fba1cf557b26d45540f2f6418b7ae52cca46), public 1.35-line test source |
 | Azure Disk E2E intent | [`kubernetes-sigs/cloud-provider-azure@1f871d0ec83cb29874bc33435cbfcb554b5a9ff8`](https://github.com/kubernetes-sigs/cloud-provider-azure/blob/1f871d0ec83cb29874bc33435cbfcb554b5a9ff8/tests/e2e/autoscaling/autoscaler.go), Apache-2.0 source for the StatefulSet disk movement case; the test adapts its intent without copying its code |
+| Similar-pool balancing intent | [`kubernetes-sigs/cloud-provider-azure@1f871d0ec83cb29874bc33435cbfcb554b5a9ff8`](https://github.com/kubernetes-sigs/cloud-provider-azure/blob/1f871d0ec83cb29874bc33435cbfcb554b5a9ff8/tests/e2e/autoscaling/autoscaler.go), Apache-2.0 source for balancing similar node groups; the new case uses a small fixture and checks one two-node plan without copying source code |
 
 The application keeps the `k8s.io/autoscaler/cluster-autoscaler` module path.
 It uses the published API module rather than a local copy; that module's Go
@@ -36,5 +37,7 @@ records the precise packaging comparison and attribution.
 
 The [E2E operator guide](../cloudprovider/azure/test/README.md#coverage-inventory)
 documents the public scenario adaptations and fixture-specific coverage limits.
+The unregistered VM and minimum-size cases describe their behavior
+without naming a private suite.
 
 For local checks and validation boundaries, see [testing](testing.md).

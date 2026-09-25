@@ -186,3 +186,58 @@ func TestReadDiskIdentityRequiresExplicitKubeconfig(t *testing.T) {
 		t.Fatal("accepted a missing explicit kubeconfig")
 	}
 }
+
+func TestCheckPhaseMarker(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase = "minimum"
+	marker := &corev1.ConfigMap{ObjectMeta: metav1.ObjectMeta{Name: MarkerName, Namespace: "kube-system"},
+		Data: map[string]string{"allow-minimum-fixture": "AZ-P1-009"}}
+	e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(marker).Build()}
+	if err := e.CheckPhaseMarker(context.Background(), "minimum", "AZ-P1-009"); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CheckPhaseMarker(context.Background(), "no-join", "AZ-P1-008"); err == nil {
+		t.Fatal("accepted a different phase")
+	}
+	marker.Data["allow-minimum-fixture"] = "foreign"
+	if err := e.K8s.Update(context.Background(), marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.CheckPhaseMarker(context.Background(), "minimum", "AZ-P1-009"); err == nil {
+		t.Fatal("accepted an unauthorized fixture")
+	}
+}
+
+func TestCheckBalancePools(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase, c.BalancePoolA, c.BalancePoolB, c.BalanceLabel = "balance", "pair-a", "pair-b", "balanced"
+	baseline := Snapshot{Pools: map[string]PoolState{
+		"pair-a": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true},
+		"pair-b": {Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true},
+	}}
+	if err := CheckBalancePools(baseline, c); err != nil {
+		t.Fatal(err)
+	}
+	for _, tt := range []struct {
+		name   string
+		change func(*PoolState)
+	}{
+		{name: "wrong SKU", change: func(p *PoolState) { p.SKU = "Standard_D4s_v5" }},
+		{name: "wrong zone", change: func(p *PoolState) { p.Zone = "2," }},
+		{name: "no join template", change: func(p *PoolState) { p.TemplateCustomData = false }},
+		{name: "tainted template", change: func(p *PoolState) { p.TemplateTaint = "foreign:NoSchedule" }},
+		{name: "already growing", change: func(p *PoolState) { p.Capacity = 1 }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			pool := baseline.Pools[c.BalancePoolB]
+			tt.change(&pool)
+			baseline.Pools[c.BalancePoolB] = pool
+			if err := CheckBalancePools(baseline, c); err == nil {
+				t.Fatal("accepted unmatched balance pool")
+			}
+			baseline.Pools[c.BalancePoolB] = PoolState{Instances: map[string]Instance{}, SKU: "Standard_D2s_v5", Zone: "1,", TemplateCustomData: true}
+		})
+	}
+}
