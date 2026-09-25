@@ -234,12 +234,8 @@ func TestCheckPhaseArguments(t *testing.T) {
 			"--balance-similar-node-groups=true", "--balancing-label=acceptance-pool", "--max-nodes-total=4",
 			"--parallel-scale-up=false", "--salvo-scale-up=false", "--v=1", "--max-nodes-total=5",
 		}},
-		{name: "no-join flags", phase: "no-join", valid: true, args: []string{
-			"--max-node-provision-time=3m", "--initial-node-group-backoff-duration=5m",
-		}},
-		{name: "long provision timeout", phase: "no-join", args: []string{
-			"--max-node-provision-time=15m", "--initial-node-group-backoff-duration=5m",
-		}},
+		{name: "no-join flags", phase: "no-join", valid: true, args: []string{"--max-node-provision-time=3m"}},
+		{name: "long provision timeout", phase: "no-join", args: []string{"--max-node-provision-time=15m"}},
 		{name: "minimum flag", phase: "minimum", valid: true, args: []string{"--enforce-node-group-min-size=true", "--v=1"}},
 		{name: "minimum disabled", phase: "minimum", args: []string{"--enforce-node-group-min-size=false", "--v=1"}},
 	} {
@@ -248,26 +244,6 @@ func TestCheckPhaseArguments(t *testing.T) {
 			c.Phase = tt.phase
 			if err := CheckPhaseArguments(tt.args, c); (err == nil) != tt.valid {
 				t.Fatalf("CheckPhaseArguments = %v, valid=%t", err, tt.valid)
-			}
-		})
-	}
-}
-
-func TestCheckTimeoutBackoff(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct {
-		name, status string
-		valid        bool
-	}{
-		{name: "timeout backoff", valid: true, status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
-		{name: "wrong error", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: quota\n"},
-		{name: "no backoff", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: NoActivity\n"},
-		{name: "wrong pool", status: "nodeGroups:\n- name: foreign\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
-		{name: "duplicate pool", status: "nodeGroups:\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n- name: zero\n  scaleUp:\n    status: Backoff\n    backoffInfo:\n      errorCode: timeout\n"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := CheckTimeoutBackoff(tt.status, "zero"); (err == nil) != tt.valid {
-				t.Fatalf("CheckTimeoutBackoff = %v, valid=%t", err, tt.valid)
 			}
 		})
 	}
@@ -413,6 +389,68 @@ func TestEnvironmentDeleted(t *testing.T) {
 				t.Fatalf("Deleted = %v, valid=%v", err, tt.valid)
 			}
 		})
+	}
+}
+
+func TestEnvironmentDeletedEveryCapturedInstance(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	first := normalizeID(c.PoolID(c.ZeroPool) + "/virtualMachines/0")
+	replacement := normalizeID(c.PoolID(c.ZeroPool) + "/virtualMachines/1")
+	before := Snapshot{Pools: map[string]PoolState{c.ZeroPool: {Instances: map[string]Instance{
+		first:       {ID: first, NICs: []string{first + "/networkInterfaces/first"}},
+		replacement: {ID: replacement, NICs: []string{replacement + "/networkInterfaces/replacement"}},
+	}}}}
+	after := Snapshot{Pools: map[string]PoolState{c.ZeroPool: {Instances: map[string]Instance{}}}}
+	e := &Environment{Cloud: fakeCloud{}}
+	if err := e.Deleted(context.Background(), before, after, c.ZeroPool, 2); err != nil {
+		t.Fatal(err)
+	}
+	after.Pools[c.ZeroPool].Instances[replacement] = before.Pools[c.ZeroPool].Instances[replacement]
+	if err := e.Deleted(context.Background(), before, after, c.ZeroPool, 2); err == nil {
+		t.Fatal("accepted a replacement VM that still exists")
+	}
+}
+
+func TestEnvironmentDeletedGenerationWithReusedInstanceID(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	id := normalizeID(c.PoolID(c.ZeroPool) + "/virtualMachines/0")
+	original := Instance{ID: id, VMID: "old-vm", NICs: []string{id + "/networkInterfaces/old"}}
+	replacement := Instance{ID: id, VMID: "new-vm", NICs: []string{id + "/networkInterfaces/new"}}
+	after := Snapshot{Pools: map[string]PoolState{c.ZeroPool: {Instances: map[string]Instance{id: replacement}}}}
+	e := &Environment{Cloud: fakeCloud{}}
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err != nil {
+		t.Fatalf("reused instance ID must not hide the removed generation: %v", err)
+	}
+	after.Pools[c.ZeroPool].Instances[id] = original
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
+		t.Fatal("accepted the same VM generation still present")
+	}
+	after.Pools[c.ZeroPool].Instances[id] = replacement
+	e.Cloud = fakeCloud{exists: true}
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
+		t.Fatal("accepted the old generation's NIC still present")
+	}
+	e.Cloud = fakeCloud{}
+	after.Nodes = []corev1.Node{{Spec: corev1.NodeSpec{ProviderID: "azure://" + id}}}
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
+		t.Fatal("accepted an old Node after VM deletion")
+	}
+	after.Nodes = nil
+	replacement.NICs = original.NICs
+	after.Pools[c.ZeroPool].Instances[id] = replacement
+	e.Cloud = fakeCloud{exists: true}
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err != nil {
+		t.Fatalf("replacement reused the old VM and NIC paths: %v", err)
+	}
+	after.Pools[c.ZeroPool] = PoolState{Instances: map[string]Instance{}}
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
+		t.Fatal("accepted the reused NIC still present after the final VM was removed")
+	}
+	original.VMID = ""
+	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
+		t.Fatal("accepted a VM without a generation-specific identity")
 	}
 }
 

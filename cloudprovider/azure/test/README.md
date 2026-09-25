@@ -196,13 +196,19 @@ must not include the join bootstrap. Give it the operator tag
 so the runner cannot read or verify the VMSS bootstrap content.
 The operator must check the template before starting the case.
 Do not use guest fault injection or RunCommand.
-Set `--max-node-provision-time=3m` and
-`--initial-node-group-backoff-duration=5m` on the running controller.
+Set `--max-node-provision-time=3m` on the running controller.
 Set `allow-no-join-fixture: AZ-P1-008` in the marker. The runner
 checks the operator tag, observes the VM in Running state without
-a Kubernetes Node during the provision window, checks the timeout
-event and group backoff, and verifies deletion of the VM and NIC
-when capacity returns to zero.
+a Kubernetes Node during the provision window, checks the
+`DeleteUnregistered` event for that VM, and verifies its VM
+and NIC are gone. The runner then deletes its Pending workload
+and waits for every captured run-created VM and NIC to be gone
+at zero capacity. A replacement VM while demand remains is
+allowed. Azure may reuse a VMSS instance ID, so the runner
+tracks each VM using Azure's unique `VMID`. The pinned
+Delete-mode core removes long-unregistered
+VMs before treating the scale-up request as timed out, so it
+does not enter scale-up backoff. This case does not cover backoff.
 
 For `AZ-P1-009`, set main's discovery tags to `min=2`, `max=2`,
 but leave its Azure capacity at one with one Ready worker. Keep zero
@@ -351,7 +357,7 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-005` | A zero-pool VMSS tag blocks demand without a matching taint toleration for five minutes, then tolerated demand grows the pool and the tainted Node runs the Pod; physical return to zero |
 | `AZ-P1-006` | Main `1 -> 2 -> 1`, two Ready StatefulSet Pods use distinct Azure Disks, one Pod and its disk move to the survivor without losing the file, and VM/Node/NIC deletion is verified |
 | `AZ-P1-007` | One two-node plan splits across two similar zero pools, each grows to one Ready Node and runs a Pod, then both return to zero with physical deletion |
-| `AZ-P1-008` | A VM that never registers times out, its group enters backoff, and its VM and NIC are physically deleted |
+| `AZ-P1-008` | A Running VM never registers, CA emits `DeleteUnregistered`, and the first and any replacement VMs and NICs are gone after the demand is removed |
 | `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 

@@ -190,7 +190,10 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 						vm.Properties.NetworkProfile == nil || len(vm.Properties.NetworkProfile.NetworkInterfaces) == 0 {
 						return result, fmt.Errorf("VMSS %s instance lacks identity/network evidence", name)
 					}
-					instance := Instance{ID: normalizeID(*vm.ID)}
+					instance := Instance{ID: normalizeID(*vm.ID), VMID: value(vm.Properties.VMID)}
+					if c.Phase == "no-join" && instance.VMID == "" {
+						return result, fmt.Errorf("VMSS %s instance lacks its unique VM ID", name)
+					}
 					for _, nic := range vm.Properties.NetworkProfile.NetworkInterfaces {
 						if nic == nil || nic.ID == nil {
 							return result, fmt.Errorf("VMSS %s instance lacks NIC ID", name)

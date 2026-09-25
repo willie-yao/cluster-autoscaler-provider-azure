@@ -243,65 +243,93 @@ var _ = Describe("Phased Azure VMSS cases", Serial, func() {
 		}, waitTimeout, pollInterval).Should(Succeed())
 		AddReportEntry("unregistered-vm", created.Pools[c.ZeroPool])
 
-		var instanceID string
-		for id := range created.Pools[c.ZeroPool].Instances {
-			instanceID = id
+		var first environment.Instance
+		for _, instance := range created.Pools[c.ZeroPool].Instances {
+			first = instance
 		}
+		seen := map[string]environment.Instance{}
+		record := func(snapshot environment.Snapshot) {
+			for _, instance := range snapshot.Pools[c.ZeroPool].Instances {
+				seen[instance.VMID] = instance
+			}
+		}
+		record(created)
 		running := false
 		Eventually(ctx, func() error {
 			current, err := f.active(ctx)
 			if err != nil {
 				return err
 			}
+			record(current)
 			if len(environment.PoolNodes(current.Nodes, c.PoolID(c.ZeroPool))) != 0 {
 				StopTrying("unregistered VM became a Kubernetes Node").Now()
 			}
-			backoffErr := f.env.CheckTimeoutBackoff(ctx, c.ZeroPool)
-			if _, exists := current.Pools[c.ZeroPool].Instances[instanceID]; exists &&
-				current.Pools[c.ZeroPool].Capacity == 1 && backoffErr != nil {
-				nowRunning, err := f.env.InstanceRunning(ctx, c.ZeroPool, instanceID)
+			var events corev1.EventList
+			if err := f.env.K8s.List(ctx, &events, client.InNamespace(c.AutoscalerNamespace)); err != nil {
+				return err
+			}
+			deletedEvent := unregisteredDeletionEvent(events.Items, first.ID)
+			if instance, exists := current.Pools[c.ZeroPool].Instances[first.ID]; exists &&
+				instance.VMID == first.VMID && current.Pools[c.ZeroPool].Capacity == 1 && !deletedEvent {
+				nowRunning, err := f.env.InstanceRunning(ctx, c.ZeroPool, first.ID)
 				if err != nil {
 					return err
 				}
 				if running && !nowRunning {
-					StopTrying("unregistered VM stopped before timeout backoff").Now()
+					StopTrying("unregistered VM stopped before the deletion event").Now()
 				}
 				running = nowRunning
 			}
 			if !running {
 				return fmt.Errorf("waiting for the unregistered VM to reach Running")
 			}
-			return backoffErr
-		}, 12*time.Minute, pollInterval).Should(Succeed())
-		AddReportEntry("unregistered-power", "captured VM reached Running before the provision timeout")
+			if !deletedEvent {
+				return fmt.Errorf("waiting for deletion of the unregistered VM")
+			}
+			return f.env.DeletedGeneration(ctx, first, current, c.ZeroPool)
+		}, waitTimeout, pollInterval).Should(Succeed())
+		AddReportEntry("unregistered-power", "captured VM ran without a Node, then CA deleted its VM and NIC")
+		Expect(f.env.K8s.Delete(ctx, demand)).To(Succeed())
 		Eventually(ctx, func() error {
-			var events corev1.EventList
-			if err := f.env.K8s.List(ctx, &events, client.InNamespace(c.AutoscalerNamespace)); err != nil {
+			current, err := f.active(ctx)
+			if err != nil {
 				return err
 			}
-			for _, event := range events.Items {
-				if event.Reason == "ScaleUpTimedOut" && strings.Contains(event.Message, c.ZeroPool) {
-					return nil
-				}
+			record(current)
+			if len(environment.PoolNodes(current.Nodes, c.PoolID(c.ZeroPool))) != 0 {
+				StopTrying("unregistered VM became a Kubernetes Node").Now()
 			}
-			return fmt.Errorf("no timeout event for the unregistered pool")
-		}, time.Minute, pollInterval).Should(Succeed())
+			var pods corev1.PodList
+			if err := f.env.K8s.List(ctx, &pods, client.InNamespace(f.namespace.Name),
+				client.MatchingLabels(demand.Spec.Selector.MatchLabels)); err != nil {
+				return err
+			}
+			if len(pods.Items) != 0 {
+				return fmt.Errorf("waiting for unregistered demand Pods to be removed")
+			}
+			return nil
+		}, 4*time.Minute, pollInterval).Should(Succeed())
 
 		Eventually(ctx, func() error {
 			after, err := f.active(ctx)
 			if err != nil {
 				return err
 			}
+			record(after)
+			if len(environment.PoolNodes(after.Nodes, c.PoolID(c.ZeroPool))) != 0 {
+				StopTrying("unregistered VM became a Kubernetes Node").Now()
+			}
 			if err := after.StablePools(c, map[string]int{c.MainPool: 1, c.ZeroPool: 0}); err != nil {
 				return err
 			}
-			if err := f.env.Deleted(ctx, created, after, c.ZeroPool, 1); err != nil {
-				return err
+			for _, instance := range seen {
+				if err := f.env.DeletedGeneration(ctx, instance, after, c.ZeroPool); err != nil {
+					return err
+				}
 			}
-			_, err = f.env.WorkloadState(ctx, f.namespace.Name, demand.Name, c.ZeroPool, 0, 1)
-			return err
+			return nil
 		}, waitTimeout, pollInterval).Should(Succeed())
-		AddReportEntry("physical-delete", "timed-out VM, Node and NIC were removed; the group was in timeout backoff")
+		AddReportEntry("physical-delete", fmt.Sprintf("%d captured unregistered VMs, Nodes and NICs were removed", len(seen)))
 	}, NodeTimeout(50*time.Minute))
 
 	It("AZ-P1-009 grows a pool from one worker to its configured minimum of two", Label("AZ-P1-009", "minimum"), func(ctx SpecContext) {
@@ -426,6 +454,32 @@ func checkBalancedPlan(logs, a, b string) error {
 		}
 	}
 	return fmt.Errorf("no single autoscaler plan split two nodes between the balance pools")
+}
+
+func unregisteredDeletionEvent(events []corev1.Event, instanceID string) bool {
+	for _, event := range events {
+		if event.Reason == "DeleteUnregistered" &&
+			strings.HasSuffix(strings.ToLower(strings.TrimSpace(event.Message)), strings.ToLower(instanceID)) {
+			return true
+		}
+	}
+	return false
+}
+
+func TestUnregisteredDeletionEvent(t *testing.T) {
+	id := "/subscriptions/s/resourceGroups/owned/providers/Microsoft.Compute/virtualMachineScaleSets/zero/virtualMachines/0"
+	event := corev1.Event{Reason: "DeleteUnregistered", Message: "Removed unregistered node azure://" + id}
+	if !unregisteredDeletionEvent([]corev1.Event{event}, id) {
+		t.Fatal("exact deleted instance event was missed")
+	}
+	event.Message = strings.Replace(event.Message, "/virtualMachines/0", "/virtualMachines/1", 1)
+	if unregisteredDeletionEvent([]corev1.Event{event}, id) {
+		t.Fatal("accepted a deletion for a different instance")
+	}
+	event.Reason = "ScaleUpTimedOut"
+	if unregisteredDeletionEvent([]corev1.Event{event}, id) {
+		t.Fatal("accepted a timeout rather than physical deletion")
+	}
 }
 
 func checkMinimumPlan(logs, pool string) error {

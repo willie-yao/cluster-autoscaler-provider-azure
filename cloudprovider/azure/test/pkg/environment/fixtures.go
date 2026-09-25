@@ -33,7 +33,6 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 	"k8s.io/client-go/tools/remotecommand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/yaml"
 )
 
 const (
@@ -112,46 +111,6 @@ func (e *Environment) CheckPausedController(ctx context.Context) error {
 	}
 	if found != 1 {
 		return fmt.Errorf("paused autoscaler must have one expected container")
-	}
-	return nil
-}
-
-// CheckTimeoutBackoff reads the fresh group status after a provision timeout.
-func (e *Environment) CheckTimeoutBackoff(ctx context.Context, pool string) error {
-	var status corev1.ConfigMap
-	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: e.Config.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
-		return err
-	}
-	return CheckTimeoutBackoff(status.Data["status"], pool)
-}
-
-// CheckTimeoutBackoff requires the pinned controller's timeout backoff state.
-func CheckTimeoutBackoff(status, pool string) error {
-	var parsed struct {
-		NodeGroups []struct {
-			Name    string `json:"name"`
-			ScaleUp struct {
-				Status      string `json:"status"`
-				BackoffInfo struct {
-					ErrorCode string `json:"errorCode"`
-				} `json:"backoffInfo"`
-			} `json:"scaleUp"`
-		} `json:"nodeGroups"`
-	}
-	if err := yaml.Unmarshal([]byte(status), &parsed); err != nil {
-		return fmt.Errorf("decode autoscaler backoff status: %w", err)
-	}
-	found := 0
-	for _, group := range parsed.NodeGroups {
-		if group.Name == pool {
-			found++
-			if group.ScaleUp.Status != "Backoff" || group.ScaleUp.BackoffInfo.ErrorCode != "timeout" {
-				return fmt.Errorf("pool %s has no provision-timeout backoff", pool)
-			}
-		}
-	}
-	if found != 1 {
-		return fmt.Errorf("expected one backoff status for pool %s", pool)
 	}
 	return nil
 }

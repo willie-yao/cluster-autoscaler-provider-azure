@@ -33,6 +33,7 @@ var ErrBounds = errors.New("resource bounds violated")
 // Instance records only identifiers needed to prove physical deletion.
 type Instance struct {
 	ID   string
+	VMID string
 	NICs []string
 }
 

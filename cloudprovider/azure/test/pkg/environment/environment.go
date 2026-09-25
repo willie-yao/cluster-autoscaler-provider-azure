@@ -180,7 +180,6 @@ func CheckPhaseArguments(args []string, c Config) error {
 		required["v"] = "1"
 	case "no-join":
 		required["max-node-provision-time"] = "3m"
-		required["initial-node-group-backoff-duration"] = "5m"
 	case "minimum":
 		required["enforce-node-group-min-size"] = "true"
 		required["v"] = "1"
@@ -398,6 +397,45 @@ func (e *Environment) Deleted(ctx context.Context, before, after Snapshot, pool 
 	}
 	if deleted != count {
 		return fmt.Errorf("observed %d captured instance deletions, want %d", deleted, count)
+	}
+	return nil
+}
+
+// DeletedGeneration checks a VM separately from a replacement using the same VMSS instance ID.
+func (e *Environment) DeletedGeneration(ctx context.Context, before Instance, after Snapshot, pool string) error {
+	if before.ID == "" || before.VMID == "" {
+		return fmt.Errorf("captured VM has no unique Azure identity")
+	}
+	state, ok := after.Pools[pool]
+	if !ok {
+		return fmt.Errorf("pool %s is missing from the deletion observation", pool)
+	}
+	current, replacement := state.Instances[before.ID]
+	if replacement && current.VMID == before.VMID {
+		return fmt.Errorf("captured VM generation still exists in pool %s", pool)
+	}
+	for _, node := range after.Nodes {
+		if normalizeID(node.Spec.ProviderID) == before.ID {
+			return fmt.Errorf("deleted VM generation still has Node %s", node.Name)
+		}
+	}
+	for _, nic := range before.NICs {
+		reused := false
+		if replacement {
+			for _, currentNIC := range current.NICs {
+				reused = reused || strings.EqualFold(nic, currentNIC)
+			}
+		}
+		if reused {
+			continue
+		}
+		exists, err := e.Cloud.NICExists(ctx, nic)
+		if err != nil {
+			return err
+		}
+		if exists {
+			return fmt.Errorf("deleted VM generation still has NIC %s", nic)
+		}
 	}
 	return nil
 }

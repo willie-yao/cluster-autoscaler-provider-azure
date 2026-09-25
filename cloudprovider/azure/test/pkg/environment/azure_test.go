@@ -194,6 +194,53 @@ func TestAzureReadNoJoinRequiresOperatorTag(t *testing.T) {
 	}
 }
 
+func TestAzureReadNoJoinRequiresVMID(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase = "no-join"
+	setPath := c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachineScaleSets"
+	instancePath := setPath + "/" + c.ZeroPool + "/virtualMachines"
+	set := armcompute.VirtualMachineScaleSetListResult{Value: []*armcompute.VirtualMachineScaleSet{{
+		Name: ptr.To(c.ZeroPool), SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(int64(1))},
+		Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+			"min": ptr.To("0"), "max": ptr.To("1"), "autoscaler-e2e-no-join": ptr.To(c.RunID)},
+		Properties: &armcompute.VirtualMachineScaleSetProperties{
+			ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+		},
+	}}}
+	identifier := c.PoolID(c.ZeroPool) + "/virtualMachines/0"
+	instance := armcompute.VirtualMachineScaleSetVMListResult{Value: []*armcompute.VirtualMachineScaleSetVM{{
+		ID: ptr.To(identifier), Properties: &armcompute.VirtualMachineScaleSetVMProperties{
+			NetworkProfile: &armcompute.NetworkProfile{
+				NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{ID: ptr.To(identifier + "/networkInterfaces/nic")}},
+			},
+		},
+	}}}
+	data := map[string]interface{}{setPath: set, instancePath: instance}
+	factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+		ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+			payload, found := data[request.URL.Path]
+			if !found {
+				return nil, fmt.Errorf("unexpected Azure SDK request %s", request.URL.Path)
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+		})},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cloud := &azureCloud{config: c, sets: factory.NewVirtualMachineScaleSetsClient(),
+		vms: factory.NewVirtualMachineScaleSetVMsClient(), cores: map[string]int{"standard_d2s_v5": 2}}
+	if _, err := cloud.Read(context.Background()); err == nil || !strings.Contains(err.Error(), "unique VM ID") {
+		t.Fatalf("missing VM generation was accepted: %v", err)
+	}
+}
+
 func TestCheckBalanceTemplateTags(t *testing.T) {
 	t.Parallel()
 	labels := "k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"
