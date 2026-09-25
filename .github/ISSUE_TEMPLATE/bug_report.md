@@ -1,72 +1,21 @@
 ---
 name: Bug report
-about: Create a bug report for one of the autoscaler components
+about: Report an Azure Cluster Autoscaler issue
 title: ''
 labels: 'kind/bug'
 assignees: ''
-
 ---
 
-<!--
-Please answer these questions before submitting your bug report. Thanks!
--->
+**What version are you using?**
 
-**Which component are you using?**:
+**What Kubernetes version are you using?**
 
-<!--
-Which autoscaling component hosted in this repository (cluster-autoscaler, vertical-pod-autoscaler, addon-resizer, helm charts) is the bug in?
+**What Azure environment is affected?**
 
-Add one of the following areas:
-/area addon-resizer
-/area balancer
-/area cluster-autoscaler
-/area helm-charts
-/area vertical-pod-autoscaler
--->
+**What did you expect to happen?**
 
-**What version of the component are you using?**:
+**What happened instead?**
 
-<!--
-What version of the relevant component are you using? Either the image tag or helm chart version.
--->
+**How can the issue be reproduced?**
 
-Component version:
-
-**What k8s version are you using (`kubectl version`)?**:
-
-<details><summary><code>kubectl version</code> Output</summary><br><pre>
-$ kubectl version
-
-</pre></details>
-
-**What environment is this in?**:
-
-<!--
-If you're using a cloud provider or hardware configuration as your deployment environment let us know here.
--->
-
-**What did you expect to happen?**:
-
-<!--
-What behaviour did you expect to see?
--->
-
-**What happened instead?**:
-
-<!--
-What behaviour did see instead?
--->
-
-**How to reproduce it (as minimally and precisely as possible)**:
-
-<!--
-If possible, provide a recipe for reproducing the error.
-A detailed sequence of steps describing what to do to observe the issue is good.
-A complete runnable bash shell script is best.
--->
-
-**Anything else we need to know?**:
-
-<!--
-Is there anything else you think we should know? Configuration of the component (be careful what you post here if so)? Relevant logs?
--->
+**Anything else we need to know?**

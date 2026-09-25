@@ -1,0 +1,235 @@
+---
+# Source: cluster-autoscaler/templates/pdb.yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: "migration"
+      app.kubernetes.io/name: "azure-cluster-autoscaler"
+  maxUnavailable: 1
+---
+# Source: cluster-autoscaler/templates/serviceaccount.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+automountServiceAccountToken: true
+---
+# Source: cluster-autoscaler/templates/secret.yaml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+data:
+  ClientID: "dGVzdC1jbGllbnQ="
+  ClientSecret: "bm90LWEtcmVhbC1zZWNyZXQ="
+  ResourceGroup: "dGVzdC1ub2RlLXJlc291cmNlLWdyb3Vw"
+  SubscriptionID: "dGVzdC1zdWJzY3JpcHRpb24="
+  TenantID: "dGVzdC10ZW5hbnQ="
+  VMType: "dm1zcw=="
+  UserAssignedIdentityID: ""
+---
+# Source: cluster-autoscaler/templates/role.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      - cluster-autoscaler-status
+    verbs:
+      - delete
+      - get
+      - update
+  - apiGroups:
+    - coordination.k8s.io
+    resources:
+    - leases
+    verbs:
+    - create
+  - apiGroups:
+    - coordination.k8s.io
+    resourceNames:
+    - cluster-autoscaler
+    resources:
+    - leases
+    verbs:
+    - get
+    - update
+  - apiGroups:
+    - ""
+    resources:
+    - resourcequotas
+    verbs:
+    - get
+    - list
+    - watch
+---
+# Source: cluster-autoscaler/templates/rolebinding.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: migration-azure-cluster-autoscaler
+subjects:
+  - kind: ServiceAccount
+    name: migration-azure-cluster-autoscaler
+    namespace: kube-system
+---
+# Source: cluster-autoscaler/templates/service.yaml
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+spec:
+  ports:
+    - port: 8085
+      protocol: TCP
+      targetPort: 8085
+      name: http
+  selector:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+  type: "ClusterIP"
+---
+# Source: cluster-autoscaler/templates/deployment.yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  annotations:
+    {}
+  labels:
+    app.kubernetes.io/instance: "migration"
+    app.kubernetes.io/name: "azure-cluster-autoscaler"
+    app.kubernetes.io/managed-by: "Helm"
+    helm.sh/chart: "cluster-autoscaler-9.59.0"
+  name: migration-azure-cluster-autoscaler
+  namespace: kube-system
+spec:
+  replicas: 1
+  revisionHistoryLimit: 10
+  selector:
+    matchLabels:
+      app.kubernetes.io/instance: "migration"
+      app.kubernetes.io/name: "azure-cluster-autoscaler"
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: "migration"
+        app.kubernetes.io/name: "azure-cluster-autoscaler"
+    spec:
+      priorityClassName: "system-cluster-critical"
+      dnsPolicy: "ClusterFirst"
+      containers:
+        - name: azure-cluster-autoscaler
+          image: "example.invalid/cluster-autoscaler:migration-test"
+          imagePullPolicy: "IfNotPresent"
+          command:
+            - ./cluster-autoscaler
+            - --cloud-provider=azure
+            - --namespace=kube-system
+            - --nodes=1:5:standard-pool
+            - --logtostderr=true
+            - --stderrthreshold=info
+            - --v=4
+          env:
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: SERVICE_ACCOUNT
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.serviceAccountName
+            - name: ARM_SUBSCRIPTION_ID
+              valueFrom:
+                secretKeyRef:
+                  key: SubscriptionID
+                  name: migration-azure-cluster-autoscaler
+            - name: ARM_RESOURCE_GROUP
+              valueFrom:
+                secretKeyRef:
+                  key: ResourceGroup
+                  name: migration-azure-cluster-autoscaler
+            - name: ARM_VM_TYPE
+              valueFrom:
+                secretKeyRef:
+                  key: VMType
+                  name: migration-azure-cluster-autoscaler
+            - name: AZURE_ENABLE_FORCE_DELETE
+              value: "false"
+            - name: AZURE_ENABLE_VMSS_ETAG
+              value: "false"
+            - name: ARM_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: TenantID
+                  name: migration-azure-cluster-autoscaler
+            - name: ARM_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  key: ClientID
+                  name: migration-azure-cluster-autoscaler
+            - name: ARM_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  key: ClientSecret
+                  name: migration-azure-cluster-autoscaler
+          livenessProbe:
+            httpGet:
+              path: /health-check
+              port: 8085
+          ports:
+            - containerPort: 8085
+          resources:
+            {}
+      serviceAccountName: migration-azure-cluster-autoscaler
+      tolerations:
+        []

@@ -1,50 +1,59 @@
-# Contributing guidelines
+# Contributing
 
-## How to become a contributor and submit your own code
+Changes should preserve the Azure provider's contracts with Kubernetes and the
+shared autoscaling core. Read the [architecture guide](docs/architecture.md)
+before changing module boundaries, discovery, templates or scaling operations.
 
-### Signing Contributor License Agreements(CLA)
+## Local workflow
 
-We'd love to accept your patches! Before we can take them, we have to jump a couple of legal hurdles.
- 
- Please fill out either the individual or corporate Contributor License Agreement
- (CLA).
- 
-   * If you are an individual writing original source code and you're sure you
-     own the intellectual property, then you'll need to sign an
-     [individual CLA](https://identity.linuxfoundation.org/node/285/node/285/individual-signup).
-   * If you work for a company that wants to allow you to contribute your work,
-     then you'll need to sign a
-     [corporate CLA](https://identity.linuxfoundation.org/?destination=node/285/organization-signup).
+Use Go 1.26 or later, Git, Make and a C toolchain for race tests. Helm is needed
+for chart checks; Docker is needed only when building an image.
 
-### Contributing A Patch
- * Sign a Contributor License Agreement, if you haven't already done so(see details above).
- * Fork the desired repo, develop and test your code changes.
- * Submit a pull request.
+Create a focused branch from current `main`, reproduce the issue, and add a
+regression at the closest existing test boundary. Follow nearby Go conventions
+and preserve source attribution and license headers. Use the existing module
+pins unless a dependency change is part of the proposal.
 
-All changes must be code reviewed. Coding conventions and standards are explained in the official 
-[developer docs](https://github.com/kubernetes/community/tree/master/contributors/devel). Expect 
-reviewers to request that you avoid common [go style mistakes](https://go.dev/wiki/CodeReviewComments)
-in your PRs.
+From the repository root:
 
-### Merge Approval
+```sh
+make format
+make test-ci
+make test-chart
+git diff --check
+```
 
-Autoscaler collaborators may add "LGTM" (Looks Good To Me) or an equivalent comment to indicate 
-that a PR is acceptable. Any change requires at least one LGTM. No pull requests can be merged 
-until at least one Autoscaler collaborator signs off with an LGTM.
+On macOS, use `make test-ci GOOS=darwin`. Start with a targeted test while
+iterating, then run the applicable checks before requesting review. The
+[testing guide](docs/testing.md) explains which targets enter nested modules.
+A root `go test ./...` does not test nested modules.
 
-### Deprecation Policy
+The CapacityBuffer, CapacityQuota and ProvisioningRequest APIs come from the
+published `k8s.io/autoscaler/cluster-autoscaler/apis` module. Make API changes
+upstream in `kubernetes/autoscaler`, then update the module version together
+with the extracted core.
 
-This repository follows the [Kubernetes Deprecation Policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/#deprecating-a-flag-or-cli).
-When planning to deprecate a Kubernetes resource API, command line flag or CLI behavior, or
-a feature, please review the deprecation policy to ensure that functionality has not been removed before the
-appropriate signals have been broadcast and the proper amount of deprecation time has been observed.
+## Chart changes
 
-### Support Channels
+Chart changes must pass `make test-chart`. The frozen upstream YAML is an
+independent oracle, not output to regenerate from the chart under test. Explain
+intentional compatibility changes and preserve the
+[fixture provenance](charts/testdata/azure-compatibility/README.md).
+Chart/app version changes are separate release decisions; the existing PR
+chart-version check is not waived by a local test pass.
 
-Whether you are a user or contributor, official support channels include:
+Live runs need separate authorization, ownership, budget and cleanup planning.
+Keep credentials, kubeconfigs and private run artifacts out of commits.
 
- * GitHub issues: https://github.com/kubernetes/autoscaler/issues
- * Slack: Sig-autoscaling room in the [Kubernetes Slack](https://kubernetes.slack.com/?redir=%2Fmessages%2Fsig-autoscaling)
- * Email: kubernetes-users [mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-autoscaling)
+## Pull requests
 
-For further information, please refer to [Kubernetes Contributor Guide](https://github.com/kubernetes/community/blob/master/contributors/guide/README.md)
+Describe the problem, intended behavior and compatibility impact. Include
+reproduction steps, the checks run and any untested boundaries. For live test
+results, distinguish the test-source commit from the runtime image's source
+commit and digest. Link historical evidence at immutable commits instead of
+claiming it validates new code.
+
+Keep changes reviewable and avoid unrelated refactors. Update directly affected
+documentation and fixtures.
+
+Use the repository issue and PR templates to provide context.

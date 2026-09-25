@@ -4,7 +4,7 @@ metadata:
   name: cluster-autoscaler
 build:
   artifacts:
-  - image: cluster-autoscaler
+  - image: cluster-autoscaler-azure
     ko: {}
 manifests:
   rawYaml:

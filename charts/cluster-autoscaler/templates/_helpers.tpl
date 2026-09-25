@@ -3,7 +3,7 @@
 Expand the name of the chart.
 */}}
 {{- define "cluster-autoscaler.name" -}}
-{{- default (printf "%s-%s" .Values.cloudProvider .Chart.Name) .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
+{{- default (printf "azure-%s" .Chart.Name) .Values.nameOverride | trunc 63 | trimSuffix "-" -}}
 {{- end -}}
 
 {{/*
@@ -14,7 +14,7 @@ We truncate at 63 chars because some Kubernetes name fields are limited to this 
 {{- if .Values.fullnameOverride -}}
 {{- .Values.fullnameOverride | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
-{{- $name := default (printf "%s-%s" .Values.cloudProvider .Chart.Name) .Values.nameOverride -}}
+{{- $name := default (printf "azure-%s" .Chart.Name) .Values.nameOverride -}}
 {{- if ne $name .Release.Name -}}
 {{- printf "%s-%s" .Release.Name $name | trunc 63 | trimSuffix "-" -}}
 {{- else -}}
@@ -105,56 +105,5 @@ Return true if the priority expander is enabled
 {{- $expanders := splitList "," (default "" .Values.extraArgs.expander) -}}
 {{- if has "priority" $expanders -}}
 {{- true -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-autoDiscovery.clusterName for clusterapi.
-*/}}
-{{- define "cluster-autoscaler.capiAutodiscovery.clusterName" -}}
-{{- print "clusterName=" -}}{{ tpl (.Values.autoDiscovery.clusterName) . }}
-{{- end -}}
-
-{{/*
-autoDiscovery.namespace for clusterapi.
-*/}}
-{{- define "cluster-autoscaler.capiAutodiscovery.namespace" -}}
-{{- print "namespace=" }}{{ .Values.autoDiscovery.namespace -}}
-{{- end -}}
-
-{{/*
-autoDiscovery.labels for clusterapi.
-*/}}
-{{- define "cluster-autoscaler.capiAutodiscovery.labels" -}}
-{{- range $i, $el := .Values.autoDiscovery.labels -}}
-{{- if $i -}}{{- print "," -}}{{- end -}}
-{{- range $key, $val := $el -}}
-{{- $key -}}{{- print "=" -}}{{- $val -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
-
-{{/*
-Return the autodiscoveryparameters for clusterapi.
-*/}}
-{{- define "cluster-autoscaler.capiAutodiscoveryConfig" -}}
-{{- if .Values.autoDiscovery.clusterName -}}
-{{ include "cluster-autoscaler.capiAutodiscovery.clusterName" . }}
-    {{- if .Values.autoDiscovery.namespace }}
-    {{- print "," -}}
-    {{ include "cluster-autoscaler.capiAutodiscovery.namespace" . }}
-    {{- end -}}
-    {{- if .Values.autoDiscovery.labels }}
-    {{- print "," -}}
-    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
-    {{- end -}}
-{{- else if .Values.autoDiscovery.namespace -}}
-{{ include "cluster-autoscaler.capiAutodiscovery.namespace" . }}
-    {{- if .Values.autoDiscovery.labels }}
-    {{- print "," -}}
-    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
-    {{- end -}}
-{{- else if .Values.autoDiscovery.labels -}}
-    {{ include "cluster-autoscaler.capiAutodiscovery.labels" . }}
 {{- end -}}
 {{- end -}}

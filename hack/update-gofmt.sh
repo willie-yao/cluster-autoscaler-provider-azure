@@ -18,4 +18,4 @@ set -o errexit
 set -o nounset
 set -o pipefail
 
-find . -name "*.go" | grep -v "\/vendor\/" | grep -v "\/aws-sdk-go\/" | xargs gofmt -s -w
+find . -name "*.go" -not -path "*/vendor/*" -print0 | xargs -0 gofmt -s -w

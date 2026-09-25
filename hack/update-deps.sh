@@ -28,9 +28,8 @@ KUBE_ROOT="$(dirname "${BASH_SOURCE[0]}")/.."
 cd "${KUBE_ROOT}"
 
 VERSION=${1#"v"}
-APIS_VERSION=${2#"v"}
-FORK=${3:-git@github.com:kubernetes/kubernetes.git}
-SED=${4:-sed}
+FORK=${2:-git@github.com:kubernetes/kubernetes.git}
+SED=${3:-sed}
 
 # $1: The k8s version to download.
 cluster_autoscaler:list_mods:init() {
@@ -54,7 +53,7 @@ cluster_autoscaler:list_mods() {
   k8s_version="${1:-${VERSION}}"
 
   if [ -z "${k8s_version}" ]; then
-    echo "Usage: hack/update-deps.sh <k8s version> <k8s version for apis> <k8s fork:-git@github.com:kubernetes/kubernetes.git>"
+    echo "Usage: hack/update-deps.sh <k8s version> <k8s fork:-git@github.com:kubernetes/kubernetes.git>"
     exit 1
   fi
   cluster_autoscaler:list_mods:init "${k8s_version}" > /dev/null
@@ -86,14 +85,14 @@ cluster_autoscaler:update_deps() {
       exit 1
     fi
     mod_version=$(echo "${gomod_json}" | "${SED}" -n 's|.*"Version": "\(.*\)".*|\1|p')
-    if [ "${pkg}" = "." ] || [ "${pkg}" = "./e2e" ]; then
+    if [ "${pkg}" = "." ]; then
       go mod edit "-replace=${mod}=${mod}@${mod_version}"
     else
       go get "${mod}@${mod_version}"
     fi
   done
 
-  if [ "${pkg}" = "." ] || [ "${pkg}" = "./e2e" ]; then
+  if [ "${pkg}" = "." ]; then
     go get "k8s.io/kubernetes@v${k8s_version}"
   fi
 
@@ -106,10 +105,3 @@ cluster_autoscaler:update_deps() {
 # k8s.io/autoscaler/cluster-autoscaler/go.mod
 mods=($(cluster_autoscaler:list_mods "${VERSION}"))
 cluster_autoscaler:update_deps "." "${VERSION}" "${mods[@]}"
-
-# k8s.io/autoscaler/cluster-autoscaler/e2e/go.mod
-cluster_autoscaler:update_deps "./e2e" "${VERSION}" "${mods[@]}"
-
-# k8s.io/autoscaler/cluster-autoscaler/apis/go.mod
-apis_mods=($(cluster_autoscaler:list_mods "${APIS_VERSION}"))
-cluster_autoscaler:update_deps "./apis" "${APIS_VERSION}" "${apis_mods[@]}"

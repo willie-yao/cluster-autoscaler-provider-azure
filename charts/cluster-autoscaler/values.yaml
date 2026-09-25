@@ -6,46 +6,14 @@ affinity: {}
 additionalLabels: {}
 
 autoDiscovery:
-  # cloudProviders `aws`, `gce`, `azure`, `magnum`, `clusterapi` and `oci` are supported by auto-discovery at this time
-  # AWS: Set tags as described in https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/aws/README.md#auto-discovery-setup
-
-  # autoDiscovery.clusterName -- Enable autodiscovery for `cloudProvider=aws`, for groups matching `autoDiscovery.tags`.
-  # autoDiscovery.clusterName -- Enable autodiscovery for `cloudProvider=azure`, using tags defined in https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/azure/README.md#auto-discovery-setup.
-  # Enable autodiscovery for `cloudProvider=clusterapi`, for groups matching `autoDiscovery.labels`.
-  # Enable autodiscovery for `cloudProvider=gce`, but no MIG tagging required.
-  # Enable autodiscovery for `cloudProvider=magnum`, for groups matching `autoDiscovery.roles`.
+  # autoDiscovery.clusterName enables Azure VMSS auto-discovery.
   clusterName:  # cluster.local
 
-  # autoDiscovery.namespace -- Enable autodiscovery via cluster namespace for for `cloudProvider=clusterapi`
-  namespace:  # default
-
-  # autoDiscovery.tags -- ASG tags to match, run through `tpl`.
-  tags:
-    - k8s.io/cluster-autoscaler/enabled
-    - k8s.io/cluster-autoscaler/{{ .Values.autoDiscovery.clusterName }}
-  # - kubernetes.io/cluster/{{ .Values.autoDiscovery.clusterName }}
-
-  # autoDiscovery.roles -- Magnum node group roles to match.
-  roles:
-    - worker
-
-  # autoDiscovery.labels -- Cluster-API labels to match  https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/clusterapi/README.md#configuring-node-group-auto-discovery
-  labels: []
-    # - color: green
-    # - shape: circle
-# autoscalingGroups -- For AWS, Azure AKS, Exoscale or Magnum. At least one element is required if not using `autoDiscovery`. For example:
+# autoscalingGroups -- For Azure AKS. At least one element is required if not using `autoDiscovery`. For example:
 # <pre>
 # - name: asg1<br />
 #   maxSize: 2<br />
 #   minSize: 1
-# </pre>
-# For Hetzner Cloud, the `instanceType` and `region` keys are also required.
-# <pre>
-# - name: mypool<br />
-#   maxSize: 2<br />
-#   minSize: 1<br />
-#   instanceType: CPX21<br />
-#   region: FSN1
 # </pre>
 autoscalingGroups: []
 # - name: asg1
@@ -55,47 +23,24 @@ autoscalingGroups: []
 #   maxSize: 2
 #   minSize: 1
 
-# autoscalingGroupsnamePrefix -- For GCE. At least one element is required if not using `autoDiscovery`. For example:
-# <pre>
-# - name: ig01<br />
-#   maxSize: 10<br />
-#   minSize: 0
-# </pre>
-autoscalingGroupsnamePrefix: []
-# - name: ig01
-#   maxSize: 10
-#   minSize: 0
-# - name: ig02
-#   maxSize: 10
-#   minSize: 0
-
-# awsAccessKeyID -- AWS access key ID ([if AWS user keys used](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/aws/README.md#using-aws-credentials))
-awsAccessKeyID: ""
-
-# awsRegion -- AWS region (required if `cloudProvider=aws`)
-awsRegion: ""
-
-# awsSecretAccessKey -- AWS access secret key ([if AWS user keys used](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/aws/README.md#using-aws-credentials))
-awsSecretAccessKey: ""
-
 # azureClientID -- Service Principal ClientID with contributor permission to Cluster and Node ResourceGroup.
-# Required if `cloudProvider=azure`
+# Required for Azure service-principal authentication.
 azureClientID: ""
 
 # azureClientSecret -- Service Principal ClientSecret with contributor permission to Cluster and Node ResourceGroup.
-# Required if `cloudProvider=azure`
+# Required for Azure service-principal authentication.
 azureClientSecret: ""
 
 # azureResourceGroup -- Azure resource group that the cluster is located.
-# Required if `cloudProvider=azure`
+# Required for Azure service-principal authentication.
 azureResourceGroup: ""
 
 # azureSubscriptionID -- Azure subscription where the resources are located.
-# Required if `cloudProvider=azure`
+# Required for Azure service-principal authentication.
 azureSubscriptionID: ""
 
 # azureTenantID -- Azure tenant where the resources are located.
-# Required if `cloudProvider=azure`
+# Required for Azure service-principal authentication.
 azureTenantID: ""
 
 # azureUseManagedIdentityExtension -- Whether to use Azure's managed identity extension for credentials. If using MSI, ensure subscription ID, resource group, and azure AKS cluster name are set. You can only use one authentication method at a time, either azureUseWorkloadIdentityExtension or azureUseManagedIdentityExtension should be set.
@@ -115,52 +60,6 @@ azureEnableForceDelete: false
 
 # azureEnableVMSSEtag -- Whether to send the cached VMSS ETag as an `If-Match` header on capacity updates, so concurrent modifications are rejected (HTTP 412) and retried instead of silently overwritten.
 azureEnableVMSSEtag: false
-
-# civoApiUrl -- URL for the Civo API.
-# Required if `cloudProvider=civo`
-civoApiUrl: "https://api.civo.com"
-
-# civoApiKey -- API key for the Civo API.
-# Required if `cloudProvider=civo`
-civoApiKey: ""
-
-# civoClusterID -- Cluster ID for the Civo cluster.
-# Required if `cloudProvider=civo`
-civoClusterID: ""
-
-# civoRegion -- Region for the Civo cluster.
-# Required if `cloudProvider=civo`
-civoRegion: ""
-
-# cloudConfigPath -- Configuration file for cloud provider.
-cloudConfigPath: ""
-
-# cloudProvider -- The cloud provider where the autoscaler runs.
-# Currently only `gce`, `aws`, `azure`, `magnum`, `clusterapi`, `civo` and `coreweave` are supported.
-# `aws` supported for AWS. `gce` for GCE. `azure` for Azure AKS.
-# `magnum` for OpenStack Magnum, `clusterapi` for Cluster API.
-# `civo` for Civo Cloud.
-# `coreweave` for CoreWeave.
-cloudProvider: aws
-
-# clusterAPICloudConfigPath -- Path to kubeconfig for connecting to Cluster API Management Cluster, only used if `clusterAPIMode=kubeconfig-kubeconfig or incluster-kubeconfig`
-clusterAPICloudConfigPath: /etc/kubernetes/mgmt-kubeconfig
-
-# clusterAPIConfigMapsNamespace -- Namespace on the workload cluster to store Leader election and status configmaps
-clusterAPIConfigMapsNamespace: ""
-
-# clusterAPIKubeconfigSecret -- Secret containing kubeconfig for connecting to Cluster API managed workloadcluster
-# Required if `cloudProvider=clusterapi` and `clusterAPIMode=kubeconfig-kubeconfig,kubeconfig-incluster or incluster-kubeconfig`
-clusterAPIKubeconfigSecret: ""
-
-# clusterAPIMode --  Cluster API mode, see https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/cloudprovider/clusterapi/README.md#connecting-cluster-autoscaler-to-cluster-api-management-and-workload-clusters
-# Syntax: workloadClusterMode-ManagementClusterMode
-# for `kubeconfig-kubeconfig`, `incluster-kubeconfig` and `single-kubeconfig` you always must mount the external kubeconfig using either `extraVolumeSecrets` or `extraMounts` and `extraVolumes`
-# if you dont set `clusterAPIKubeconfigSecret`and thus use an in-cluster config or want to use a non capi generated kubeconfig you must do so for the workload kubeconfig as well
-clusterAPIMode: incluster-incluster  # incluster-incluster, incluster-kubeconfig, kubeconfig-incluster, kubeconfig-kubeconfig, single-kubeconfig
-
-# clusterAPIWorkloadKubeconfigPath -- Path to kubeconfig for connecting to Cluster API managed workloadcluster, only used if `clusterAPIMode=kubeconfig-kubeconfig or kubeconfig-incluster`
-clusterAPIWorkloadKubeconfigPath: /etc/kubernetes/value
 
 # containerSecurityContext -- [Security context for container](https://kubernetes.io/docs/tasks/configure-pod-container/security-context/)
 containerSecurityContext: {}
@@ -202,12 +101,11 @@ envFromSecret: ""
 ## Priorities Expander
 # expanderPriorities -- The expanderPriorities is used if `extraArgs.expander` contains `priority` and expanderPriorities is also set with the priorities.
 # If `extraArgs.expander` contains `priority`, then expanderPriorities is used to define cluster-autoscaler-priority-expander priorities.
-# See: https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/expander/priority/readme.md
+# See the Cluster Autoscaler priority-expander documentation for the required ConfigMap format.
 expanderPriorities: {}
 
 # extraArgs -- Additional container arguments.
-# Refer to https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-are-the-parameters-to-ca for the full list of cluster autoscaler
-# parameters and their default values.
+# Run `cluster-autoscaler --help` for the full list of parameters and default values.
 # Everything after the first _ will be ignored allowing the use of multi-string arguments.
 extraArgs:
   logtostderr: true
@@ -237,8 +135,7 @@ extraArgs:
   # balancing-ignore-label_2: second-label-to-ignore
 
 # customArgs -- Additional custom container arguments.
-# Refer to https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#what-are-the-parameters-to-ca for the full list of cluster autoscaler
-# parameters and their default values.
+# Run `cluster-autoscaler --help` for the full list of parameters and default values.
 # List of arguments as strings.
 customArgs: []
 
@@ -301,7 +198,7 @@ hostNetwork: false
 
 image:
   # image.repository -- Image repository
-  repository: registry.k8s.io/autoscaling/cluster-autoscaler
+  repository: REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler
   # image.tag -- Image tag
   tag: v1.35.0
   # image.pullPolicy -- Image pull policy
@@ -316,16 +213,6 @@ image:
 
 # kubeTargetVersionOverride -- Allow overriding the `.Capabilities.KubeVersion.GitVersion` check. Useful for `helm template` commands.
 kubeTargetVersionOverride: ""
-
-# kwokConfigMapName -- configmap for configuring kwok provider
-kwokConfigMapName: "kwok-provider-config"
-
-# magnumCABundlePath -- Path to the host's CA bundle, from `ca-file` in the cloud-config file.
-magnumCABundlePath: "/etc/kubernetes/ca-bundle.crt"
-
-# magnumClusterName -- Cluster name or ID in Magnum.
-# Required if `cloudProvider=magnum` and not setting `autoDiscovery.clusterName`.
-magnumClusterName: ""
 
 # nameOverride -- String to partially override `cluster-autoscaler.fullname` template (will maintain the release name)
 nameOverride: ""
@@ -377,7 +264,7 @@ rbac:
   # rbac.pspEnabled -- If `true`, creates and uses RBAC resources required in the cluster with [Pod Security Policies](https://kubernetes.io/docs/concepts/policy/pod-security-policy/) enabled.
   # Must be used with `rbac.create` set to `true`.
   pspEnabled: false
-  # rbac.clusterScoped -- if set to false will only provision RBAC to alter resources in the current namespace. Most useful for Cluster-API
+  # rbac.clusterScoped -- If set to false, provision RBAC only for the current namespace.
   clusterScoped: true
   # rbac.annotations -- Additional annotations to add to RBAC resources (Role/RoleBinding/ClusterRole/ClusterRoleBinding).
   annotations: {}
@@ -392,15 +279,6 @@ rbac:
     automountServiceAccountToken: true
   # rbac.additionalRules -- Additional rules for role/clusterrole
   additionalRules: []
-  # - apiGroups:
-  #   - infrastructure.cluster.x-k8s.io
-  #   resources:
-  #   - kubemarkmachinetemplates
-  #   verbs:
-  #   - get
-  #   - list
-  #   - watch
-
 
 # replicaCount -- Desired number of pods
 replicaCount: 1
@@ -495,7 +373,6 @@ updateStrategy: {}
   #   maxUnavailable: 0
   # type: RollingUpdate
 
-# vpa -- Configure a VerticalPodAutoscaler for the cluster-autoscaler Deployment.
 vpa:
   # vpa.enabled -- If true, creates a VerticalPodAutoscaler.
   enabled: false
@@ -506,5 +383,5 @@ vpa:
   # vpa.recommender -- Name of the VPA recommender that will provide recommendations for vertical scaling.
   recommender: default
 
-# secretKeyRefNameOverride -- Overrides the name of the Secret to use when loading the secretKeyRef for AWS, Azure and Civo env variables
+# secretKeyRefNameOverride -- Overrides the name of the Secret to use for Azure credentials.
 secretKeyRefNameOverride: ""
