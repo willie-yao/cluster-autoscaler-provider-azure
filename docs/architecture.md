@@ -34,13 +34,13 @@ add stopped-VM reuse or AKS deallocate-mode behavior.
 | [cloudprovider/azure/test](../cloudprovider/azure/test) | Separate E2E Go module, not entered by the root local checks |
 
 The root module pins extracted core to
-`sigs.k8s.io/cluster-autoscaler v0.0.0-20260903143621-3d1c7137cdac`, sourced
+`sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0`, sourced
 from `kubernetes-sigs/cluster-autoscaler`, not the old autoscaler monorepo.
 The CapacityBuffer, CapacityQuota and ProvisioningRequest APIs come from the
 published `k8s.io/autoscaler/cluster-autoscaler/apis` module at the version
 that core requires. Repository location and Go import identity are distinct.
 
-Kubernetes dependencies are pinned to `1.37.0-rc.1`. This source dependency pin
+Kubernetes dependencies are pinned to `1.37.0`. This source dependency pin
 does not establish cluster-version support. The E2E module retains its own
 dependency pins.
 
