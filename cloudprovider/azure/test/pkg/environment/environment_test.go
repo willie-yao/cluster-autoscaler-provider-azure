@@ -264,8 +264,10 @@ func TestCheckPhaseArguments(t *testing.T) {
 			"--max-nodes-total=55", "--max-node-provision-time=20m", "--scan-interval=10s",
 		}},
 		{name: "failed VM bounded scan", phase: "cse", valid: true,
-			args: []string{"--max-nodes-total=4", "--max-node-provision-time=3m", "--v=3"}},
-		{name: "failed VM without 3m timeout", phase: "cse",
+			args: []string{"--max-nodes-total=4", "--max-node-provision-time=15m", "--scan-interval=10s", "--v=3"}},
+		{name: "failed VM timeout too short", phase: "cse",
+			args: []string{"--max-nodes-total=4", "--max-node-provision-time=3m", "--scan-interval=10s", "--v=3"}},
+		{name: "failed VM without bounded scan", phase: "cse",
 			args: []string{"--max-nodes-total=4", "--max-node-provision-time=15m", "--v=3"}},
 		{name: "Spot eviction bound", phase: "spot-eviction", valid: true, args: []string{"--max-nodes-total=4"}},
 		{name: "missing VMSS bound", phase: "missing-vmss", valid: true, args: []string{"--max-nodes-total=4"}},
@@ -279,6 +281,9 @@ func TestCheckPhaseArguments(t *testing.T) {
 			c.Phase = tt.phase
 			if c.Phase == "local-storage" {
 				c.SkipLocalStorage = ptr.To(strings.Contains(strings.Join(tt.args, ","), "local-storage=true"))
+			}
+			if c.Phase == "cse" {
+				c.MaxNodeProvisionTime = "15m"
 			}
 			if err := CheckPhaseArguments(tt.args, c); (err == nil) != tt.valid {
 				t.Fatalf("CheckPhaseArguments = %v, valid=%t", err, tt.valid)
@@ -294,8 +299,8 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 		valid                    bool
 	}{
 		{name: "no phase", valid: true},
-		{name: "fast failed VM", phase: "cse", flag: "true", valid: true},
 		{name: "normal failed VM", phase: "cse", flag: "false", valid: true},
+		{name: "fast delete rejected", phase: "cse", flag: "true"},
 		{name: "wrong failed VM flag", phase: "cse", flag: "other"},
 		{name: "Spot five-second refresh", phase: "spot-eviction", value: "5", valid: true},
 		{name: "Spot stale refresh", phase: "spot-eviction", value: "30"},
@@ -305,7 +310,6 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 			c.Phase = tt.phase
 			variables := []corev1.EnvVar{}
 			if tt.phase == "cse" {
-				c.FastDelete = ptr.To(tt.flag == "true")
 				variables = append(variables, corev1.EnvVar{
 					Name: "AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING", Value: tt.flag,
 				}, corev1.EnvVar{Name: "AZURE_ENABLE_DETAILED_CSE_MESSAGE", Value: "false"})

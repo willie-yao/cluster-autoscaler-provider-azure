@@ -98,12 +98,18 @@ func TestConfigValidate(t *testing.T) {
 			c.Phase, c.SpotPool, c.SpotLabel, c.ScalePool = "spot", "spot-pool", "spot", "large-pool"
 		}},
 		{name: "scale pool without phase", change: func(c *Config) { c.ScalePool = "large-pool" }},
-		{name: "failed VM missing setting", change: func(c *Config) {
+		{name: "failed VM missing provision time", change: func(c *Config) {
 			c.Phase, c.FailurePool, c.FailureLabel = "cse", "failed-pool", "failed"
 		}},
-		{name: "failed VM binding on default", change: func(c *Config) { c.FastDelete = ptr.To(true) }},
+		{name: "failed VM short provision time", change: func(c *Config) {
+			c.Phase, c.FailurePool, c.FailureLabel, c.MaxNodeProvisionTime = "cse", "failed-pool", "failed", "3m"
+		}},
+		{name: "failed VM long provision time", change: func(c *Config) {
+			c.Phase, c.FailurePool, c.FailureLabel, c.MaxNodeProvisionTime = "cse", "failed-pool", "failed", "20m"
+		}},
+		{name: "failed VM time on default", change: func(c *Config) { c.MaxNodeProvisionTime = "15m" }},
 		{name: "failed VM pool overlaps main", change: func(c *Config) {
-			c.Phase, c.FailurePool, c.FailureLabel, c.FastDelete = "cse", "MAIN", "failed", ptr.To(false)
+			c.Phase, c.FailurePool, c.FailureLabel, c.MaxNodeProvisionTime = "cse", "MAIN", "failed", "15m"
 		}},
 		{name: "eviction not enabled", change: func(c *Config) {
 			c.Phase, c.SpotPool, c.SpotLabel = "spot-eviction", "spot-pool", "spot"
@@ -169,7 +175,7 @@ func TestConfigPhasePools(t *testing.T) {
 				c.ScalePool, c.ScaleLabel = "large-pool", "large"
 			}
 			if tt.phase == "cse" {
-				c.FailurePool, c.FailureLabel, c.FastDelete = "failed-pool", "failed", ptr.To(true)
+				c.FailurePool, c.FailureLabel, c.MaxNodeProvisionTime = "failed-pool", "failed", "15m"
 			}
 			if tt.phase == "missing-vmss" {
 				c.MissingPool, c.DeleteMissingPool = "missing-pool", true

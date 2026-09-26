@@ -143,7 +143,7 @@ The balance phase also requires
 in the other phases. Spot requires `spotPool` and `spotLabel`. Large
 requires `scalePool` and `scaleLabel`. Omit those fields outside their
 phase. A `cse` binding requires `failurePool`, `failureLabel`
-and explicit `fastDelete` true or false. A `spot-eviction`
+and `maxNodeProvisionTime: "15m"`. A `spot-eviction`
 binding requires the Spot pool fields and `evictSpot: true`.
 A `missing-vmss` binding requires `missingPool` and
 `deleteMissingPool: true`. A `local-storage` binding requires
@@ -310,30 +310,32 @@ extension that exits with a nonzero status.
 The operator must check that the extension has
 no secrets in public settings or logs. Mark the
 VMSS `autoscaler-e2e-failing-extension=<runID>`.
-Run two separate focused invocations from a
-physical `1/0/0` baseline. For the first,
-set `fastDelete: true` and literal controller
-environment variables
-`AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING=true`
+Run one focused invocation from a physical
+`1/0/0` baseline. Set `maxNodeProvisionTime: "15m"`
+in the binding and use the matching literal
+`--max-node-provision-time=15m` flag. Set the
+literal controller environment variables
+`AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING=false`
 and `AZURE_ENABLE_DETAILED_CSE_MESSAGE=false`.
-For the second, stop the old controller, wait
-until its Pod is gone, set `fastDelete: false`
-and change only the first variable to `false`.
-In both phases use `--max-node-provision-time=3m`,
+Also use `--scan-interval=10s`,
 `--max-nodes-total=4` and `--v=3`, and set
 `allow-cse-fixture: AZ-P1-012` in the marker.
-The test checks Azure's Failed instance state,
-Running power state, the controller's logged
-setting, unregistered-node deletion, physical
-removal and continued main-pool growth.
-It also checks that the controller never
-restarts or logs a panic. A powered-on failed
-VM does not take the fast create-error path
-even when the flag is true. The test does
-not prove faster deletion of a non-running VM
-or a backoff guarantee. If power state is
-not Running, the fixture is not qualified
-for the intended comparison.
+The longer provision time gives CustomScript
+time to fail before CA removes the unregistered
+VM. The test requires the same run-owned VM to
+remain Failed and Running across at least four
+separate observations and four logged controller
+scans without a restart or panic.
+It checks the controller's logged decision,
+unregistered-node deletion, physical VM and NIC
+removal, and independent main-pool growth.
+The reader retries a failed pool's Updating state
+for up to one minute before reporting an error.
+Other pools still require Succeeded state.
+A powered-on failed VM takes the unregistered
+cleanup path under either fast-delete setting.
+The case leaves fast delete off and does not
+test the faster create-error path or backoff.
 
 For `AZ-P1-013`, keep main `1/2`, zero `0/0`
 and a tagged Spot VMSS with `min=0`,
@@ -551,7 +553,7 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
 | `AZ-P1-010` | A VMSS tagged Spot grows from zero for a Ready Pod, then CA scales it down with a Node event and physical VM/Node/NIC deletion; an observed eviction is not a pass |
 | `AZ-P1-011` | A B1ms pool grows in five-node steps to 50 Ready nodes and Pods, then returns physically to zero with all VM/Node/NIC deletions checked |
-| `AZ-P1-012` | A powered-on VM with a failed CustomScript extension is removed as unregistered under both fast-delete settings while main still grows; no restart or panic |
+| `AZ-P1-012` | A failed, powered-on CustomScript VM stays present across controller scans without a restart or panic, then is removed as unregistered while main still grows |
 | `AZ-P1-013` | A run-owned simulated Spot eviction lowers the pool target, then a new VM and Ready Pod replace the original before physical return to zero |
 | `AZ-P1-014` | An empty discovered VMSS is removed by the operator; the same controller keeps reporting status and scales main for demand |
 | `AZ-P1-015` | An EmptyDir Pod blocks scale-down with local-storage protection enabled; when disabled, its worker is removed and the Pod reschedules |
@@ -595,7 +597,7 @@ registered specs. Registration is not execution.
 | `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
 | `AZ-P1-010` | Grow and remove a Spot VM without counting an observed eviction as a pass | [spot_test.go](suites/scalephase/spot_test.go) |
 | `AZ-P1-011` | Grow B1ms workers in steps of five to 50, then delete all of them | [large_test.go](suites/scalephase/large_test.go) |
-| `AZ-P1-012` | Handle a powered-on failed CustomScript VM with both fast-delete settings | [cse_test.go](suites/scalephase/cse_test.go) |
+| `AZ-P1-012` | Observe a powered-on failed CustomScript VM across controller scans, then check physical removal and main growth | [cse_test.go](suites/scalephase/cse_test.go) |
 | `AZ-P1-013` | Replace one exact evicted Spot VM and Pod | [spot_eviction_test.go](suites/scalephase/spot_eviction_test.go) |
 | `AZ-P1-014` | Keep main scaling after an empty discovered VMSS is removed | [missing_vmss_test.go](suites/scalephase/missing_vmss_test.go) |
 | `AZ-P1-015` | Compare local-storage scale-down protection enabled and disabled | [local_storage_test.go](suites/scalephase/local_storage_test.go) |

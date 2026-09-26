@@ -73,7 +73,7 @@ type Config struct {
 	ScaleLabel           string `json:"scaleLabel,omitempty"`
 	FailurePool          string `json:"failurePool,omitempty"`
 	FailureLabel         string `json:"failureLabel,omitempty"`
-	FastDelete           *bool  `json:"fastDelete,omitempty"`
+	MaxNodeProvisionTime string `json:"maxNodeProvisionTime,omitempty"`
 	EvictSpot            bool   `json:"evictSpot,omitempty"`
 	MissingPool          string `json:"missingPool,omitempty"`
 	DeleteMissingPool    bool   `json:"deleteMissingPool,omitempty"`
@@ -269,8 +269,8 @@ func (c Config) Validate() error {
 		if err := c.validateAdditionalPool(c.FailurePool, c.FailureLabel); err != nil {
 			return fmt.Errorf("failed VM phase: %w", err)
 		}
-		if c.FastDelete == nil {
-			return fmt.Errorf("fastDelete must state the failed VM phase setting")
+		if c.MaxNodeProvisionTime != "15m" {
+			return fmt.Errorf("failed VM phase requires maxNodeProvisionTime=15m")
 		}
 	case "missing-vmss":
 		if !c.DeleteMissingPool || c.MissingPool == "" ||
@@ -298,8 +298,8 @@ func (c Config) Validate() error {
 	if c.Phase != "large" && (c.ScalePool != "" || c.ScaleLabel != "") {
 		return fmt.Errorf("scale pool and label require the large phase")
 	}
-	if c.Phase != "cse" && (c.FailurePool != "" || c.FailureLabel != "" || c.FastDelete != nil) {
-		return fmt.Errorf("failed VM pool and setting require the cse phase")
+	if c.Phase != "cse" && (c.FailurePool != "" || c.FailureLabel != "" || c.MaxNodeProvisionTime != "") {
+		return fmt.Errorf("failed VM pool and provision time require the cse phase")
 	}
 	if c.Phase != "missing-vmss" && (c.MissingPool != "" || c.DeleteMissingPool) {
 		return fmt.Errorf("missing VMSS pool and deletion permission require the missing-vmss phase")

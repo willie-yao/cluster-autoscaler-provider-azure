@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/arm"
@@ -177,6 +178,70 @@ func TestAzureReadOptionalPoolBoundBeforeConvergence(t *testing.T) {
 			}
 			if _, err := (&azureCloud{config: c, sets: sets}).Read(context.Background()); !errors.Is(err, ErrBounds) || requests != 1 {
 				t.Fatalf("optional pool bound before convergence = %v, requests=%d", err, requests)
+			}
+		})
+	}
+}
+
+func TestSettledFailedPool(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase, pool, initial string
+		states                     []string
+		wantState                  string
+		wantTimeout                bool
+	}{
+		{name: "failed pool settles after two retries", phase: "cse", pool: "failed-pool", initial: "Updating",
+			states: []string{"Updating", "Updating", "Failed"}, wantState: "Failed"},
+		{name: "failed pool stays updating", phase: "cse", pool: "failed-pool", initial: "Updating",
+			states: []string{"Updating"}, wantTimeout: true},
+		{name: "ordinary pool is unchanged", phase: "cse", pool: "main", initial: "Updating", wantState: "Updating"},
+		{name: "default phase is unchanged", pool: "failed-pool", initial: "Updating", wantState: "Updating"},
+		{name: "already failed pool needs no retry", phase: "cse", pool: "failed-pool", initial: "Failed", wantState: "Failed"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.FailurePool = tt.phase, "failed-pool"
+			requests := 0
+			sets, err := armcompute.NewVirtualMachineScaleSetsClient(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					if request.Method != http.MethodGet || request.URL.Path != c.PoolID("failed-pool") || len(tt.states) == 0 {
+						return nil, fmt.Errorf("unexpected failed VM pool request")
+					}
+					state := tt.states[min(requests-1, len(tt.states)-1)]
+					body, err := json.Marshal(armcompute.VirtualMachineScaleSet{
+						Name: ptr.To("failed-pool"),
+						Properties: &armcompute.VirtualMachineScaleSetProperties{
+							ProvisioningState: ptr.To(state),
+						},
+					})
+					if err != nil {
+						return nil, err
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			set := &armcompute.VirtualMachineScaleSet{Name: ptr.To(tt.pool),
+				Properties: &armcompute.VirtualMachineScaleSetProperties{ProvisioningState: ptr.To(tt.initial)}}
+			got, err := (&azureCloud{config: c, sets: sets}).settledFailedPool(context.Background(), set,
+				2*time.Millisecond, 25*time.Millisecond)
+			if (err != nil) != tt.wantTimeout {
+				t.Fatalf("settledFailedPool error = %v, wantTimeout=%t", err, tt.wantTimeout)
+			}
+			if tt.wantTimeout {
+				if !strings.Contains(err.Error(), "remained Updating") || requests < 2 {
+					t.Fatalf("unbounded or unreported Updating state: error=%v, requests=%d", err, requests)
+				}
+			} else if got == nil || value(got.Properties.ProvisioningState) != tt.wantState {
+				t.Fatalf("settledFailedPool = %v, want state %s", got, tt.wantState)
+			}
+			if len(tt.states) == 0 && requests != 0 {
+				t.Fatalf("unexpected Azure read outside updating failed pool: %d", requests)
 			}
 		})
 	}

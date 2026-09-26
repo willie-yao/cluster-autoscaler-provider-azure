@@ -210,7 +210,8 @@ func CheckPhaseArguments(args []string, c Config) error {
 		required["scan-interval"] = "10s"
 	case "cse":
 		required["max-nodes-total"] = "4"
-		required["max-node-provision-time"] = "3m"
+		required["max-node-provision-time"] = c.MaxNodeProvisionTime
+		required["scan-interval"] = "10s"
 		required["v"] = "3"
 	case "spot-eviction":
 		required["max-nodes-total"] = "4"
@@ -244,7 +245,7 @@ func checkPhaseControllerEnv(variables []corev1.EnvVar, c Config) error {
 	required := map[string]string{}
 	switch c.Phase {
 	case "cse":
-		required["AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING"] = fmt.Sprint(*c.FastDelete)
+		required["AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING"] = "false"
 		required["AZURE_ENABLE_DETAILED_CSE_MESSAGE"] = "false"
 	case "spot-eviction":
 		required["AZURE_GET_VMSS_SIZE_REFRESH_PERIOD"] = "5"

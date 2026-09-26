@@ -30,6 +30,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // Cloud exposes only read operations to the test suite.
@@ -139,6 +140,16 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 			limit, ok := bounds[name]
 			if !ok {
 				return result, fmt.Errorf("unexpected VMSS %s in dedicated worker resource group", name)
+			}
+			set, err = a.settledFailedPool(ctx, set, 5*time.Second, time.Minute)
+			if err != nil {
+				return result, err
+			}
+			if set == nil || value(set.Name) != name || set.SKU == nil || set.SKU.Capacity == nil || set.Properties == nil {
+				return result, fmt.Errorf("incomplete VMSS %s after provisioning retry", name)
+			}
+			if err := checkCapacity(name, int(*set.SKU.Capacity), limit.ObservedMin, limit.Max); err != nil {
+				return result, err
 			}
 			if value(set.Tags[RunLabel]) != c.RunID ||
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
@@ -320,6 +331,26 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 		return result, err
 	}
 	return result, result.CheckBounds(c)
+}
+
+func (a *azureCloud) settledFailedPool(ctx context.Context, set *armcompute.VirtualMachineScaleSet, interval, timeout time.Duration) (*armcompute.VirtualMachineScaleSet, error) {
+	name := value(set.Name)
+	if a.config.Phase != "cse" || name != a.config.FailurePool || value(set.Properties.ProvisioningState) != "Updating" {
+		return set, nil
+	}
+	var settled *armcompute.VirtualMachineScaleSet
+	err := wait.PollUntilContextTimeout(ctx, interval, timeout, true, func(ctx context.Context) (bool, error) {
+		response, err := a.sets.Get(ctx, a.config.ResourceGroup, name, nil)
+		if err != nil {
+			return false, azureError("read updating failed VM pool", err)
+		}
+		settled = &response.VirtualMachineScaleSet
+		return settled.Properties != nil && value(settled.Properties.ProvisioningState) != "Updating", nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("VMSS %s remained Updating after %s: %w", name, timeout, err)
+	}
+	return settled, nil
 }
 
 func checkSpotPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
