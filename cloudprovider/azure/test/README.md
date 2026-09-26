@@ -322,20 +322,22 @@ Also use `--scan-interval=10s`,
 `allow-cse-fixture: AZ-P1-012` in the marker.
 The longer provision time gives CustomScript
 time to fail before CA removes the unregistered
-VM. The test requires the same run-owned VM to
-remain Failed and Running across at least four
-separate observations and four logged controller
-scans without a restart or panic.
-It checks the controller's logged decision,
-unregistered-node deletion, physical VM and NIC
-removal, and independent main-pool growth.
-The reader retries a failed pool's Updating state
+VM. Azure reported a VM as Succeeded and Running
+while its CustomScript extension instance view
+reported failure. The test requires the same
+run-owned VM to stay in that state across at least
+four separate observations and four logged
+controller scans without a restart or panic.
+It checks unregistered-node deletion, physical
+VM and NIC removal, and independent main-pool
+growth. The reader retries this pool's Updating state
 for up to one minute before reporting an error.
 Other pools still require Succeeded state.
-A powered-on failed VM takes the unregistered
-cleanup path under either fast-delete setting.
-The case leaves fast delete off and does not
-test the faster create-error path or backoff.
+The provider classifies the VM by its Succeeded
+state, so CA uses the unregistered cleanup path.
+The provider's failed-provisioning and fast-delete
+paths are not exercised. The case leaves fast
+delete off, and it does not test backoff.
 
 For `AZ-P1-013`, keep main `1/2`, zero `0/0`
 and a tagged Spot VMSS with `min=0`,
@@ -553,7 +555,7 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
 | `AZ-P1-010` | A VMSS tagged Spot grows from zero for a Ready Pod, then CA scales it down with a Node event and physical VM/Node/NIC deletion; an observed eviction is not a pass |
 | `AZ-P1-011` | A B1ms pool grows in five-node steps to 50 Ready nodes and Pods, then returns physically to zero with all VM/Node/NIC deletions checked |
-| `AZ-P1-012` | A failed, powered-on CustomScript VM stays present across controller scans without a restart or panic, then is removed as unregistered while main still grows |
+| `AZ-P1-012` | A Running VM with a failed CustomScript extension stays present across controller scans without a restart or panic, then is removed as unregistered while main still grows |
 | `AZ-P1-013` | A run-owned simulated Spot eviction lowers the pool target, then a new VM and Ready Pod replace the original before physical return to zero |
 | `AZ-P1-014` | An empty discovered VMSS is removed by the operator; the same controller keeps reporting status and scales main for demand |
 | `AZ-P1-015` | An EmptyDir Pod blocks scale-down with local-storage protection enabled; when disabled, its worker is removed and the Pod reschedules |
@@ -597,7 +599,7 @@ registered specs. Registration is not execution.
 | `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
 | `AZ-P1-010` | Grow and remove a Spot VM without counting an observed eviction as a pass | [spot_test.go](suites/scalephase/spot_test.go) |
 | `AZ-P1-011` | Grow B1ms workers in steps of five to 50, then delete all of them | [large_test.go](suites/scalephase/large_test.go) |
-| `AZ-P1-012` | Observe a powered-on failed CustomScript VM across controller scans, then check physical removal and main growth | [cse_test.go](suites/scalephase/cse_test.go) |
+| `AZ-P1-012` | Observe a Running VM with a failed CustomScript extension across scans, then check physical removal and main growth | [cse_test.go](suites/scalephase/cse_test.go) |
 | `AZ-P1-013` | Replace one exact evicted Spot VM and Pod | [spot_eviction_test.go](suites/scalephase/spot_eviction_test.go) |
 | `AZ-P1-014` | Keep main scaling after an empty discovered VMSS is removed | [missing_vmss_test.go](suites/scalephase/missing_vmss_test.go) |
 | `AZ-P1-015` | Compare local-storage scale-down protection enabled and disabled | [local_storage_test.go](suites/scalephase/local_storage_test.go) |

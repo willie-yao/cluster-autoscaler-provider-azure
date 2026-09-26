@@ -33,11 +33,12 @@ import (
 )
 
 var _ = Describe("Failed CustomScript extension", Serial, func() {
-	It("AZ-P1-012 removes an unregistered failed VM while main still grows", Label("AZ-P1-012", "cse", "delete"), func(ctx SpecContext) {
+	It("AZ-P1-012 removes an unregistered VM with a failed extension while main still grows", Label("AZ-P1-012", "cse", "delete"), func(ctx SpecContext) {
 		f := setup(ctx, "cse", "AZ-P1-012")
 		c := f.env.Config
 		baseline := f.stable(ctx, map[string]int{c.MainPool: 1, c.ZeroPool: 0, c.FailurePool: 0})
 		Expect(f.env.CheckWorkerIsolation(ctx, baseline, f.namespace.Name)).To(Succeed())
+		extensionName := baseline.Pools[c.FailurePool].FailedExtensionName
 		witness, err := readControllerWitness(ctx, f.env, false)
 		Expect(err).NotTo(HaveOccurred())
 		started := time.Now().Add(-time.Second)
@@ -63,28 +64,31 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 				StopTrying("controller logged a panic while a VM extension failed").Wrap(err).Now()
 			}
 			if len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.FailurePool))) != 0 {
-				StopTrying("failed VM unexpectedly registered as a Node").Now()
+				StopTrying("failed-extension VM unexpectedly registered as a Node").Now()
+			}
+			if snapshot.Pools[c.FailurePool].FailedExtensionName != extensionName {
+				StopTrying("failed CustomScript extension name changed during the case").Now()
 			}
 			for _, instance := range snapshot.Pools[c.FailurePool].Instances {
 				seen[instance.VMID] = instance
-				if instance.ProvisioningState != "Failed" {
-					continue
-				}
-				running, err := f.env.InstanceRunning(ctx, c.FailurePool, instance.ID)
+				failedAndRunning, err := f.env.FailedCustomScriptRunning(ctx, c.FailurePool, instance.ID, extensionName)
 				if err != nil {
 					return err
 				}
-				if !running {
-					return fmt.Errorf("waiting for failed VM to remain powered on for the unregistered cleanup path")
+				if !failedAndRunning {
+					continue
+				}
+				if instance.ProvisioningState != "Succeeded" {
+					return fmt.Errorf("VM with failed extension must report Succeeded for the unregistered cleanup path")
 				}
 				failed = instance
 			}
 			if failed.VMID == "" {
-				return fmt.Errorf("waiting for a powered-on VM with failed extension provisioning")
+				return fmt.Errorf("waiting for a Running VM with a failed CustomScript extension")
 			}
 			return nil
 		}, 18*time.Minute, pollInterval).Should(Succeed())
-		AddReportEntry("failed-vm-identity", failed)
+		AddReportEntry("failed-extension-vm", failed)
 
 		observedAt := time.Now()
 		samples := 0
@@ -100,28 +104,29 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 				return err
 			}
 			if len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.FailurePool))) != 0 {
-				return fmt.Errorf("failed VM registered as a Node")
+				return fmt.Errorf("VM with failed extension registered as a Node")
 			}
 			instance, present := snapshot.Pools[c.FailurePool].Instances[failed.ID]
-			if !present || instance.VMID != failed.VMID || instance.ProvisioningState != "Failed" {
-				return fmt.Errorf("failed VM did not remain present across controller scans")
+			if !present || instance.VMID != failed.VMID || instance.ProvisioningState != "Succeeded" ||
+				snapshot.Pools[c.FailurePool].FailedExtensionName != extensionName {
+				return fmt.Errorf("VM with failed extension did not stay present and Succeeded across controller scans")
 			}
-			running, err := f.env.InstanceRunning(ctx, c.FailurePool, failed.ID)
+			failedAndRunning, err := f.env.FailedCustomScriptRunning(ctx, c.FailurePool, failed.ID, extensionName)
 			if err != nil {
 				return err
 			}
-			if !running {
-				return fmt.Errorf("failed VM stopped while the controller was observed")
+			if !failedAndRunning {
+				return fmt.Errorf("VM did not stay Running with a failed CustomScript extension")
 			}
 			samples++
 			return nil
 		}, 75*time.Second, pollInterval).Should(Succeed())
-		Expect(samples).To(BeNumerically(">=", 4), "the failed VM needs at least four separate observations")
+		Expect(samples).To(BeNumerically(">=", 4), "the VM with a failed extension needs at least four separate observations")
 		logs, err := f.env.ReadControllerLogsSince(ctx, observedAt)
 		Expect(err).NotTo(HaveOccurred())
 		scans := controllerScans(logs)
-		Expect(scans).To(BeNumerically(">=", 4), "the controller must complete at least four scans while the failed VM remains present")
-		AddReportEntry("failed-vm-observation", fmt.Sprintf("%d VM observations and %d controller scans without a restart or panic", samples, scans))
+		Expect(scans).To(BeNumerically(">=", 4), "the controller must scan four times while the failed-extension VM stays present")
+		AddReportEntry("failed-extension-observation", fmt.Sprintf("%d VM observations and %d controller scans without a restart or panic", samples, scans))
 
 		Eventually(ctx, func() error {
 			snapshot, err := f.active(ctx)
@@ -158,7 +163,7 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 				seen[instance.VMID] = instance
 			}
 			if len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.FailurePool))) != 0 {
-				StopTrying("failed VM unexpectedly registered as a Node").Now()
+				StopTrying("VM with failed extension unexpectedly registered as a Node").Now()
 			}
 			var events corev1.EventList
 			if err := f.env.K8s.List(ctx, &events, client.InNamespace(c.AutoscalerNamespace)); err != nil {
@@ -169,15 +174,8 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 			}
 			return f.env.DeletedGeneration(ctx, failed, snapshot, c.FailurePool)
 		}, 22*time.Minute, pollInterval).Should(Succeed())
-		Eventually(ctx, func() error {
-			logs, err := f.env.ReadControllerLogsSince(ctx, started)
-			if err != nil {
-				return err
-			}
-			return failedPowerLog(logs, failed.ID)
-		}, 2*time.Minute, pollInterval).Should(Succeed())
 		Expect(noControllerPanic(ctx, f.env, started)).To(Succeed())
-		AddReportEntry("failed-vm-path", "the powered-on failed VM was treated as unregistered, not fast-deleted for a create error")
+		AddReportEntry("failed-extension-path", "the Running VM reported Succeeded and was removed as unregistered, so fast delete was not exercised")
 
 		Expect(f.env.K8s.Delete(ctx, failureDemand)).To(Succeed())
 		Eventually(ctx, func() error {
@@ -189,7 +187,7 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 				seen[instance.VMID] = instance
 			}
 			if len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.FailurePool))) != 0 {
-				StopTrying("failed VM registered after failure demand was removed").Now()
+				StopTrying("VM with failed extension registered after demand was removed").Now()
 			}
 			return workloadPodsGone(ctx, f, failureDemand)
 		}, 4*time.Minute, pollInterval).Should(Succeed())
@@ -199,13 +197,13 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 				return err
 			}
 			if err := sameController(ctx, f.env, witness, false); err != nil {
-				StopTrying("controller restarted during failed VM cleanup").Wrap(err).Now()
+				StopTrying("controller restarted during failed-extension cleanup").Wrap(err).Now()
 			}
 			for _, instance := range snapshot.Pools[c.FailurePool].Instances {
 				seen[instance.VMID] = instance
 			}
 			if snapshot.Pools[c.FailurePool].Capacity != 0 || len(snapshot.Pools[c.FailurePool].Instances) != 0 {
-				return fmt.Errorf("failed VM pool has not returned to zero")
+				return fmt.Errorf("failed-extension pool has not returned to zero")
 			}
 			for _, instance := range seen {
 				if err := f.env.DeletedGeneration(ctx, instance, snapshot, c.FailurePool); err != nil {
@@ -232,7 +230,7 @@ var _ = Describe("Failed CustomScript extension", Serial, func() {
 			return f.env.Deleted(ctx, mainGrown, snapshot, c.MainPool, 1)
 		}, waitTimeout, pollInterval).Should(Succeed())
 		Expect(noControllerPanic(ctx, f.env, started)).To(Succeed())
-		AddReportEntry("failed-vm-result", fmt.Sprintf("%d captured failed VMs and NICs were removed without restarting CA; main scaled independently", len(seen)))
+		AddReportEntry("failed-extension-result", fmt.Sprintf("%d captured VMs with failed extensions and their NICs were removed without restarting CA; main scaled independently", len(seen)))
 	}, NodeTimeout(90*time.Minute))
 })
 
@@ -258,39 +256,5 @@ func TestControllerScans(t *testing.T) {
 		"iterationId=\"\" work\nother work"
 	if got := controllerScans(logs); got != 4 {
 		t.Fatalf("controllerScans = %d, want four unique scans", got)
-	}
-}
-
-func failedPowerLog(logs, instanceID string) error {
-	for _, line := range strings.Split(logs, "\n") {
-		if strings.Contains(strings.ToLower(line), strings.ToLower(instanceID)) &&
-			strings.Contains(line, "reports failed provisioning state with power state: PowerState/running") &&
-			strings.Contains(line, "eligible for fast delete: false") {
-			return nil
-		}
-	}
-	return fmt.Errorf("controller did not record a powered-on failed VM with fast delete disabled")
-}
-
-func TestFailedPowerLog(t *testing.T) {
-	t.Parallel()
-	for _, tt := range []struct {
-		name, log string
-		valid     bool
-	}{
-		{name: "powered on without fast setting", valid: true,
-			log: "VM /subscriptions/owned/vm/0 reports failed provisioning state with power state: PowerState/running, eligible for fast delete: false"},
-		{name: "stopped VM",
-			log: "VM /subscriptions/owned/vm/0 reports failed provisioning state with power state: PowerState/stopped, eligible for fast delete: false"},
-		{name: "wrong setting",
-			log: "VM /subscriptions/owned/vm/0 reports failed provisioning state with power state: PowerState/running, eligible for fast delete: true"},
-		{name: "different failed VM",
-			log: "VM /subscriptions/owned/vm/1 reports failed provisioning state with power state: PowerState/running, eligible for fast delete: false"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			if err := failedPowerLog(tt.log, "/subscriptions/owned/vm/0"); (err == nil) != tt.valid {
-				t.Fatalf("failedPowerLog = %v, valid=%t", err, tt.valid)
-			}
-		})
 	}
 }

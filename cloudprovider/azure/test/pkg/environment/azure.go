@@ -201,9 +201,11 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 				}
 			}
 			if c.Phase == "cse" && name == c.FailurePool {
-				if err := checkFailedExtensionPool(set, c); err != nil {
+				extensionName, err := checkFailedExtensionPool(set, c)
+				if err != nil {
 					return result, err
 				}
+				pool.FailedExtensionName = extensionName
 			}
 			if c.Phase == "large" && name == c.ScalePool {
 				if value(set.SKU.Name) != "Standard_B1ms" || len(set.Zones) != 1 || value(set.Zones[0]) != "1" ||
@@ -367,15 +369,16 @@ func checkSpotPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
 	return nil
 }
 
-func checkFailedExtensionPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
+func checkFailedExtensionPool(set *armcompute.VirtualMachineScaleSet, c Config) (string, error) {
 	if value(set.SKU.Name) != "Standard_D2s_v5" || len(set.Zones) != 1 || value(set.Zones[0]) != "1" ||
 		value(set.Tags["autoscaler-e2e-failing-extension"]) != c.RunID ||
 		value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.FailureLabel ||
 		set.Properties.VirtualMachineProfile == nil ||
 		set.Properties.VirtualMachineProfile.ExtensionProfile == nil {
-		return fmt.Errorf("failed VM pool needs a run-owned failing CustomScript extension and node-template label")
+		return "", fmt.Errorf("failed VM pool needs a run-owned failing CustomScript extension and node-template label")
 	}
 	found := 0
+	name := ""
 	for _, extension := range set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions {
 		if extension == nil || extension.Properties == nil ||
 			value(extension.Properties.Publisher) != "Microsoft.Azure.Extensions" ||
@@ -383,14 +386,15 @@ func checkFailedExtensionPool(set *armcompute.VirtualMachineScaleSet, c Config) 
 			continue
 		}
 		if extension.Properties.SuppressFailures != nil && *extension.Properties.SuppressFailures {
-			return fmt.Errorf("failed VM pool must not suppress CustomScript extension failures")
+			return "", fmt.Errorf("failed VM pool must not suppress CustomScript extension failures")
 		}
+		name = value(extension.Name)
 		found++
 	}
-	if found != 1 {
-		return fmt.Errorf("failed VM pool needs exactly one CustomScript extension")
+	if found != 1 || name == "" {
+		return "", fmt.Errorf("failed VM pool needs exactly one named CustomScript extension")
 	}
-	return nil
+	return name, nil
 }
 
 func checkPhasePeakEnvelope(c Config, poolCores map[string]int, controlPlaneCores int) error {
@@ -481,24 +485,75 @@ func (e *Environment) InstanceRunning(ctx context.Context, pool, id string) (boo
 	return cloud.instanceRunning(ctx, pool, id)
 }
 
-func (a *azureCloud) instanceRunning(ctx context.Context, pool, id string) (bool, error) {
+// FailedCustomScriptRunning checks the authorized VM's power and extension instance view.
+func (e *Environment) FailedCustomScriptRunning(ctx context.Context, pool, id, extensionName string) (bool, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok {
+		return false, fmt.Errorf("Azure instance-view reader is unavailable")
+	}
+	return cloud.failedCustomScriptRunning(ctx, pool, id, extensionName)
+}
+
+func (a *azureCloud) instanceView(ctx context.Context, pool, id string) (armcompute.VirtualMachineScaleSetVMInstanceView, error) {
 	if _, ok := a.config.Pools()[pool]; !ok {
-		return false, fmt.Errorf("VMSS instance belongs to an unauthorized pool")
+		return armcompute.VirtualMachineScaleSetVMInstanceView{}, fmt.Errorf("VMSS instance belongs to an unauthorized pool")
 	}
 	prefix := normalizeID(a.config.PoolID(pool)) + "/virtualmachines/"
 	normalized := normalizeID(id)
 	if !strings.HasPrefix(normalized, prefix) || strings.ContainsAny(strings.TrimPrefix(normalized, prefix), "/?#") ||
 		len(normalized) == len(prefix) {
-		return false, fmt.Errorf("VMSS instance ID is outside the authorized pool")
+		return armcompute.VirtualMachineScaleSetVMInstanceView{}, fmt.Errorf("VMSS instance ID is outside the authorized pool")
 	}
 	instanceID := strings.TrimPrefix(normalized, prefix)
 	view, err := a.vms.GetInstanceView(ctx, a.config.ResourceGroup, pool, instanceID, nil)
 	if err != nil {
-		return false, azureError("read VMSS instance power state", err)
+		return armcompute.VirtualMachineScaleSetVMInstanceView{}, azureError("read VMSS instance power state", err)
+	}
+	return view.VirtualMachineScaleSetVMInstanceView, nil
+}
+
+func (a *azureCloud) instanceRunning(ctx context.Context, pool, id string) (bool, error) {
+	view, err := a.instanceView(ctx, pool, id)
+	if err != nil {
+		return false, err
 	}
 	for _, status := range view.Statuses {
 		if status != nil && strings.EqualFold(value(status.Code), "PowerState/running") {
 			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (a *azureCloud) failedCustomScriptRunning(ctx context.Context, pool, id, extensionName string) (bool, error) {
+	if a.config.Phase != "cse" || pool != a.config.FailurePool || extensionName == "" {
+		return false, fmt.Errorf("failed CustomScript check requires the authorized failed VM pool")
+	}
+	view, err := a.instanceView(ctx, pool, id)
+	if err != nil {
+		return false, err
+	}
+	running := false
+	for _, status := range view.Statuses {
+		if status != nil && strings.EqualFold(value(status.Code), "PowerState/running") {
+			running = true
+		}
+	}
+	if !running {
+		return false, nil
+	}
+	for _, extension := range view.Extensions {
+		if extension == nil || !strings.EqualFold(value(extension.Name), extensionName) {
+			continue
+		}
+		for _, status := range extension.Statuses {
+			if status == nil {
+				continue
+			}
+			code := strings.ToLower(value(status.Code))
+			if code == "provisioningstate/failed" || strings.HasPrefix(code, "provisioningstate/failed/") {
+				return true, nil
+			}
 		}
 	}
 	return false, nil

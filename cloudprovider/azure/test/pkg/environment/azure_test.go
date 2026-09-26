@@ -321,6 +321,9 @@ func TestCheckFailedExtensionPool(t *testing.T) {
 			set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions = append(
 				set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions, ext)
 		}},
+		{name: "missing CustomScript resource name", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions[0].Name = nil
+		}},
 		{name: "wrong instance SKU", edit: func(set *armcompute.VirtualMachineScaleSet) {
 			set.SKU.Name = ptr.To("Standard_B1ms")
 		}},
@@ -337,6 +340,7 @@ func TestCheckFailedExtensionPool(t *testing.T) {
 				},
 				Properties: &armcompute.VirtualMachineScaleSetProperties{VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{
 					ExtensionProfile: &armcompute.VirtualMachineScaleSetExtensionProfile{Extensions: []*armcompute.VirtualMachineScaleSetExtension{{
+						Name: ptr.To("failed-custom-script"),
 						Properties: &armcompute.VirtualMachineScaleSetExtensionProperties{
 							Publisher: ptr.To("Microsoft.Azure.Extensions"), Type: ptr.To("CustomScript"),
 						},
@@ -346,8 +350,9 @@ func TestCheckFailedExtensionPool(t *testing.T) {
 			if tt.edit != nil {
 				tt.edit(set)
 			}
-			if err := checkFailedExtensionPool(set, c); (err == nil) != tt.valid {
-				t.Fatalf("failed extension pool error=%v, valid=%t", err, tt.valid)
+			name, err := checkFailedExtensionPool(set, c)
+			if (err == nil) != tt.valid || tt.valid && name != "failed-custom-script" {
+				t.Fatalf("failed extension pool name=%q error=%v, valid=%t", name, err, tt.valid)
 			}
 		})
 	}
@@ -687,6 +692,82 @@ func TestAzureInstanceRunning(t *testing.T) {
 			}
 			if _, err := cloud.instanceRunning(context.Background(), c.ZeroPool, c.PoolID(c.MainPool)+"/virtualMachines/0"); err == nil || requests != 1 {
 				t.Fatal("accepted an instance in another pool")
+			}
+		})
+	}
+}
+
+func TestAzureFailedCustomScriptRunning(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, power, extension, expectedExtension, code string
+		failed                                          bool
+	}{
+		{name: "running VM with failed extension", power: "PowerState/running", extension: "CustomScript",
+			code: "ProvisioningState/failed/0", failed: true},
+		{name: "non-default extension resource name", power: "PowerState/running", extension: "fail-bootstrap",
+			expectedExtension: "fail-bootstrap", code: "ProvisioningState/failed/0", failed: true},
+		{name: "failed status without suffix", power: "PowerState/running", extension: "CustomScript",
+			code: "ProvisioningState/failed", failed: true},
+		{name: "stopped VM with failed extension", power: "PowerState/stopped", extension: "CustomScript",
+			code: "ProvisioningState/failed/0"},
+		{name: "running VM with successful extension", power: "PowerState/running", extension: "CustomScript",
+			code: "ProvisioningState/succeeded"},
+		{name: "different failed extension", power: "PowerState/running", extension: "AzureMonitorLinuxAgent",
+			code: "ProvisioningState/failed/0"},
+		{name: "missing extension status", power: "PowerState/running", extension: "CustomScript"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.FailurePool, c.FailureLabel, c.MaxNodeProvisionTime = "cse", "failed-pool", "failed", "15m"
+			path := c.PoolID(c.FailurePool) + "/virtualMachines/0/instanceView"
+			view := armcompute.VirtualMachineScaleSetVMInstanceView{
+				Statuses: []*armcompute.InstanceViewStatus{
+					{Code: ptr.To("ProvisioningState/succeeded")},
+					{Code: ptr.To(tt.power)},
+				},
+				Extensions: []*armcompute.VirtualMachineExtensionInstanceView{{
+					Name: ptr.To(tt.extension), Statuses: []*armcompute.InstanceViewStatus{{Code: ptr.To(tt.code)}},
+				}},
+			}
+			body, err := json.Marshal(view)
+			if err != nil {
+				t.Fatal(err)
+			}
+			requests := 0
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					requests++
+					if request.Method != http.MethodGet || !strings.EqualFold(request.URL.Path, path) {
+						t.Fatalf("unexpected instance view request %s %s", request.Method, request.URL.Path)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, vms: factory.NewVirtualMachineScaleSetVMsClient()}
+			id := c.PoolID(c.FailurePool) + "/virtualMachines/0"
+			expectedExtension := tt.expectedExtension
+			if expectedExtension == "" {
+				expectedExtension = "CustomScript"
+			}
+			got, err := cloud.failedCustomScriptRunning(context.Background(), c.FailurePool, id, expectedExtension)
+			if err != nil || got != tt.failed || requests != 1 {
+				t.Fatalf("failed extension with running VM=%t, error=%v, requests=%d, want=%t",
+					got, err, requests, tt.failed)
+			}
+			if _, err := cloud.failedCustomScriptRunning(context.Background(), c.MainPool, c.PoolID(c.MainPool)+"/virtualMachines/0", expectedExtension); err == nil {
+				t.Fatal("accepted a VM outside the failed-extension pool")
+			}
+			if _, err := cloud.failedCustomScriptRunning(context.Background(), c.FailurePool, c.PoolID(c.MainPool)+"/virtualMachines/0", expectedExtension); err == nil {
+				t.Fatal("accepted an instance ID outside the authorized pool")
+			}
+			cloud.config.Phase = ""
+			if _, err := cloud.failedCustomScriptRunning(context.Background(), c.FailurePool, id, expectedExtension); err == nil || requests != 1 {
+				t.Fatal("accepted extension check outside the CSE phase")
 			}
 		})
 	}
