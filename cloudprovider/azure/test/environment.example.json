@@ -28,5 +28,12 @@
   "spotPool": "",
   "spotLabel": "",
   "scalePool": "",
-  "scaleLabel": ""
+  "scaleLabel": "",
+  "failurePool": "",
+  "failureLabel": "",
+  "fastDelete": null,
+  "evictSpot": false,
+  "missingPool": "",
+  "deleteMissingPool": false,
+  "skipLocalStorage": null
 }

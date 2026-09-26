@@ -111,6 +111,14 @@ func (e *Environment) WorkloadState(ctx context.Context, namespace, name, pool s
 
 // DemandFits validates CPU geometry on every currently registered pool worker.
 func (e *Environment) DemandFits(ctx context.Context, snapshot Snapshot, pool string) error {
+	return e.DemandFitsWithHeadroom(ctx, snapshot, pool, 0)
+}
+
+// DemandFitsWithHeadroom reserves extra CPU for small Pods placed beside the growth Pods.
+func (e *Environment) DemandFitsWithHeadroom(ctx context.Context, snapshot Snapshot, pool string, extraMilliCPU int64) error {
+	if extraMilliCPU < 0 {
+		return fmt.Errorf("extra CPU must not be negative")
+	}
 	var pods corev1.PodList
 	if err := e.K8s.List(ctx, &pods); err != nil {
 		return err
@@ -123,6 +131,17 @@ func (e *Environment) DemandFits(ctx context.Context, snapshot Snapshot, pool st
 	for _, node := range nodes {
 		if err := ValidateDemand(node, pods.Items, cpu.MilliValue()); err != nil {
 			return err
+		}
+		if extraMilliCPU > 0 {
+			occupied, err := NodeRequests(node, pods.Items)
+			if err != nil {
+				return err
+			}
+			free := node.Status.Allocatable.Cpu().MilliValue() - occupied.Cpu().MilliValue()
+			if free < cpu.MilliValue()+extraMilliCPU {
+				return fmt.Errorf("Node %s has %dm free CPU, need %dm for growth and local storage fixtures",
+					node.Name, free, cpu.MilliValue()+extraMilliCPU)
+			}
 		}
 	}
 	return nil

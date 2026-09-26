@@ -71,6 +71,13 @@ type Config struct {
 	SpotLabel            string `json:"spotLabel,omitempty"`
 	ScalePool            string `json:"scalePool,omitempty"`
 	ScaleLabel           string `json:"scaleLabel,omitempty"`
+	FailurePool          string `json:"failurePool,omitempty"`
+	FailureLabel         string `json:"failureLabel,omitempty"`
+	FastDelete           *bool  `json:"fastDelete,omitempty"`
+	EvictSpot            bool   `json:"evictSpot,omitempty"`
+	MissingPool          string `json:"missingPool,omitempty"`
+	DeleteMissingPool    bool   `json:"deleteMissingPool,omitempty"`
+	SkipLocalStorage     *bool  `json:"skipLocalStorage,omitempty"`
 }
 
 // PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
@@ -95,12 +102,30 @@ func (c Config) Pools() map[string]PoolBounds {
 	if c.Phase == "minimum" {
 		main.TagMin = 2
 	}
-	if c.Phase == "spot" {
+	if c.Phase == "spot" || c.Phase == "spot-eviction" {
 		zero.Max = 0
 		return map[string]PoolBounds{
 			c.MainPool: main, c.ZeroPool: zero,
 			c.SpotPool: {Max: 1, Label: c.SpotLabel},
 		}
+	}
+	if c.Phase == "cse" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.FailurePool: {Max: 1, Label: c.FailureLabel},
+		}
+	}
+	if c.Phase == "missing-vmss" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.MissingPool: {Max: 0},
+		}
+	}
+	if c.Phase == "local-storage" {
+		zero.Max = 0
+		return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
 	}
 	if c.Phase == "large" {
 		main.Max = 1
@@ -119,8 +144,14 @@ func (c Config) PoolNames() []string {
 	if c.Phase == "balance" {
 		names = append(names, c.BalancePoolA, c.BalancePoolB)
 	}
-	if c.Phase == "spot" {
+	if c.Phase == "spot" || c.Phase == "spot-eviction" {
 		names = append(names, c.SpotPool)
+	}
+	if c.Phase == "cse" {
+		names = append(names, c.FailurePool)
+	}
+	if c.Phase == "missing-vmss" {
+		names = append(names, c.MissingPool)
 	}
 	if c.Phase == "large" {
 		names = append(names, c.ScalePool)
@@ -227,9 +258,29 @@ func (c Config) Validate() error {
 			seen[strings.ToLower(name)] = true
 		}
 	case "no-join", "minimum":
-	case "spot":
+	case "spot", "spot-eviction":
 		if err := c.validateAdditionalPool(c.SpotPool, c.SpotLabel); err != nil {
 			return fmt.Errorf("spot phase: %w", err)
+		}
+		if (c.Phase == "spot-eviction") != c.EvictSpot {
+			return fmt.Errorf("evictSpot must be enabled only for the spot-eviction phase")
+		}
+	case "cse":
+		if err := c.validateAdditionalPool(c.FailurePool, c.FailureLabel); err != nil {
+			return fmt.Errorf("failed VM phase: %w", err)
+		}
+		if c.FastDelete == nil {
+			return fmt.Errorf("fastDelete must state the failed VM phase setting")
+		}
+	case "missing-vmss":
+		if !c.DeleteMissingPool || c.MissingPool == "" ||
+			!regexp.MustCompile(`^[a-zA-Z0-9_.()-]+$`).MatchString(c.MissingPool) ||
+			strings.EqualFold(c.MissingPool, c.MainPool) || strings.EqualFold(c.MissingPool, c.ZeroPool) {
+			return fmt.Errorf("missing-vmss phase requires one distinct pool and explicit deletion permission")
+		}
+	case "local-storage":
+		if c.SkipLocalStorage == nil {
+			return fmt.Errorf("skipLocalStorage must state the controller setting")
 		}
 	case "large":
 		if err := c.validateAdditionalPool(c.ScalePool, c.ScaleLabel); err != nil {
@@ -241,11 +292,20 @@ func (c Config) Validate() error {
 	if c.Phase != "balance" && (c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "") {
 		return fmt.Errorf("balance pools and label require the balance phase")
 	}
-	if c.Phase != "spot" && (c.SpotPool != "" || c.SpotLabel != "") {
-		return fmt.Errorf("Spot pool and label require the spot phase")
+	if c.Phase != "spot" && c.Phase != "spot-eviction" && (c.SpotPool != "" || c.SpotLabel != "" || c.EvictSpot) {
+		return fmt.Errorf("Spot pool, label and eviction permission require a Spot phase")
 	}
 	if c.Phase != "large" && (c.ScalePool != "" || c.ScaleLabel != "") {
 		return fmt.Errorf("scale pool and label require the large phase")
+	}
+	if c.Phase != "cse" && (c.FailurePool != "" || c.FailureLabel != "" || c.FastDelete != nil) {
+		return fmt.Errorf("failed VM pool and setting require the cse phase")
+	}
+	if c.Phase != "missing-vmss" && (c.MissingPool != "" || c.DeleteMissingPool) {
+		return fmt.Errorf("missing VMSS pool and deletion permission require the missing-vmss phase")
+	}
+	if c.Phase != "local-storage" && c.SkipLocalStorage != nil {
+		return fmt.Errorf("skipLocalStorage requires the local-storage phase")
 	}
 	return nil
 }

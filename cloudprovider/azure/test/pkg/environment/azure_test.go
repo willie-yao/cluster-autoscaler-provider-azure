@@ -234,6 +234,152 @@ func TestCheckSpotPool(t *testing.T) {
 	}
 }
 
+func TestCheckFailedExtensionPool(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name  string
+		edit  func(*armcompute.VirtualMachineScaleSet)
+		valid bool
+	}{
+		{name: "run-owned unsuppressed CustomScript", valid: true},
+		{name: "missing declaration", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			delete(set.Tags, "autoscaler-e2e-failing-extension")
+		}},
+		{name: "different extension publisher", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions[0].Properties.Publisher = ptr.To("other")
+		}},
+		{name: "suppressed failure", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions[0].Properties.SuppressFailures = ptr.To(true)
+		}},
+		{name: "two CustomScript extensions", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			ext := set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions[0]
+			set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions = append(
+				set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions, ext)
+		}},
+		{name: "wrong instance SKU", edit: func(set *armcompute.VirtualMachineScaleSet) {
+			set.SKU.Name = ptr.To("Standard_B1ms")
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.FailurePool, c.FailureLabel = "cse", "failed", "failed"
+			set := &armcompute.VirtualMachineScaleSet{
+				SKU:   &armcompute.SKU{Name: ptr.To("Standard_D2s_v5")},
+				Zones: []*string{ptr.To("1")},
+				Tags: map[string]*string{
+					"autoscaler-e2e-failing-extension":                             ptr.To(c.RunID),
+					"k8s.io_cluster-autoscaler_node-template_label_" + c.PoolLabel: ptr.To(c.FailureLabel),
+				},
+				Properties: &armcompute.VirtualMachineScaleSetProperties{VirtualMachineProfile: &armcompute.VirtualMachineScaleSetVMProfile{
+					ExtensionProfile: &armcompute.VirtualMachineScaleSetExtensionProfile{Extensions: []*armcompute.VirtualMachineScaleSetExtension{{
+						Properties: &armcompute.VirtualMachineScaleSetExtensionProperties{
+							Publisher: ptr.To("Microsoft.Azure.Extensions"), Type: ptr.To("CustomScript"),
+						},
+					}}},
+				}},
+			}
+			if tt.edit != nil {
+				tt.edit(set)
+			}
+			if err := checkFailedExtensionPool(set, c); (err == nil) != tt.valid {
+				t.Fatalf("failed extension pool error=%v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestAzureReadAfterMissingPool(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name              string
+		missingPoolExists bool
+		valid             bool
+	}{
+		{name: "only two surviving scale sets", valid: true},
+		{name: "target VMSS still exists", missingPoolExists: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase, c.MissingPool, c.DeleteMissingPool = "missing-vmss", "missing-pool", true
+			setPath := c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachineScaleSets"
+			mainVM := c.PoolID(c.MainPool) + "/virtualMachines/0"
+			sets := armcompute.VirtualMachineScaleSetListResult{Value: []*armcompute.VirtualMachineScaleSet{}}
+			for _, name := range c.PoolNames() {
+				if name == c.MissingPool && !tt.missingPoolExists {
+					continue
+				}
+				minimum, maximum, capacity := "0", "0", int64(0)
+				if name == c.MainPool {
+					minimum, maximum, capacity = "1", "2", 1
+				}
+				sets.Value = append(sets.Value, &armcompute.VirtualMachineScaleSet{
+					Name: ptr.To(name), SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(capacity)},
+					Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+						"min": ptr.To(minimum), "max": ptr.To(maximum)},
+					Properties: &armcompute.VirtualMachineScaleSetProperties{
+						ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+					},
+				})
+			}
+			cpParts := strings.Split(c.ControlPlaneID, "/")
+			responses := map[string]interface{}{
+				setPath: sets,
+				setPath + "/" + c.MainPool + "/virtualMachines": armcompute.VirtualMachineScaleSetVMListResult{
+					Value: []*armcompute.VirtualMachineScaleSetVM{{
+						ID: ptr.To(mainVM), Properties: &armcompute.VirtualMachineScaleSetVMProperties{
+							NetworkProfile: &armcompute.NetworkProfile{NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{
+								ID: ptr.To(mainVM + "/networkInterfaces/nic"),
+							}}},
+						},
+					}},
+				},
+				setPath + "/" + c.ZeroPool + "/virtualMachines":                     armcompute.VirtualMachineScaleSetVMListResult{},
+				setPath + "/" + c.MissingPool + "/virtualMachines":                  armcompute.VirtualMachineScaleSetVMListResult{},
+				c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachines": armcompute.VirtualMachineListResult{},
+				"/subscriptions/" + c.SubscriptionID + "/resourceGroups/" + cpParts[4] +
+					"/providers/Microsoft.Compute/virtualMachines/" + cpParts[8]: armcompute.VirtualMachine{
+					Tags: map[string]*string{RunLabel: ptr.To(c.RunID)},
+					Properties: &armcompute.VirtualMachineProperties{HardwareProfile: &armcompute.HardwareProfile{
+						VMSize: ptr.To(armcompute.VirtualMachineSizeTypes("Standard_D2s_v5")),
+					}},
+				},
+			}
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					payload, exists := responses[request.URL.Path]
+					if !exists {
+						return nil, fmt.Errorf("unexpected SDK request %s", request.URL.Path)
+					}
+					body, err := json.Marshal(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, sets: factory.NewVirtualMachineScaleSetsClient(),
+				vms: factory.NewVirtualMachineScaleSetVMsClient(), other: factory.NewVirtualMachinesClient(),
+				cores: map[string]int{"standard_d2s_v5": 2}}
+			snapshot, err := cloud.readAfterMissing(context.Background())
+			if (err == nil) != tt.valid {
+				t.Fatalf("read after deletion error=%v, valid=%t", err, tt.valid)
+			}
+			if tt.valid {
+				if len(snapshot.Pools) != 2 || snapshot.VMs != 2 || snapshot.VCPUs != 4 {
+					t.Fatalf("surviving pool observation=%+v", snapshot)
+				}
+				if err := snapshot.StableAfterMissing(c, 1, 0); err == nil {
+					t.Fatal("without Node evidence stable read must not pass")
+				}
+			}
+		})
+	}
+}
+
 func TestCheckPhasePeakEnvelope(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -243,6 +389,11 @@ func TestCheckPhasePeakEnvelope(t *testing.T) {
 	}{
 		{name: "Spot at four two-core VMs", phase: "spot", spot: 2, valid: true},
 		{name: "Spot SKU over cap", phase: "spot", spot: 4},
+		{name: "Spot eviction at four two-core VMs", phase: "spot-eviction", spot: 2, valid: true},
+		{name: "failed VM plus two main workers", phase: "cse", spot: 2, valid: true},
+		{name: "oversized failed VM", phase: "cse", spot: 4},
+		{name: "two main workers and empty missing VMSS", phase: "missing-vmss", valid: true},
+		{name: "two main workers and empty zero pool", phase: "local-storage", valid: true},
 		{name: "fifty B1ms and two D2s", phase: "large", scale: 1, valid: true},
 		{name: "fifty two-core workers exceed cap", phase: "large", scale: 2},
 		{name: "missing pool cores", phase: "large"},
@@ -251,10 +402,17 @@ func TestCheckPhasePeakEnvelope(t *testing.T) {
 			c := testConfig()
 			c.Phase = tt.phase
 			cores := map[string]int{c.MainPool: 2, c.ZeroPool: 2}
-			if tt.phase == "spot" {
+			switch tt.phase {
+			case "spot", "spot-eviction":
 				c.SpotPool, c.SpotLabel = "spot-pool", "spot"
 				cores[c.SpotPool] = tt.spot
-			} else {
+			case "cse":
+				c.FailurePool, c.FailureLabel = "failed-pool", "failed"
+				cores[c.FailurePool] = tt.spot
+			case "missing-vmss":
+				c.MissingPool, c.DeleteMissingPool = "missing-pool", true
+				cores[c.MissingPool] = 2
+			case "large":
 				c.ScalePool, c.ScaleLabel = "large-pool", "large"
 				cores[c.ScalePool] = tt.scale
 			}

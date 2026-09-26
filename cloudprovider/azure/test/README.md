@@ -25,7 +25,7 @@ Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
 
-Five additional cases run in `suites/scalephase` with
+Nine additional cases run in `suites/scalephase` with
 `TEST_SUITE=scalephase`. The large-pool case alone has higher limits:
 55 VMs and 60 vCPUs. All other cases remain at four VMs and eight
 vCPUs. The 29 default `scaleup` cases keep their two-pool fixture.
@@ -78,8 +78,9 @@ The dedicated worker resource group may contain only the two selected VMSS,
 and optionally the named control-plane VM. Other infrastructure is not deleted
 or inventoried by these tests.
 The balance phase requires exactly the main, zero and two named
-balance VMSS in that group. Spot and large phases each require only
-main, zero and the selected optional VMSS.
+balance VMSS in that group. Spot, large, failed extension and
+missing-VMSS phases each require main, zero and one named
+optional VMSS. The local-storage phase uses only main and zero.
 
 Both VMSS must have `cluster-autoscaler-name=<discoveryValue>`, and `min`/`max`
 tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:
@@ -135,11 +136,19 @@ The base fields are required, unknown fields fail, and kubeconfig must be absolu
 Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
 For a phased case, use a separate copy of the binding and set `phase` to
-`balance`, `no-join`, `minimum`, `spot` or `large`. The balance phase also requires
+`balance`, `no-join`, `minimum`, `spot`, `large`, `cse`,
+`spot-eviction`, `missing-vmss` or `local-storage`.
+The balance phase also requires
 `balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
 in the other phases. Spot requires `spotPool` and `spotLabel`. Large
 requires `scalePool` and `scaleLabel`. Omit those fields outside their
-phase. Use an operator-measured `demandCPU` for one Pod per B1ms worker
+phase. A `cse` binding requires `failurePool`, `failureLabel`
+and explicit `fastDelete` true or false. A `spot-eviction`
+binding requires the Spot pool fields and `evictSpot: true`.
+A `missing-vmss` binding requires `missingPool` and
+`deleteMissingPool: true`. A `local-storage` binding requires
+`skipLocalStorage` true or false. Each other phase must omit
+those fields. Use an operator-measured `demandCPU` for one Pod per B1ms worker
 in the large phase. A missing phase skips the new cases. A wrong marker
 or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
@@ -291,6 +300,118 @@ At a conservative USD 2.25 per hour for ten hours,
 plus a USD 5 cleanup reserve, the estimate is
 USD 27.50, below the USD 30 large-phase cap.
 
+For `AZ-P1-012`, use main `1/2`, zero `0/0` and a
+run-tagged `failurePool` VMSS at `0/1`, with D2s_v5
+in zone 1. Its node-template label is
+`<poolLabel>=<failureLabel>`. Keep the pool's
+join bootstrap absent. Install one unsuppressed
+`Microsoft.Azure.Extensions` `CustomScript`
+extension that exits with a nonzero status.
+The operator must check that the extension has
+no secrets in public settings or logs. Mark the
+VMSS `autoscaler-e2e-failing-extension=<runID>`.
+Run two separate focused invocations from a
+physical `1/0/0` baseline. For the first,
+set `fastDelete: true` and literal controller
+environment variables
+`AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING=true`
+and `AZURE_ENABLE_DETAILED_CSE_MESSAGE=false`.
+For the second, stop the old controller, wait
+until its Pod is gone, set `fastDelete: false`
+and change only the first variable to `false`.
+In both phases use `--max-node-provision-time=3m`,
+`--max-nodes-total=4` and `--v=3`, and set
+`allow-cse-fixture: AZ-P1-012` in the marker.
+The test checks Azure's Failed instance state,
+Running power state, the controller's logged
+setting, unregistered-node deletion, physical
+removal and continued main-pool growth.
+It also checks that the controller never
+restarts or logs a panic. A powered-on failed
+VM does not take the fast create-error path
+even when the flag is true. The test does
+not prove faster deletion of a non-running VM
+or a backoff guarantee. If power state is
+not Running, the fixture is not qualified
+for the intended comparison.
+
+For `AZ-P1-013`, keep main `1/2`, zero `0/0`
+and a tagged Spot VMSS with `min=0`,
+`max=1`, initial capacity one and one
+Ready Node. Use the same Spot settings as
+`AZ-P1-010`: Delete eviction, max price `-1`
+and automatic restore off. Set the literal
+controller environment variable
+`AZURE_GET_VMSS_SIZE_REFRESH_PERIOD=5`
+and `--max-nodes-total=4`. Bind
+`evictSpot: true` and set
+`allow-spot-eviction-fixture: AZ-P1-013`
+in the marker. The test creates a Ready Pod
+on the exact Spot VM, records its Azure VMID,
+resource ID and Node UID, and creates
+`evict-spot-vm` in its run-owned namespace.
+Only then may the operator read the signal
+and run `az vmss simulate-eviction` for
+the exact instance ID. Before acting, the
+operator must read the VMSS and VM, verify
+their resource IDs, the VMSS's run ID,
+Spot priority and the VMID against the
+test report, and refuse a mismatch. The
+test does not use Azure write permission.
+It checks a lower VMSS target size, a
+replacement VMID, a new Ready Node and
+Pod, and physical return to zero after
+removing demand. The five-second size
+refresh setting is retained from this
+provider's config but marked deprecated
+there. The case does not prove a new
+nondeprecated refresh path.
+
+For `AZ-P1-014`, keep main `1/2`, zero
+`0/0` and an extra empty VMSS tagged
+`min=0`, `max=0`. Bind its exact name
+as `missingPool`, enable
+`deleteMissingPool: true` and set
+`allow-missing-vmss-fixture: AZ-P1-014`
+in the marker. The controller must first
+report all three groups. The test then
+creates `delete-missing-vmss` in its
+run-owned namespace. Only then may the
+operator read the signal and delete the
+exact empty VMSS. Before deleting it,
+the operator must verify the full Azure
+resource ID, `autoscaler-e2e-run=<runID>`,
+discovery tag, `min=0`, `max=0` and zero
+instances. The test never deletes a VMSS.
+It verifies the surviving main and zero
+groups, a fresh two-group controller status,
+the same Ready controller Pod without
+restarts or a panic, and main growth and
+physical scale-down for its own demand.
+The operator must not recreate the removed
+VMSS during this case.
+
+For `AZ-P1-015`, keep main `1/2` and zero
+`0/0`. Run two separate invocations
+with `phase: local-storage` and explicit
+`skipLocalStorage: true`, then `false`.
+Set `--skip-nodes-with-local-storage`
+to the matching literal value and
+`--max-nodes-total=4`, and keep the
+same run-owned marker
+`allow-local-storage-fixture: AZ-P1-015`.
+Stop and restart the single controller
+between phases after returning to main
+capacity one. The test puts an EmptyDir
+Pod on a newly grown main worker and
+protects the baseline main worker with
+a separate run-owned Pod. With true,
+it checks that the candidate is retained
+for five minutes. With false, it checks
+physical VM, Node and NIC deletion and
+that the Pod restarts on the survivor.
+The EmptyDir contents need not survive.
+
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested
 CPU. `demandCPU` is measured against actual worker allocatable CPU and existing
@@ -430,6 +551,10 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
 | `AZ-P1-010` | A VMSS tagged Spot grows from zero for a Ready Pod, then CA scales it down with a Node event and physical VM/Node/NIC deletion; an observed eviction is not a pass |
 | `AZ-P1-011` | A B1ms pool grows in five-node steps to 50 Ready nodes and Pods, then returns physically to zero with all VM/Node/NIC deletions checked |
+| `AZ-P1-012` | A powered-on VM with a failed CustomScript extension is removed as unregistered under both fast-delete settings while main still grows; no restart or panic |
+| `AZ-P1-013` | A run-owned simulated Spot eviction lowers the pool target, then a new VM and Ready Pod replace the original before physical return to zero |
+| `AZ-P1-014` | An empty discovered VMSS is removed by the operator; the same controller keeps reporting status and scales main for demand |
+| `AZ-P1-015` | An EmptyDir Pod blocks scale-down with local-storage protection enabled; when disabled, its worker is removed and the Pod reschedules |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -450,7 +575,7 @@ test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
 public source, and six supplemental cases bring the default suite to 29
-registered specs. Five phased cases bring the full module to 34
+registered specs. Nine phased cases bring the full module to 38
 registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |
@@ -470,6 +595,10 @@ registered specs. Registration is not execution.
 | `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
 | `AZ-P1-010` | Grow and remove a Spot VM without counting an observed eviction as a pass | [spot_test.go](suites/scalephase/spot_test.go) |
 | `AZ-P1-011` | Grow B1ms workers in steps of five to 50, then delete all of them | [large_test.go](suites/scalephase/large_test.go) |
+| `AZ-P1-012` | Handle a powered-on failed CustomScript VM with both fast-delete settings | [cse_test.go](suites/scalephase/cse_test.go) |
+| `AZ-P1-013` | Replace one exact evicted Spot VM and Pod | [spot_eviction_test.go](suites/scalephase/spot_eviction_test.go) |
+| `AZ-P1-014` | Keep main scaling after an empty discovered VMSS is removed | [missing_vmss_test.go](suites/scalephase/missing_vmss_test.go) |
+| `AZ-P1-015` | Compare local-storage scale-down protection enabled and disabled | [local_storage_test.go](suites/scalephase/local_storage_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.

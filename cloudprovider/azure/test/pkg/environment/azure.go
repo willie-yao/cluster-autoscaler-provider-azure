@@ -95,6 +95,17 @@ func newAzureCloud(ctx context.Context, cfg Config, credential azcore.TokenCrede
 }
 
 func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
+	return a.read(ctx, false)
+}
+
+func (a *azureCloud) readAfterMissing(ctx context.Context) (Snapshot, error) {
+	if a.config.Phase != "missing-vmss" {
+		return Snapshot{}, fmt.Errorf("surviving-pool read requires the missing-vmss phase")
+	}
+	return a.read(ctx, true)
+}
+
+func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 	c := a.config
 	result := Snapshot{Pools: map[string]PoolState{}}
 	poolCores := map[string]int{}
@@ -141,7 +152,9 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			if set.Properties.OrchestrationMode != nil && *set.Properties.OrchestrationMode != armcompute.OrchestrationModeUniform {
 				return result, fmt.Errorf("VMSS %s is not Uniform; this suite cannot attest that profile", name)
 			}
-			if value(set.Properties.ProvisioningState) != "Succeeded" || set.Properties.Overprovision == nil || *set.Properties.Overprovision {
+			if (value(set.Properties.ProvisioningState) != "Succeeded" &&
+				!(c.Phase == "cse" && name == c.FailurePool && value(set.Properties.ProvisioningState) == "Failed")) ||
+				set.Properties.Overprovision == nil || *set.Properties.Overprovision {
 				return result, fmt.Errorf("VMSS %s must be Succeeded with overprovision disabled", name)
 			}
 			pool := PoolState{
@@ -168,6 +181,16 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			}
 			if c.Phase == "spot" && name == c.SpotPool {
 				if err := checkSpotPool(set, c); err != nil {
+					return result, err
+				}
+			}
+			if c.Phase == "spot-eviction" && name == c.SpotPool {
+				if err := checkSpotPool(set, c); err != nil {
+					return result, err
+				}
+			}
+			if c.Phase == "cse" && name == c.FailurePool {
+				if err := checkFailedExtensionPool(set, c); err != nil {
 					return result, err
 				}
 			}
@@ -201,8 +224,12 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 						vm.Properties.NetworkProfile == nil || len(vm.Properties.NetworkProfile.NetworkInterfaces) == 0 {
 						return result, fmt.Errorf("VMSS %s instance lacks identity/network evidence", name)
 					}
-					instance := Instance{ID: normalizeID(*vm.ID), VMID: value(vm.Properties.VMID)}
-					if (c.Phase == "no-join" || c.Phase == "spot" && name == c.SpotPool) && instance.VMID == "" {
+					instance := Instance{
+						ID: normalizeID(*vm.ID), VMID: value(vm.Properties.VMID),
+						ProvisioningState: value(vm.Properties.ProvisioningState),
+					}
+					if (c.Phase == "no-join" || c.Phase == "spot-eviction" && name == c.SpotPool ||
+						c.Phase == "spot" && name == c.SpotPool || c.Phase == "cse" && name == c.FailurePool) && instance.VMID == "" {
 						return result, fmt.Errorf("VMSS %s instance lacks its unique VM ID", name)
 					}
 					for _, nic := range vm.Properties.NetworkProfile.NetworkInterfaces {
@@ -231,7 +258,11 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 			}
 		}
 	}
-	if len(result.Pools) != len(bounds) {
+	if missing {
+		if _, exists := result.Pools[c.MissingPool]; exists || len(result.Pools) != len(bounds)-1 {
+			return result, fmt.Errorf("expected the authorized missing VMSS to be absent, with two surviving scale sets")
+		}
+	} else if len(result.Pools) != len(bounds) {
 		return result, fmt.Errorf("expected exactly %d authorized scale sets", len(bounds))
 	}
 	if c.Phase == "balance" {
@@ -274,7 +305,14 @@ func (a *azureCloud) Read(ctx context.Context) (Snapshot, error) {
 		if MaxVMs*cores > MaxVCPUs {
 			return result, fmt.Errorf("%w: four control-plane VMs of this SKU exceed the vCPU limit", ErrBounds)
 		}
-	} else if c.Phase == "spot" || c.Phase == "large" {
+	} else if missing {
+		surviving := c
+		surviving.Phase = "local-storage"
+		if err := checkPhasePeakEnvelope(surviving, poolCores, cores); err != nil {
+			return result, err
+		}
+	} else if c.Phase == "spot" || c.Phase == "spot-eviction" || c.Phase == "large" ||
+		c.Phase == "cse" || c.Phase == "missing-vmss" || c.Phase == "local-storage" {
 		if err := checkPhasePeakEnvelope(c, poolCores, cores); err != nil {
 			return result, err
 		}
@@ -294,6 +332,32 @@ func checkSpotPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
 		set.Properties.SpotRestorePolicy != nil && set.Properties.SpotRestorePolicy.Enabled != nil &&
 			*set.Properties.SpotRestorePolicy.Enabled {
 		return fmt.Errorf("Spot pool must be zonal D2s_v5 with Delete eviction, on-demand price cap, no automatic restore and its template label")
+	}
+	return nil
+}
+
+func checkFailedExtensionPool(set *armcompute.VirtualMachineScaleSet, c Config) error {
+	if value(set.SKU.Name) != "Standard_D2s_v5" || len(set.Zones) != 1 || value(set.Zones[0]) != "1" ||
+		value(set.Tags["autoscaler-e2e-failing-extension"]) != c.RunID ||
+		value(set.Tags["k8s.io_cluster-autoscaler_node-template_label_"+c.PoolLabel]) != c.FailureLabel ||
+		set.Properties.VirtualMachineProfile == nil ||
+		set.Properties.VirtualMachineProfile.ExtensionProfile == nil {
+		return fmt.Errorf("failed VM pool needs a run-owned failing CustomScript extension and node-template label")
+	}
+	found := 0
+	for _, extension := range set.Properties.VirtualMachineProfile.ExtensionProfile.Extensions {
+		if extension == nil || extension.Properties == nil ||
+			value(extension.Properties.Publisher) != "Microsoft.Azure.Extensions" ||
+			value(extension.Properties.Type) != "CustomScript" {
+			continue
+		}
+		if extension.Properties.SuppressFailures != nil && *extension.Properties.SuppressFailures {
+			return fmt.Errorf("failed VM pool must not suppress CustomScript extension failures")
+		}
+		found++
+	}
+	if found != 1 {
+		return fmt.Errorf("failed VM pool needs exactly one CustomScript extension")
 	}
 	return nil
 }

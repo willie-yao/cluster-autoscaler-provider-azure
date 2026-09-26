@@ -17,6 +17,7 @@ limitations under the License.
 package environment
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -28,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestSnapshotStableChecksEachPoolBounds(t *testing.T) {
@@ -192,6 +194,25 @@ func TestSnapshotLargePhaseBounds(t *testing.T) {
 	}
 }
 
+func TestSnapshotStableAfterMissing(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase, c.MissingPool, c.DeleteMissingPool = "missing-vmss", "empty-pool", true
+	snapshot := testSnapshot(c)
+	if err := snapshot.StableAfterMissing(c, 1, 0); err != nil {
+		t.Fatal(err)
+	}
+	snapshot.Pools[c.MissingPool] = PoolState{Instances: map[string]Instance{}}
+	if err := snapshot.StableAfterMissing(c, 1, 0); err == nil {
+		t.Fatal("accepted a still-present VMSS after deletion")
+	}
+	delete(snapshot.Pools, c.MissingPool)
+	c.Phase = ""
+	if err := snapshot.StableAfterMissing(c, 1, 0); err == nil {
+		t.Fatal("accepted deletion observation outside the missing VMSS phase")
+	}
+}
+
 func TestValidateDemand(t *testing.T) {
 	t.Parallel()
 	node := testNode(testConfig())
@@ -216,6 +237,23 @@ func TestValidateDemand(t *testing.T) {
 				t.Fatalf("ValidateDemand = %v, valid=%v", err, tt.valid)
 			}
 		})
+	}
+}
+
+func TestDemandFitsWithHeadroom(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	node := testNode(c)
+	e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(&node).Build()}
+	snapshot := Snapshot{Nodes: []corev1.Node{node}}
+	if err := e.DemandFitsWithHeadroom(context.Background(), snapshot, c.MainPool, 100); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.DemandFitsWithHeadroom(context.Background(), snapshot, c.MainPool, 900); err == nil {
+		t.Fatal("accepted two small Pods without enough spare CPU")
+	}
+	if err := e.DemandFitsWithHeadroom(context.Background(), snapshot, c.MainPool, -1); err == nil {
+		t.Fatal("accepted negative headroom")
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -75,10 +76,11 @@ func TestCheckControllerScope(t *testing.T) {
 func TestControllerChecksScopeAndLeader(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
-		name, invalidScope, holder string
-		hostNetwork, valid         bool
+		name, invalidScope, holder  string
+		hostNetwork, valid, missing bool
 	}{
 		{name: "exact scope and Pod leader", valid: true},
+		{name: "missing VMSS removed from status", missing: true, valid: true},
 		{name: "wrong template scope", invalidScope: "template"},
 		{name: "wrong running Pod scope", invalidScope: "running Pod"},
 		{name: "host-network Node leader", hostNetwork: true, holder: "control-plane", valid: true},
@@ -86,10 +88,16 @@ func TestControllerChecksScopeAndLeader(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
+			if tt.missing {
+				c.Phase, c.MissingPool, c.DeleteMissingPool = "missing-vmss", "missing-pool", true
+			}
 			container := corev1.Container{Name: c.AutoscalerContainer, Image: c.ExpectedImage,
 				Env: []corev1.EnvVar{{Name: "ARM_SUBSCRIPTION_ID", Value: c.SubscriptionID}, {Name: "ARM_RESOURCE_GROUP", Value: c.ResourceGroup}},
 				Args: []string{"--node-group-auto-discovery=label:cluster-autoscaler-name=" + c.DiscoveryValue,
 					"--scale-down-delay-after-add=10s", "--scale-down-unneeded-time=10s", "--unremovable-node-recheck-timeout=10s"},
+			}
+			if tt.missing {
+				container.Args = append(container.Args, "--max-nodes-total=4")
 			}
 			labels := map[string]string{"app": "autoscaler"}
 			deployment := &appsv1.Deployment{
@@ -118,8 +126,17 @@ func TestControllerChecksScopeAndLeader(t *testing.T) {
 				Data: map[string]string{"status": fmt.Sprintf("time: %s\nautoscalerStatus: Running\nnodeGroups:\n- name: %s\n- name: %s\n",
 					time.Now().UTC().Format(time.RFC3339), c.MainPool, c.ZeroPool)}}
 			e := &Environment{Config: c, K8s: fake.NewClientBuilder().WithObjects(deployment, pod, lease, status).Build()}
-			if err := e.Controller(context.Background()); (err == nil) != tt.valid {
+			check := e.Controller
+			if tt.missing {
+				check = e.ControllerAfterMissing
+			}
+			if err := check(context.Background()); (err == nil) != tt.valid {
 				t.Fatalf("Controller error=%v, valid=%v", err, tt.valid)
+			}
+			if tt.missing {
+				if err := e.Controller(context.Background()); err == nil {
+					t.Fatal("ordinary controller check accepted a missing authorized VMSS")
+				}
 			}
 		})
 	}
@@ -246,14 +263,75 @@ func TestCheckPhaseArguments(t *testing.T) {
 		{name: "large cap too high", phase: "large", args: []string{
 			"--max-nodes-total=55", "--max-node-provision-time=20m", "--scan-interval=10s",
 		}},
+		{name: "failed VM bounded scan", phase: "cse", valid: true,
+			args: []string{"--max-nodes-total=4", "--max-node-provision-time=3m", "--v=3"}},
+		{name: "failed VM without 3m timeout", phase: "cse",
+			args: []string{"--max-nodes-total=4", "--max-node-provision-time=15m", "--v=3"}},
+		{name: "Spot eviction bound", phase: "spot-eviction", valid: true, args: []string{"--max-nodes-total=4"}},
+		{name: "missing VMSS bound", phase: "missing-vmss", valid: true, args: []string{"--max-nodes-total=4"}},
+		{name: "local storage blocked", phase: "local-storage", valid: true,
+			args: []string{"--max-nodes-total=4", "--skip-nodes-with-local-storage=true"}},
+		{name: "local storage can move", phase: "local-storage", valid: true,
+			args: []string{"--max-nodes-total=4", "--skip-nodes-with-local-storage=false"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
 			c.Phase = tt.phase
+			if c.Phase == "local-storage" {
+				c.SkipLocalStorage = ptr.To(strings.Contains(strings.Join(tt.args, ","), "local-storage=true"))
+			}
 			if err := CheckPhaseArguments(tt.args, c); (err == nil) != tt.valid {
 				t.Fatalf("CheckPhaseArguments = %v, valid=%t", err, tt.valid)
 			}
 		})
+	}
+}
+
+func TestCheckPhaseControllerEnv(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name, phase, flag, value string
+		valid                    bool
+	}{
+		{name: "no phase", valid: true},
+		{name: "fast failed VM", phase: "cse", flag: "true", valid: true},
+		{name: "normal failed VM", phase: "cse", flag: "false", valid: true},
+		{name: "wrong failed VM flag", phase: "cse", flag: "other"},
+		{name: "Spot five-second refresh", phase: "spot-eviction", value: "5", valid: true},
+		{name: "Spot stale refresh", phase: "spot-eviction", value: "30"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testConfig()
+			c.Phase = tt.phase
+			variables := []corev1.EnvVar{}
+			if tt.phase == "cse" {
+				c.FastDelete = ptr.To(tt.flag == "true")
+				variables = append(variables, corev1.EnvVar{
+					Name: "AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING", Value: tt.flag,
+				}, corev1.EnvVar{Name: "AZURE_ENABLE_DETAILED_CSE_MESSAGE", Value: "false"})
+			}
+			if tt.phase == "spot-eviction" {
+				variables = append(variables, corev1.EnvVar{
+					Name: "AZURE_GET_VMSS_SIZE_REFRESH_PERIOD", Value: tt.value,
+				})
+			}
+			if err := checkPhaseControllerEnv(variables, c); (err == nil) != tt.valid {
+				t.Fatalf("phase env error=%v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
+func TestLocalStorageControllerArgument(t *testing.T) {
+	t.Parallel()
+	args := []string{"--node-group-auto-discovery=label:cluster-autoscaler-name=owned-run",
+		"--scale-down-delay-after-add=10s", "--scale-down-unneeded-time=10s",
+		"--unremovable-node-recheck-timeout=10s", "--skip-nodes-with-local-storage=false"}
+	if err := checkControllerArguments(args, "owned-run", true); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckControllerArguments(args, "owned-run"); err == nil {
+		t.Fatal("default fixture accepted the unprotected local-storage flag")
 	}
 }
 
@@ -459,6 +537,32 @@ func TestEnvironmentDeletedGenerationWithReusedInstanceID(t *testing.T) {
 	original.VMID = ""
 	if err := e.DeletedGeneration(context.Background(), original, after, c.ZeroPool); err == nil {
 		t.Fatal("accepted a VM without a generation-specific identity")
+	}
+}
+
+func TestDeletedGenerationForNodeWithReusedPaths(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	id := normalizeID(c.PoolID(c.ZeroPool) + "/virtualMachines/0")
+	nic := id + "/networkInterfaces/one"
+	old := Instance{ID: id, VMID: "old-vm", NICs: []string{nic}}
+	current := Instance{ID: id, VMID: "new-vm", NICs: []string{nic}}
+	after := Snapshot{Pools: map[string]PoolState{c.ZeroPool: {Instances: map[string]Instance{id: current}}},
+		Nodes: []corev1.Node{{ObjectMeta: metav1.ObjectMeta{UID: "replacement"},
+			Spec: corev1.NodeSpec{ProviderID: "azure://" + id}}}}
+	e := &Environment{Cloud: fakeCloud{exists: true}}
+	if err := e.DeletedGenerationForNode(context.Background(), old, "original", after, c.ZeroPool); err != nil {
+		t.Fatalf("old VM and NIC paths reused by a different Node: %v", err)
+	}
+	if err := e.DeletedGeneration(context.Background(), old, after, c.ZeroPool); err == nil {
+		t.Fatal("ordinary no-Node check accepted a reused provider path")
+	}
+	after.Nodes[0].UID = "original"
+	if err := e.DeletedGenerationForNode(context.Background(), old, "original", after, c.ZeroPool); err == nil {
+		t.Fatal("accepted the original Node still present")
+	}
+	if err := e.DeletedGenerationForNode(context.Background(), old, "", after, c.ZeroPool); err == nil {
+		t.Fatal("accepted an unspecified original Node UID")
 	}
 }
 

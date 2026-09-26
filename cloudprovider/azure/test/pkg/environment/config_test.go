@@ -20,6 +20,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"k8s.io/utils/ptr"
 )
 
 func testConfig() Config {
@@ -96,6 +98,27 @@ func TestConfigValidate(t *testing.T) {
 			c.Phase, c.SpotPool, c.SpotLabel, c.ScalePool = "spot", "spot-pool", "spot", "large-pool"
 		}},
 		{name: "scale pool without phase", change: func(c *Config) { c.ScalePool = "large-pool" }},
+		{name: "failed VM missing setting", change: func(c *Config) {
+			c.Phase, c.FailurePool, c.FailureLabel = "cse", "failed-pool", "failed"
+		}},
+		{name: "failed VM binding on default", change: func(c *Config) { c.FastDelete = ptr.To(true) }},
+		{name: "failed VM pool overlaps main", change: func(c *Config) {
+			c.Phase, c.FailurePool, c.FailureLabel, c.FastDelete = "cse", "MAIN", "failed", ptr.To(false)
+		}},
+		{name: "eviction not enabled", change: func(c *Config) {
+			c.Phase, c.SpotPool, c.SpotLabel = "spot-eviction", "spot-pool", "spot"
+		}},
+		{name: "eviction enabled on ordinary Spot", change: func(c *Config) {
+			c.Phase, c.SpotPool, c.SpotLabel, c.EvictSpot = "spot", "spot-pool", "spot", true
+		}},
+		{name: "missing VMSS deletion not enabled", change: func(c *Config) {
+			c.Phase, c.MissingPool = "missing-vmss", "missing"
+		}},
+		{name: "foreign missing pool", change: func(c *Config) {
+			c.Phase, c.MissingPool, c.DeleteMissingPool = "missing-vmss", "MAIN", true
+		}},
+		{name: "local storage setting omitted", change: func(c *Config) { c.Phase = "local-storage" }},
+		{name: "local storage setting outside phase", change: func(c *Config) { c.SkipLocalStorage = ptr.To(true) }},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -125,6 +148,10 @@ func TestConfigPhasePools(t *testing.T) {
 		{name: "minimum", phase: "minimum", names: 2, mainTagMin: 2, mainMax: 2, zeroMax: 1},
 		{name: "Spot", phase: "spot", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
 		{name: "large", phase: "large", names: 3, mainTagMin: 1, mainMax: 1, zeroMax: 0},
+		{name: "failed VM", phase: "cse", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "Spot eviction", phase: "spot-eviction", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "missing VMSS", phase: "missing-vmss", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "local storage", phase: "local-storage", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -135,8 +162,20 @@ func TestConfigPhasePools(t *testing.T) {
 			if tt.phase == "spot" {
 				c.SpotPool, c.SpotLabel = "spot-pool", "spot"
 			}
+			if tt.phase == "spot-eviction" {
+				c.SpotPool, c.SpotLabel, c.EvictSpot = "spot-pool", "spot", true
+			}
 			if tt.phase == "large" {
 				c.ScalePool, c.ScaleLabel = "large-pool", "large"
+			}
+			if tt.phase == "cse" {
+				c.FailurePool, c.FailureLabel, c.FastDelete = "failed-pool", "failed", ptr.To(true)
+			}
+			if tt.phase == "missing-vmss" {
+				c.MissingPool, c.DeleteMissingPool = "missing-pool", true
+			}
+			if tt.phase == "local-storage" {
+				c.SkipLocalStorage = ptr.To(false)
 			}
 			if err := c.Validate(); err != nil {
 				t.Fatal(err)

@@ -26,6 +26,7 @@ import (
 	coordinationv1 "k8s.io/api/coordination/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -89,6 +90,18 @@ func (e *Environment) Authorize(ctx context.Context) error {
 
 // Controller checks deployment ownership, protected settings, leadership and discovery.
 func (e *Environment) Controller(ctx context.Context) error {
+	return e.controller(ctx, e.Config.PoolNames())
+}
+
+// ControllerAfterMissing checks the same controller after the empty group is removed.
+func (e *Environment) ControllerAfterMissing(ctx context.Context) error {
+	if e.Config.Phase != "missing-vmss" {
+		return fmt.Errorf("missing VMSS controller check requires its fixture phase")
+	}
+	return e.controller(ctx, []string{e.Config.MainPool, e.Config.ZeroPool})
+}
+
+func (e *Environment) controller(ctx context.Context, groups []string) error {
 	c := e.Config
 	var deployment appsv1.Deployment
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.AutoscalerDeployment}, &deployment); err != nil {
@@ -111,8 +124,11 @@ func (e *Environment) Controller(ctx context.Context) error {
 		if err := checkControllerScope(container.Env, c); err != nil {
 			return err
 		}
+		if err := checkPhaseControllerEnv(container.Env, c); err != nil {
+			return err
+		}
 		args := append(append([]string{}, container.Command...), container.Args...)
-		if err := CheckControllerArguments(args, c.DiscoveryValue); err != nil {
+		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage); err != nil {
 			return err
 		}
 		if err := CheckPhaseArguments(args, c); err != nil {
@@ -146,6 +162,9 @@ func (e *Environment) Controller(ctx context.Context) error {
 		if err := checkControllerScope(container.Env, c); err != nil {
 			return err
 		}
+		if err := checkPhaseControllerEnv(container.Env, c); err != nil {
+			return err
+		}
 		if err := CheckPhaseArguments(append(append([]string{}, container.Command...), container.Args...), c); err != nil {
 			return err
 		}
@@ -164,7 +183,7 @@ func (e *Environment) Controller(ctx context.Context) error {
 	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
 		return err
 	}
-	return CheckStatus(status.Data["status"], c.PoolNames(), time.Now())
+	return CheckStatus(status.Data["status"], groups, time.Now())
 }
 
 // CheckPhaseArguments requires the flags that make each optional case meaningful.
@@ -189,6 +208,17 @@ func CheckPhaseArguments(args []string, c Config) error {
 		required["max-nodes-total"] = "52"
 		required["max-node-provision-time"] = "20m"
 		required["scan-interval"] = "10s"
+	case "cse":
+		required["max-nodes-total"] = "4"
+		required["max-node-provision-time"] = "3m"
+		required["v"] = "3"
+	case "spot-eviction":
+		required["max-nodes-total"] = "4"
+	case "missing-vmss":
+		required["max-nodes-total"] = "4"
+	case "local-storage":
+		required["max-nodes-total"] = "4"
+		required["skip-nodes-with-local-storage"] = fmt.Sprint(*c.SkipLocalStorage)
 	}
 	for key, value := range required {
 		found := 0
@@ -205,6 +235,32 @@ func CheckPhaseArguments(args []string, c Config) error {
 		}
 		if found != 1 {
 			return fmt.Errorf("%s must occur once in the %s phase", key, c.Phase)
+		}
+	}
+	return nil
+}
+
+func checkPhaseControllerEnv(variables []corev1.EnvVar, c Config) error {
+	required := map[string]string{}
+	switch c.Phase {
+	case "cse":
+		required["AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING"] = fmt.Sprint(*c.FastDelete)
+		required["AZURE_ENABLE_DETAILED_CSE_MESSAGE"] = "false"
+	case "spot-eviction":
+		required["AZURE_GET_VMSS_SIZE_REFRESH_PERIOD"] = "5"
+	}
+	for name, expected := range required {
+		count := 0
+		for _, variable := range variables {
+			if variable.Name == name {
+				count++
+				if variable.ValueFrom != nil || variable.Value != expected {
+					return fmt.Errorf("controller %s must be one literal %s", name, expected)
+				}
+			}
+		}
+		if count != 1 {
+			return fmt.Errorf("controller requires exactly one literal %s", name)
 		}
 	}
 	return nil
@@ -262,6 +318,10 @@ func checkControllerScope(variables []corev1.EnvVar, c Config) error {
 
 // CheckControllerArguments rejects alternate discovery and weakened scale-down protections.
 func CheckControllerArguments(args []string, discoveryValue string) error {
+	return checkControllerArguments(args, discoveryValue, false)
+}
+
+func checkControllerArguments(args []string, discoveryValue string, allowLocalStorageFalse bool) error {
 	var discovery int
 	timings := map[string]bool{
 		"scale-down-delay-after-add":       false,
@@ -279,6 +339,9 @@ func CheckControllerArguments(args []string, discoveryValue string) error {
 			discovery++
 		}
 		for _, key := range []string{"skip-nodes-with-system-pods", "skip-nodes-with-local-storage", "leader-elect", "scale-down-enabled"} {
+			if key == "skip-nodes-with-local-storage" && allowLocalStorageFalse && arg == "--skip-nodes-with-local-storage=false" {
+				continue
+			}
 			if (arg == "--"+key || strings.HasPrefix(arg, "--"+key+"=")) && arg != "--"+key+"=true" {
 				return fmt.Errorf("%s must not be disabled", key)
 			}
@@ -313,7 +376,20 @@ func CheckControllerArguments(args []string, discoveryValue string) error {
 
 // Read joins Azure and Kubernetes observations without emitting raw API objects.
 func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
-	result, err := e.Cloud.Read(ctx)
+	return e.read(ctx, e.Cloud.Read)
+}
+
+// ReadAfterMissing checks surviving pools after the authorized empty VMSS is removed.
+func (e *Environment) ReadAfterMissing(ctx context.Context) (Snapshot, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok || e.Config.Phase != "missing-vmss" {
+		return Snapshot{}, fmt.Errorf("surviving-pool read requires the authorized Azure missing-vmss phase")
+	}
+	return e.read(ctx, cloud.readAfterMissing)
+}
+
+func (e *Environment) read(ctx context.Context, observe func(context.Context) (Snapshot, error)) (Snapshot, error) {
+	result, err := observe(ctx)
 	if err != nil {
 		return result, err
 	}
@@ -327,6 +403,12 @@ func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
 	result.Nodes = nodes.Items
 	var controlPlanes int
 	for _, node := range nodes.Items {
+		if observeMissing, ok := e.Cloud.(*azureCloud); ok && observeMissing.config.Phase == "missing-vmss" {
+			if _, exists := result.Pools[e.Config.MissingPool]; !exists &&
+				len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(e.Config.MissingPool))) != 0 {
+				return result, fmt.Errorf("deleted VMSS still has a Kubernetes Node")
+			}
+		}
 		if normalizeID(node.Spec.ProviderID) == normalizeID(e.Config.ControlPlaneID) {
 			controlPlanes++
 			if !Ready(node) {
@@ -409,6 +491,18 @@ func (e *Environment) Deleted(ctx context.Context, before, after Snapshot, pool 
 
 // DeletedGeneration checks a VM separately from a replacement using the same VMSS instance ID.
 func (e *Environment) DeletedGeneration(ctx context.Context, before Instance, after Snapshot, pool string) error {
+	return e.deletedGeneration(ctx, before, "", after, pool)
+}
+
+// DeletedGenerationForNode accepts a replacement Node at the same VMSS instance path.
+func (e *Environment) DeletedGenerationForNode(ctx context.Context, before Instance, oldNodeUID types.UID, after Snapshot, pool string) error {
+	if oldNodeUID == "" {
+		return fmt.Errorf("captured Node UID is required for a reused VMSS instance path")
+	}
+	return e.deletedGeneration(ctx, before, oldNodeUID, after, pool)
+}
+
+func (e *Environment) deletedGeneration(ctx context.Context, before Instance, oldNodeUID types.UID, after Snapshot, pool string) error {
 	if before.ID == "" || before.VMID == "" {
 		return fmt.Errorf("captured VM has no unique Azure identity")
 	}
@@ -421,7 +515,8 @@ func (e *Environment) DeletedGeneration(ctx context.Context, before Instance, af
 		return fmt.Errorf("captured VM generation still exists in pool %s", pool)
 	}
 	for _, node := range after.Nodes {
-		if normalizeID(node.Spec.ProviderID) == before.ID {
+		if oldNodeUID == "" && normalizeID(node.Spec.ProviderID) == before.ID ||
+			oldNodeUID != "" && node.UID == oldNodeUID {
 			return fmt.Errorf("deleted VM generation still has Node %s", node.Name)
 		}
 	}

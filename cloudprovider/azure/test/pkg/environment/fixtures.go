@@ -101,8 +101,11 @@ func (e *Environment) CheckPausedController(ctx context.Context) error {
 		if err := checkControllerScope(container.Env, c); err != nil {
 			return err
 		}
+		if err := checkPhaseControllerEnv(container.Env, c); err != nil {
+			return err
+		}
 		args := append(append([]string{}, container.Command...), container.Args...)
-		if err := CheckControllerArguments(args, c.DiscoveryValue); err != nil {
+		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage); err != nil {
 			return err
 		}
 		if err := CheckPhaseArguments(args, c); err != nil {

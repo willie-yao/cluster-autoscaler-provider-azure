@@ -32,9 +32,10 @@ var ErrBounds = errors.New("resource bounds violated")
 
 // Instance records only identifiers needed to prove physical deletion.
 type Instance struct {
-	ID   string
-	VMID string
-	NICs []string
+	ID                string
+	VMID              string
+	ProvisioningState string
+	NICs              []string
 }
 
 // PoolState separates requested capacity from actual cloud instances.
@@ -114,6 +115,19 @@ func checkCapacity(name string, capacity, minimum, maximum int) error {
 // Stable requires a one-to-one mapping between Azure instances and Ready Nodes.
 func (s Snapshot) Stable(c Config, main, zero int) error {
 	return s.StablePools(c, map[string]int{c.MainPool: main, c.ZeroPool: zero})
+}
+
+// StableAfterMissing checks only the two authorized groups left after VMSS deletion.
+func (s Snapshot) StableAfterMissing(c Config, main, zero int) error {
+	if c.Phase != "missing-vmss" {
+		return fmt.Errorf("surviving-pool stability requires the missing-vmss phase")
+	}
+	if _, exists := s.Pools[c.MissingPool]; exists {
+		return fmt.Errorf("deleted VMSS still exists")
+	}
+	surviving := c
+	surviving.Phase = ""
+	return s.StablePools(surviving, map[string]int{c.MainPool: main, c.ZeroPool: zero})
 }
 
 // StablePools checks the exact phase pool distribution and registered workers.
