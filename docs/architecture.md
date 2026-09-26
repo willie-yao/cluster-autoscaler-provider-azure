@@ -31,7 +31,7 @@ add stopped-VM reuse or AKS deallocate-mode behavior.
 | Root [go.mod](../go.mod) | Application module `k8s.io/autoscaler/cluster-autoscaler` and Azure adapter dependencies |
 | [cloudprovider/azure](../cloudprovider/azure) | Azure provider, configuration, caches, node groups and Azure-client boundaries |
 | [charts](../charts) | Deployment packaging and frozen render compatibility tests |
-| [cloudprovider/azure/test](../cloudprovider/azure/test) | Separate E2E Go module, not entered by the root local checks |
+| [cloudprovider/azure/test](../cloudprovider/azure/test) | Separate Go module for the maintained E2E harness and scenarios |
 
 The root module pins extracted core to
 `sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0`, sourced
@@ -48,7 +48,8 @@ dependency pins.
 
 [`azure_config_test.go`](../cloudprovider/azure/azure_config_test.go) covers
 default, file, legacy-field and environment precedence, including conflicting
-authentication choices.
+authentication choices. The provider's runtime configuration is not derived
+from the E2E JSON binding.
 
 [`azure_migration_test.go`](../cloudprovider/azure/azure_migration_test.go)
 exercises real provider methods with mocked Azure clients. It checks tagged
@@ -65,6 +66,45 @@ top-level resource `metadata.labels["helm.sh/chart"]` transition from
 labels, other labels and functional fields remain compared without broader
 normalization, as described in the
 [oracle provenance](../charts/testdata/azure-compatibility/README.md).
+
+## E2E workload and observation path
+
+```text
+operator prepares and authorizes fixture
+  -> test checks JSON binding, ownership, controller and capacity bounds
+  -> test creates Kubernetes workload demand
+  -> real autoscaler scales workers
+  -> test observes Azure instances, Nodes and workload state
+  -> test removes owned workloads and waits for baseline
+  -> operator tears down infrastructure
+```
+
+[`Config`](../cloudprovider/azure/test/pkg/environment/config.go) binds the
+suite to an explicit kubeconfig/context, `kube-system` Namespace UID, run ID,
+controller/image, Azure scope and two pools.
+[`Environment`](../cloudprovider/azure/test/pkg/environment/environment.go)
+checks this binding and the operator-created marker. The marker expresses
+opt-in and consistency, not independent security authorization.
+
+The [`Cloud` interface](../cloudprovider/azure/test/pkg/environment/azure.go)
+has only reads. The harness cannot make a scale-up test pass by directly
+resizing a VMSS. For example, `CA-005` in
+[`public_test.go`](../cloudprovider/azure/test/suites/scaleup/public_test.go)
+grows an anti-affinity workload from one to three replicas and requires three
+distinct real workers across the owned pools.
+
+Desired capacity, cloud instances and Ready Nodes are separate observations.
+[`observations.go`](../cloudprovider/azure/test/pkg/environment/observations.go)
+requires identity and per-pool consistency for stable state. Known bound
+breaches become terminal failures in
+[`readSnapshot`](../cloudprovider/azure/test/suites/scaleup/suite_test.go);
+ordinary read failures can retry while waiting for convergence. A partial
+instance list can prove an upper-bound breach, not a lower-bound violation.
+Negative windows also require a fresh healthy controller.
+
+The fixture's four-VM/eight-vCPU checks are sampled guards, not a spending
+interlock or a statement of all provider capabilities. Read the
+[operator guide](../cloudprovider/azure/test/README.md) before any live run.
 
 ## Build metadata
 

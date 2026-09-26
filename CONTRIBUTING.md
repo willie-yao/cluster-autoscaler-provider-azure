@@ -25,15 +25,15 @@ git diff --check
 
 On macOS, use `make test-ci GOOS=darwin`. Start with a targeted test while
 iterating, then run the applicable checks before requesting review. The
-[testing guide](docs/testing.md) explains which targets enter nested modules.
-A root `go test ./...` does not test nested modules.
+[testing guide](docs/testing.md) explains which targets enter the nested E2E
+module. A root `go test ./...` does not test that module.
 
 The CapacityBuffer, CapacityQuota and ProvisioningRequest APIs come from the
 published `k8s.io/autoscaler/cluster-autoscaler/apis` module. Make API changes
 upstream in `kubernetes/autoscaler`, then update the module version together
 with the extracted core.
 
-## Chart changes
+## Chart and E2E changes
 
 Chart changes must pass `make test-chart`. The frozen upstream YAML is an
 independent oracle, not output to regenerate from the chart under test. Explain
@@ -42,6 +42,10 @@ intentional compatibility changes and preserve the
 Chart/app version changes are separate release decisions; the existing PR
 chart-version check is not waived by a local test pass.
 
+The maintained E2E module uses an explicitly prepared disposable environment.
+Use `make test-e2e-local` for development without cloud credentials. Never use
+legacy setup targets as a substitute for the
+[operator contract](cloudprovider/azure/test/README.md#operator-contract).
 Live runs need separate authorization, ownership, budget and cleanup planning.
 Keep credentials, kubeconfigs and private run artifacts out of commits.
 

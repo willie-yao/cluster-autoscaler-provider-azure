@@ -5,27 +5,25 @@ DEV_DIR:=$(CAS_ROOT)/cloudprovider/azure/examples/dev
 CLUSTER_AUTOSCALER_NAMESPACE?=default
 CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME?=cluster-autoscaler
 
-# TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scaleup).
-# When unset, all suites under suites/ are run.
-TEST_SUITE?=
+# TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scalephase).
+# Default live runs keep the original scaleup selection.
+TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
+ENVIRONMENT?=
 
-# Compute ginkgo suite path: ./suites/... (all) or ./suites/<name>/... (single)
+# Compute the selected suite path.
 SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/...,./suites/...)
 FOCUS?=
 LABEL_FILTER?=
 ARTIFACTS?=_artifacts
 
 # --------------------------------------------------------------------------
-# Local developer targets
+# Operator-prepared E2E and legacy AKS development targets
 # --------------------------------------------------------------------------
-# Prerequisites:
-#   1. az login
-#   2. make setup-cluster   (creates AKS + ACR + identity, one-time)
-#   3. make deploy-local    (builds + deploys CAS via skaffold)
-#   4. make e2etests        (runs the tests)
-#
-# Required env var: AZURE_RESOURCE_GROUP (set automatically by setup-cluster)
+# Current E2E workflow:
+#   Prepare the VMSS Uniform fixture described in README.md separately, then pass
+#   ENVIRONMENT=/absolute/path/to/environment.json to e2etests.
+#   Legacy AKS targets do not prepare or validate this fixture.
 
 .PHONY: help
 help: ## Display help
@@ -33,45 +31,56 @@ help: ## Display help
 		/^[a-zA-Z_0-9-]+:.*?##/ { printf "  \033[36m%-25s\033[0m %s\n", $$1, $$2 } \
 		/^##@/ { printf "\n\033[1m%s\033[0m\n", substr($$0, 5) }' $(MAKEFILE_LIST)
 
-##@ Cluster Setup (one-time)
+##@ Legacy AKS development setup (not the current E2E fixture)
 
 .PHONY: setup-cluster
-setup-cluster: ## Create AKS cluster + ACR + workload identity for e2e testing
+setup-cluster: ## Legacy: create AKS + ACR + workload identity
 	cd $(DEV_DIR) && bash ./aks-dev-deploy.sh
 
-##@ Build & Deploy
+##@ Legacy AKS build and deployment
 
 .PHONY: deploy-local
-deploy-local: ## Build CAS and deploy to cluster via skaffold
+deploy-local: ## Legacy: build and deploy CAS with the AKS Skaffold configuration
 	cd $(CAS_ROOT) && skaffold run --filename cloudprovider/azure/examples/dev/skaffold.yaml
 
 .PHONY: deploy-local-dev
-deploy-local-dev: ## Build + deploy CAS in watch mode (auto-redeploy on changes)
+deploy-local-dev: ## Legacy: watch and redeploy CAS with the AKS Skaffold configuration
 	cd $(CAS_ROOT) && skaffold dev --filename cloudprovider/azure/examples/dev/skaffold.yaml
 
-##@ E2E Testing
+##@ Current operator-prepared E2E workflow
 
 .PHONY: e2etests
-e2etests: ## Run e2e tests (CAS must already be deployed)
-	go run github.com/onsi/ginkgo/v2/ginkgo \
+e2etests: ## Run E2Es on a prepared fixture with CAS deployed (ENVIRONMENT=<JSON binding>)
+	@test -n "$(ENVIRONMENT)" || (echo "ENVIRONMENT must name an explicit JSON binding"; exit 1)
+	go run -mod=readonly github.com/onsi/ginkgo/v2/ginkgo \
 		--tags e2e \
-		-v --trace \
+		-v --trace --fail-fast --fail-on-empty \
 		--timeout $(TEST_TIMEOUT) \
 		--output-dir "$(ARTIFACTS)" \
 		--junit-report="junit.e2e_suite.1.xml" \
+		--json-report="report.e2e_suite.1.json" \
 		$(if $(FOCUS),--focus="$(FOCUS)",) \
 		$(if $(LABEL_FILTER),--label-filter="$(LABEL_FILTER)",) \
 		$(SUITE_PATH) -- \
-		-resource-group="$(AZURE_RESOURCE_GROUP)"
+		-environment="$(ENVIRONMENT)"
 
-##@ Utilities
+.PHONY: test-local
+test-local: ## Validate harness logic and E2E registration without cloud credentials
+	go test -mod=readonly -race ./pkg/...
+	go test -mod=readonly -race -tags=e2e ./suites/... -run '^Test(ReadSnapshotPolling|ReadActiveSnapshotRejectsControllerLoss|DRAFixtureImage|PDBFixtureDiagnostics|DiskStatefulSetManifest|BalancedPlan|MinimumPlan|UnregisteredDeletionEvent|SpotScaleDownEvent|SpotDisruptionEvent)$$'
+	go test -mod=readonly -tags=e2e ./suites/... -run '^$$'
+	go test -mod=readonly -tags=e2e ./suites/... -run '^Test(ScaleUp|ScalePhase)$$' -count=1 -args -ginkgo.dry-run
+
+##@ Current suite utilities
 
 .PHONY: list-suites
 list-suites: ## List available test suites
 	@find suites -mindepth 1 -maxdepth 1 -type d -printf '%f\n' 2>/dev/null || echo "No suites found."
 
+##@ Legacy AKS environment checks
+
 .PHONY: validate-env
-validate-env: ## Check required environment variables
+validate-env: ## Legacy: check AKS environment variables, not the E2E JSON binding
 	@missing=""; \
 	for var in AZURE_SUBSCRIPTION_ID AZURE_RESOURCE_GROUP; do \
 		eval val=\$$$$var; \
