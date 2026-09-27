@@ -64,14 +64,15 @@ labels are a JSON object with string values, and taints use
 `min:max:policy:name` also works. The settings file uses the same fields as
 separate JSON properties and defaults the policy to `Delete`.
 
-The provider accepts `Deallocate` in both the settings file and extended
-specs, but it logs an error and skips each well-formed `Deallocate` group.
-It does not register the group through auto-discovery either. Other groups
-continue to autoscale. A malformed `--nodes` spec still causes a startup error.
-An invalid settings file follows the startup behavior described above.
-Deallocate would keep a stopped VM and its Node object, but the unchanged
-autoscaler core does not support that flow. Treating it as Delete would
-remove Nodes and VMs instead.
+The provider uses `Deallocate` in either input to opt a supported VMSS group
+into provider-only deallocation. It logs the eligibility error and skips an
+unsupported group, including in auto-discovery, while other groups continue
+to autoscale. A malformed `--nodes` spec still causes a startup error. An
+invalid settings file follows the startup behavior described above. The
+provider deallocates a VM and deletes its old Node, so a later Start can
+register a new Node. The unchanged core does not use AKS's own deallocation
+flow. The global `providerOnlyDeallocate` setting still enables provider-only
+deallocation for every eligible group, even if its spec says `Delete`.
 
 The reference AKS provider applies labels and taints from extended specs to
 both VMs pools and VMSS templates. For VMSS pools, nonempty spec labels replace

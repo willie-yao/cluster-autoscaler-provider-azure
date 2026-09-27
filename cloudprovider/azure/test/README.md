@@ -25,7 +25,7 @@ Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
 
-Nine additional cases run in `suites/scalephase` with
+Eleven additional cases run in `suites/scalephase` with
 `TEST_SUITE=scalephase`. The large-pool case alone has higher limits:
 55 VMs and 60 vCPUs. All other cases remain at four VMs and eight
 vCPUs. The 29 default `scaleup` cases keep their two-pool fixture.
@@ -137,7 +137,8 @@ Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
 For a phased case, use a separate copy of the binding and set `phase` to
 `balance`, `no-join`, `minimum`, `spot`, `large`, `cse`,
-`spot-eviction`, `missing-vmss` or `local-storage`.
+`spot-eviction`, `missing-vmss`, `local-storage`, `deallocate` or
+`deallocate-failed`.
 The balance phase also requires
 `balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
 in the other phases. Spot requires `spotPool` and `spotLabel`. Large
@@ -148,7 +149,9 @@ binding requires the Spot pool fields and `evictSpot: true`.
 A `missing-vmss` binding requires `missingPool` and
 `deleteMissingPool: true`. A `local-storage` binding requires
 `skipLocalStorage` true or false. Each other phase must omit
-those fields. Use an operator-measured `demandCPU` for one Pod per B1ms worker
+those fields. Set `deallocateHold` only for a deallocate phase. It defaults to
+one minute and accepts values from one to thirty minutes. Use an
+operator-measured `demandCPU` for one Pod per B1ms worker
 in the large phase. A missing phase skips the new cases. A wrong marker
 or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
@@ -415,6 +418,59 @@ for five minutes. With false, it checks
 physical VM, Node and NIC deletion and
 that the Pod restarts on the survivor.
 The EmptyDir contents need not survive.
+
+For `AZ-P3-001`, set `phase: deallocate`, main discovery tags `min=1`,
+`max=2`, physical main capacity one, and zero tags `min=0`, `max=0`.
+For `AZ-P3-002`, use a fresh `deallocate-failed` fixture with the same
+tags and one main worker. A parked B stays in the scale set, and core
+may grow C while B is being deallocated, so allow physical main
+capacity up to three for this case. The control plane plus three
+D2s_v5 workers reach the four-VM, eight-vCPU cap. No other VM may
+be created. Use zone 1, Uniform, Regular priority, managed full OS
+disks, no `aks-managed-*` tags, and `providerOnlyDeallocate: false` in
+the cloud config. The single controller needs both
+`--node-group-auto-discovery=label:cluster-autoscaler-name=<discoveryValue>`
+and exactly one `--nodes=1:2:Deallocate:<mainPool>`. Use
+`--max-nodes-total=4`, `--v=3`, the bounded scale-down flags above
+and, for `AZ-P3-002`, `--max-node-provision-time=15m`.
+Set `allow-deallocate-fixture: AZ-P3-001` or
+`allow-deallocate-failed-fixture: AZ-P3-002` on the operator marker.
+The other cases do not accept this explicit group.
+
+Grant the autoscaler ServiceAccount Node `delete` as well as its usual
+Node and eviction permissions. The provider deletes the old Node after
+parking B, so it cannot keep the old UID. Install a per-boot CNI
+cleanup hook on every worker: on a new boot it must remove the old
+bridge conflist before the worker's new PodCIDR is assigned, so the
+node network setup can generate a fresh conflist. Keep the join
+bootstrap and route setup working on a restarted VM. Use a pinned
+workload image with `sh`, `sleep`, `httpd` and `wget`; the normal case
+probes Pod IPs and a Service from both worker Nodes. The runner reads
+the retained VM ID, full OS disk ID and power state in Azure; it does
+not repair the guest. It holds B parked for `deallocateHold` and checks
+that a later provider Start registers the same VM with a new Node
+UID, a new boot ID and a PodCIDR.
+
+For `AZ-P3-002`, arm a one-attempt kubelet fault on **only** the captured
+B VM while B is healthy. The fault must do nothing on the arm boot,
+block kubelet for the whole first new boot, and release on a later
+new boot. Do not change the VMSS model or another guest. The case
+creates `arm-kubelet-fault` in its run-owned namespace with exact
+`run-id`, `resource-id`, `vm-id`, `disk-id` and `boot-id` data. Before
+acting, compare these fields against the actual tagged VMSS and
+instance, including `autoscaler-e2e-run=<runID>`, and refuse any
+mismatch. Then create `fault-armed` in that namespace with the same
+fields and run label `autoscaler-e2e-run=<runID>`. Do not create the
+receipt until the gate is installed, the current boot is unchanged,
+and kubelet is still running. After the runner parks B and the
+provider starts it, observe the guest through the run-owned Bastion
+path. Only when the new boot's gate has blocked kubelet, create
+`fault-observed` with the same VM and disk fields and the **new**
+`boot-id`, plus the run label. The runner never writes to Azure or a
+guest. It checks that no B Node registers, demand remains pending,
+and the core's unregistered cleanup calls synthetic Deallocate rather
+than deleting B or its disk. A boot between arming and the designated
+Start invalidates this fixture.
 
 The workload image must provide `sh` and `sleep`; pin its digest. The tests use
 idle containers with scheduling requests rather than consuming the requested

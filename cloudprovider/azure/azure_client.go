@@ -239,7 +239,7 @@ func newVMSSPowerClient(
 	return armcomputev7.NewVirtualMachineScaleSetVMsClient(subscriptionID, cred, options)
 }
 
-func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
+func newAzClient(cfg *Config, env *azure.Environment, nodeGroupSpecs []string) (*azClient, error) {
 	armConfig := newARMClientConfig(cfg, env)
 
 	// Create AzureAuthConfig for auth provider
@@ -338,7 +338,7 @@ func newAzClient(cfg *Config, env *azure.Environment) (*azClient, error) {
 		return nil, fmt.Errorf("failed to create deployment client wrapper: unexpected client type")
 	}
 	var powerClient vmssPowerClient
-	if cfg.ProviderOnlyDeallocate {
+	if cfg.ProviderOnlyDeallocate || hasExplicitDeallocatePolicy(nodeGroupSpecs) {
 		powerClient, err = newVMSSPowerClient(cfg.SubscriptionID, cred, armConfig, cloudConfig)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create VMSS power client: %w", err)

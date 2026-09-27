@@ -891,6 +891,122 @@ func TestFetchExplicitNodeGroupsSkipsDeallocate(t *testing.T) {
 	}
 }
 
+func TestFetchExplicitNodeGroupsDeallocatePolicy(t *testing.T) {
+	manager := newTestAzureManager(t)
+	manager.azureCache.setScaleSet("pool", (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss())
+	blocked := (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss()
+	blocked.Name = ptr.To("blocked")
+	blocked.Tags["aks-managed-poolName"] = ptr.To("blocked")
+	manager.azureCache.setScaleSet("blocked", blocked)
+	specs := []string{
+		"1:2:Deallocate:pool:{}|",
+		"0:1:Delete:test-asg:{}|",
+		"0:1:Deallocate:blocked:{}|",
+	}
+	if err := manager.fetchExplicitNodeGroups(specs); err != nil {
+		t.Fatal(err)
+	}
+	groups := manager.azureCache.getRegisteredNodeGroups()
+	if len(groups) != 2 {
+		t.Fatalf("registered node groups = %v, want one Deallocate and one Delete group", groups)
+	}
+	modes := map[string]bool{}
+	for _, group := range groups {
+		scaleSet, ok := group.(*ScaleSet)
+		if !ok {
+			t.Fatalf("registered non-VMSS group %T", group)
+		}
+		modes[group.Id()] = scaleSet.providerOnlyDeallocate()
+	}
+	if !modes["pool"] || modes["test-asg"] || !manager.explicitlyConfigured["blocked"] {
+		t.Fatalf("unexpected policy or skip: modes=%v blocked=%t", modes, manager.explicitlyConfigured["blocked"])
+	}
+	if !manager.providerOnlyDeallocateEnabled() {
+		t.Fatal("per-pool policy did not enable receipt reconciliation")
+	}
+	manager.config.ProviderOnlyDeallocate = true
+	if !groups[0].(*ScaleSet).providerOnlyDeallocate() || !groups[1].(*ScaleSet).providerOnlyDeallocate() {
+		t.Fatal("global flag must also apply to Delete groups")
+	}
+}
+
+func TestCreateAzureManagerRetriesDeallocateInventory(t *testing.T) {
+	originalEnv := saveAndClearEnv()
+	t.Cleanup(func() { loadEnv(originalEnv) })
+
+	ctrl := gomock.NewController(t)
+	vmssClient := mock_virtualmachinescalesetclient.NewMockInterface(ctrl)
+	vmClient := mock_virtualmachineclient.NewMockInterface(ctrl)
+	vmssVMClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
+	vmss := (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss()
+	vmss.Name = ptr.To("pool")
+	gomock.InOrder(
+		vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return(nil, fmt.Errorf("temporary VMSS list failure")),
+		vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachineScaleSet{vmss}, nil).AnyTimes(),
+	)
+	vmClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachine{}, nil).AnyTimes()
+	vmssVMClient.EXPECT().ListVMInstanceView(gomock.Any(), "fakeId", "pool").Return([]*armcompute.VirtualMachineScaleSetVM{}, nil).AnyTimes()
+	client := &azClient{
+		virtualMachineScaleSetsClient:   vmssClient,
+		virtualMachinesClient:           vmClient,
+		virtualMachineScaleSetVMsClient: vmssVMClient,
+	}
+	opts := cloudprovider.NodeGroupDiscoveryOptions{NodeGroupSpecs: []string{"1:2:Deallocate:pool"}}
+	manager, err := createAzureManagerInternal(strings.NewReader(validAzureCfg), opts, client)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups := manager.getNodeGroups()
+	if len(groups) != 1 || !groups[0].(*ScaleSet).providerOnlyDeallocate() {
+		t.Fatalf("initial inventory failure skipped eligible group: %v", groups)
+	}
+}
+
+func TestFetchExplicitNodeGroupsIneligibleDeallocate(t *testing.T) {
+	for _, scenario := range []string{"spot", "flex", "ephemeral", "aks-managed", "hosted", "vms", "standard"} {
+		t.Run(scenario, func(t *testing.T) {
+			manager := newTestAzureManager(t)
+			vmss := (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss()
+			switch scenario {
+			case "spot":
+				vmss.Properties.VirtualMachineProfile.Priority = ptr.To(armcompute.VirtualMachinePriorityTypesSpot)
+			case "flex":
+				vmss.Properties.OrchestrationMode = ptr.To(armcompute.OrchestrationModeFlexible)
+			case "ephemeral":
+				vmss.Properties.VirtualMachineProfile.StorageProfile.OSDisk.DiffDiskSettings = &armcompute.DiffDiskSettings{
+					Option: ptr.To(armcompute.DiffDiskOptionsLocal),
+				}
+			case "aks-managed":
+				vmss.Tags["aks-managed-poolName"] = ptr.To("pool")
+			case "hosted":
+				manager.config.HostedSubscriptionID = "hosted"
+			case "vms":
+				manager.config.EnableVMsAgentPool = true
+			case "standard":
+				manager.config.VMType = providerazureconsts.VMTypeStandard
+			}
+			manager.azureCache.setScaleSet("pool", vmss)
+			specs := []string{"0:1:Deallocate:pool:{}|", "0:1:Delete:test-asg:{}|"}
+			if scenario == "standard" {
+				specs = []string{"1:2:Deallocate:pool:{}|"}
+			}
+			if err := manager.fetchExplicitNodeGroups(specs); err != nil {
+				t.Fatal(err)
+			}
+			groups := manager.azureCache.getRegisteredNodeGroups()
+			if scenario == "standard" {
+				if len(groups) != 0 || !manager.explicitlyConfigured["pool"] {
+					t.Fatalf("groups=%v, skipped=%t", groups, manager.explicitlyConfigured["pool"])
+				}
+				return
+			}
+			if len(groups) != 1 || groups[0].Id() != "test-asg" || !manager.explicitlyConfigured["pool"] {
+				t.Fatalf("groups=%v, skipped=%t", groups, manager.explicitlyConfigured["pool"])
+			}
+		})
+	}
+}
+
 func TestFetchExplicitNodeGroupsMalformedDeallocate(t *testing.T) {
 	manager := newTestAzureManager(t)
 	err := manager.fetchExplicitNodeGroups([]string{

@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -78,11 +79,13 @@ type Config struct {
 	MissingPool          string `json:"missingPool,omitempty"`
 	DeleteMissingPool    bool   `json:"deleteMissingPool,omitempty"`
 	SkipLocalStorage     *bool  `json:"skipLocalStorage,omitempty"`
+	DeallocateHold       string `json:"deallocateHold,omitempty"`
 }
 
 // PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
 type PoolBounds struct {
 	TagMin, ObservedMin, Max int
+	TagMax                   int
 	Label                    string
 }
 
@@ -135,6 +138,13 @@ func (c Config) Pools() map[string]PoolBounds {
 			c.ScalePool: {Max: 50, Label: c.ScaleLabel},
 		}
 	}
+	if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+		zero.Max = 0
+		if c.Phase == "deallocate-failed" {
+			main.TagMax = 2
+			main.Max = 3
+		}
+	}
 	return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
 }
 
@@ -157,6 +167,14 @@ func (c Config) PoolNames() []string {
 		names = append(names, c.ScalePool)
 	}
 	return names
+}
+
+// DeallocateNodeSpec is the one explicit main-pool policy allowed in this fixture.
+func (c Config) DeallocateNodeSpec() []string {
+	if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+		return []string{"1:2:Deallocate:" + c.MainPool}
+	}
+	return nil
 }
 
 // Limits applies the larger bound only to the large-pool phase.
@@ -258,6 +276,13 @@ func (c Config) Validate() error {
 			seen[strings.ToLower(name)] = true
 		}
 	case "no-join", "minimum":
+	case "deallocate", "deallocate-failed":
+		if c.DeallocateHold != "" {
+			hold, err := time.ParseDuration(c.DeallocateHold)
+			if err != nil || hold < time.Minute || hold > 30*time.Minute {
+				return fmt.Errorf("deallocateHold must be between one and thirty minutes")
+			}
+		}
 	case "spot", "spot-eviction":
 		if err := c.validateAdditionalPool(c.SpotPool, c.SpotLabel); err != nil {
 			return fmt.Errorf("spot phase: %w", err)
@@ -306,6 +331,9 @@ func (c Config) Validate() error {
 	}
 	if c.Phase != "local-storage" && c.SkipLocalStorage != nil {
 		return fmt.Errorf("skipLocalStorage requires the local-storage phase")
+	}
+	if c.Phase != "deallocate" && c.Phase != "deallocate-failed" && c.DeallocateHold != "" {
+		return fmt.Errorf("deallocateHold requires a deallocate phase")
 	}
 	return nil
 }

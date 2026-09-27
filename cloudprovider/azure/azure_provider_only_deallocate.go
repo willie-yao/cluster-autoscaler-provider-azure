@@ -162,7 +162,7 @@ type acceptedSyntheticDeallocateOperation struct {
 func (m *AzureManager) providerOnlyGroup(providerID string) (*ScaleSet, error) {
 	for _, group := range m.getNodeGroups() {
 		scaleSet, ok := group.(*ScaleSet)
-		if !ok {
+		if !ok || !scaleSet.providerOnlyDeallocate() {
 			continue
 		}
 		vmss, err := scaleSet.getVMSSFromCache()
@@ -187,6 +187,32 @@ func (cfg *Config) validateProviderOnlyDeallocate() error {
 		return fmt.Errorf("providerOnlyDeallocate requires non-hosted Uniform VMSS")
 	}
 	return nil
+}
+
+func (s *ScaleSet) providerOnlyDeallocate() bool {
+	return s.deallocate || s.manager.config.ProviderOnlyDeallocate
+}
+
+func hasExplicitDeallocatePolicy(specs []string) bool {
+	for _, spec := range specs {
+		parts := strings.SplitN(spec, ":", 4)
+		if len(parts) == 4 && parts[2] == "Deallocate" {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *AzureManager) providerOnlyDeallocateEnabled() bool {
+	if m.config.ProviderOnlyDeallocate {
+		return true
+	}
+	for _, group := range m.getNodeGroups() {
+		if scaleSet, ok := group.(*ScaleSet); ok && scaleSet.deallocate {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ScaleSet) validateParking() error {

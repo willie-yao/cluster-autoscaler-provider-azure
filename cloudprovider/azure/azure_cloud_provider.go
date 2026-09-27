@@ -153,12 +153,12 @@ func (azure *AzureCloudProvider) HasInstance(ctx context.Context, node *apiv1.No
 	if !strings.HasPrefix(node.Spec.ProviderID, "azure://") {
 		return false, fmt.Errorf("invalid azure ProviderID prefix for node: %s, skipped", node.Name)
 	}
-	if azure.azureManager.config.ProviderOnlyDeallocate {
+	if azure.azureManager.providerOnlyDeallocateEnabled() {
 		group, err := azure.azureManager.providerOnlyGroup(node.Spec.ProviderID)
 		if err != nil {
 			return false, err
 		}
-		if group == nil {
+		if group == nil || !group.providerOnlyDeallocate() {
 			return azure.azureManager.azureCache.HasInstance(node.Spec.ProviderID)
 		}
 		instances, err := group.Nodes(ctx)

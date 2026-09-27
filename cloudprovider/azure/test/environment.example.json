@@ -35,5 +35,6 @@
   "evictSpot": false,
   "missingPool": "",
   "deleteMissingPool": false,
-  "skipLocalStorage": null
+  "skipLocalStorage": null,
+  "deallocateHold": ""
 }

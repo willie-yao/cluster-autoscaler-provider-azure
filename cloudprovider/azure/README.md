@@ -10,8 +10,12 @@ Build a local image from the root-level source tree with `make image IMAGE=clust
 
 ## Local provider-only deallocate prototype
 
-`"providerOnlyDeallocate": true` in cloud-config opts into a local experimental
-alternative. The default remains physical Delete. This mode supports only
+`"providerOnlyDeallocate": true` in cloud-config opts every eligible pool into
+a local experimental alternative. A `min:max:Deallocate:name` spec in `--nodes`
+or `settings.json` opts in only that pool. When the global setting is true,
+it also applies to pools marked `Delete`; leave it false for mixed policies.
+An ineligible `Deallocate` pool is skipped with a logged reason. The default
+remains physical Delete. This mode supports only
 non-hosted, non-AKS-managed Uniform VMSS pools with regular-priority VMs and
 managed non-ephemeral OS disks. It is not an AKS compatibility release.
 It requires Kubernetes `delete` permission on Nodes, which the existing Helm
