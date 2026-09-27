@@ -9,6 +9,7 @@
 | Go module dependency versions | [`kubernetes/autoscaler@9c6b587bbf54825ec8253caaae77db612a75ef61`](https://github.com/kubernetes/autoscaler/blob/9c6b587bbf54825ec8253caaae77db612a75ef61/cluster-autoscaler/go.mod), which adopted the core's Kubernetes 1.37.0 release |
 | Autoscaler APIs | [`kubernetes/autoscaler@eec9bc4dc1d2`](https://github.com/kubernetes/autoscaler/tree/eec9bc4dc1d2/cluster-autoscaler/apis), module `k8s.io/autoscaler/cluster-autoscaler/apis v0.0.0-20260717085528-eec9bc4dc1d2`, the version required by the extracted core |
 | Public Azure E2E inventory | [`Azure/autoscaler@d892fba1cf557b26d45540f2f6418b7ae52cca46`](https://github.com/Azure/autoscaler/tree/d892fba1cf557b26d45540f2f6418b7ae52cca46), public 1.35-line test source |
+| AKS settings and extended node group behavior | [`Azure/autoscaler@661902b0d6d8b607666fa0bd7cbb63876b8725bd`](https://github.com/Azure/autoscaler/tree/661902b0d6d8b607666fa0bd7cbb63876b8725bd/cluster-autoscaler), Apache-2.0 reference for the settings format, compatibility flags and provider templates; local code follows its behavior without copying its core |
 | Azure Disk E2E intent | [`kubernetes-sigs/cloud-provider-azure@1f871d0ec83cb29874bc33435cbfcb554b5a9ff8`](https://github.com/kubernetes-sigs/cloud-provider-azure/blob/1f871d0ec83cb29874bc33435cbfcb554b5a9ff8/tests/e2e/autoscaling/autoscaler.go), Apache-2.0 source for the StatefulSet disk movement case; the test adapts its intent without copying its code |
 | Similar-pool balancing intent | [`kubernetes-sigs/cloud-provider-azure@1f871d0ec83cb29874bc33435cbfcb554b5a9ff8`](https://github.com/kubernetes-sigs/cloud-provider-azure/blob/1f871d0ec83cb29874bc33435cbfcb554b5a9ff8/tests/e2e/autoscaling/autoscaler.go), Apache-2.0 source for balancing similar node groups; the new case uses a small fixture and checks one two-node plan without copying source code |
 | Spot and slow-scaling E2E intents | [`kubernetes-sigs/cloud-provider-azure@1f871d0ec83cb29874bc33435cbfcb554b5a9ff8`](https://github.com/kubernetes-sigs/cloud-provider-azure/blob/1f871d0ec83cb29874bc33435cbfcb554b5a9ff8/tests/e2e/autoscaling/autoscaler.go), Apache-2.0 source for workload-driven Spot growth and repeated five-node growth; the new cases bind to explicit pools, require Ready workloads and check physical deletion without copying source code |
@@ -27,8 +28,10 @@ dependency-maintenance tooling is retained.
 
 ## Compatibility scope
 
-The provider follows ordinary upstream Azure Delete-mode behavior. It does not
-implement AKS deallocate-mode behavior or claim parity with the
+The provider follows ordinary upstream Azure Delete-mode behavior and accepts
+the AKS settings and extended node group inputs described in
+[architecture](architecture.md). It does not implement AKS deallocate-mode
+behavior or claim full parity with the
 [`Azure/autoscaler` fork](https://github.com/Azure/autoscaler).
 
 Azure-only registration, image placeholders and the managed-identity

@@ -210,7 +210,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	if strings.EqualFold(m.config.VMType, providerazureconsts.VMTypeVMSS) {
 		scaleToZeroSupported = scaleToZeroSupportedVMSS
 	}
-	s, err := dynamic.SpecFromString(spec, scaleToZeroSupported)
+	s, err := parseAzureNodeGroupSpec(spec, scaleToZeroSupported)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
 	}
@@ -220,14 +220,24 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMsPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
 	if isVMsPool {
-		return NewVMPool(s, m, agentPoolName, sku)
+		pool, err := NewVMPool(s.NodeGroupSpec, m, agentPoolName, sku)
+		if err != nil {
+			return nil, err
+		}
+		pool.labels, pool.taints = s.labels, s.taints
+		return pool, nil
 	}
 
 	switch m.config.VMType {
 	case providerazureconsts.VMTypeStandard:
-		return NewAgentPool(s, m)
+		return NewAgentPool(s.NodeGroupSpec, m)
 	case providerazureconsts.VMTypeVMSS:
-		return NewScaleSet(s, m, -1, false)
+		scaleSet, err := NewScaleSet(s.NodeGroupSpec, m, -1, false)
+		if err != nil {
+			return nil, err
+		}
+		scaleSet.labels, scaleSet.taints = s.labels, s.taints
+		return scaleSet, nil
 	default:
 		return nil, fmt.Errorf("vmtype %s not supported", m.config.VMType)
 	}
