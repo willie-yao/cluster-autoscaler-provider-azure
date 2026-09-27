@@ -18,6 +18,7 @@ package azure
 
 import (
 	"fmt"
+	"maps"
 	"math/rand"
 	"regexp"
 	"strconv"
@@ -167,7 +168,7 @@ func buildNodeTemplateFromVMPool(vmsPool armcontainerservice.AgentPool, location
 		return NodeTemplate{}, fmt.Errorf("vmsPool %s has nil properties", ptr.Deref(vmsPool.Name, ""))
 	}
 	// labels from the agentpool
-	labels := vmsPool.Properties.NodeLabels
+	labels := maps.Clone(vmsPool.Properties.NodeLabels)
 	// labels from spec
 	for k, v := range labelsFromSpec {
 		if labels == nil {

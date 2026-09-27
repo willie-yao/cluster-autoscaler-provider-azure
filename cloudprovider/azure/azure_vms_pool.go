@@ -49,6 +49,8 @@ type VMPool struct {
 
 	minSize int
 	maxSize int
+	labels  map[string]string
+	taints  string
 }
 
 // NewVMPool creates a new VMPool - a pool of standalone VMs of a single size.
@@ -491,9 +493,7 @@ func (vmPool *VMPool) TemplateNodeInfo(ctx context.Context) (*framework.NodeInfo
 	if err != nil {
 		return nil, err
 	}
-	inputLabels := map[string]string{}
-	inputTaints := ""
-	template, err := buildNodeTemplateFromVMPool(ap, vmPool.manager.config.Location, vmPool.sku, inputLabels, inputTaints)
+	template, err := buildNodeTemplateFromVMPool(ap, vmPool.manager.config.Location, vmPool.sku, vmPool.labels, vmPool.taints)
 	if err != nil {
 		return nil, err
 	}
