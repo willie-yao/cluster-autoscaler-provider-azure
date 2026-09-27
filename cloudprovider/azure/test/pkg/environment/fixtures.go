@@ -105,7 +105,7 @@ func (e *Environment) CheckPausedController(ctx context.Context) error {
 			return err
 		}
 		args := append(append([]string{}, container.Command...), container.Args...)
-		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage); err != nil {
+		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage, c.DeallocateNodeSpec()...); err != nil {
 			return err
 		}
 		if err := CheckPhaseArguments(args, c); err != nil {
@@ -298,4 +298,39 @@ func (e *Environment) ReadDiskIdentity(ctx context.Context, namespace, pod strin
 		return "", fmt.Errorf("read disk test file from Pod %s: %w", pod, err)
 	}
 	return output.String(), nil
+}
+
+// CheckNetworkProbe checks a Pod IP or Service from one selected test Pod.
+func (e *Environment) CheckNetworkProbe(ctx context.Context, namespace, pod, host string, expected ...string) error {
+	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: e.Config.Kubeconfig},
+		&clientcmd.ConfigOverrides{CurrentContext: e.Config.Context},
+	).ClientConfig()
+	if err != nil {
+		return fmt.Errorf("load network test kubeconfig: %w", err)
+	}
+	config.Timeout = 30 * time.Second
+	pods, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return fmt.Errorf("create network test Pod client: %w", err)
+	}
+	request := pods.CoreV1().RESTClient().Post().Namespace(namespace).Resource("pods").Name(pod).
+		SubResource("exec").VersionedParams(&corev1.PodExecOptions{
+		Container: "work", Command: []string{"wget", "-qO-", "-T", "5", "http://" + host + ":8080/"},
+		Stdout: true,
+	}, scheme.ParameterCodec)
+	executor, err := remotecommand.NewSPDYExecutor(config, "POST", request.URL())
+	if err != nil {
+		return fmt.Errorf("connect to network test Pod: %w", err)
+	}
+	var output bytes.Buffer
+	if err := executor.StreamWithContext(ctx, remotecommand.StreamOptions{Stdout: &output}); err != nil {
+		return fmt.Errorf("network request from Pod %s to %s: %w", pod, host, err)
+	}
+	for _, name := range expected {
+		if strings.TrimSpace(output.String()) == name {
+			return nil
+		}
+	}
+	return fmt.Errorf("network request from Pod %s to %s returned %q, want one of %v", pod, host, output.String(), expected)
 }

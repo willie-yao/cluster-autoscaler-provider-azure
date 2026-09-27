@@ -109,7 +109,7 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 	klog.Infof("Starting azure manager with subscription ID %q", cfg.SubscriptionID)
 
 	if azClient == nil {
-		azClient, err = newAzClient(cfg, &env)
+		azClient, err = newAzClient(cfg, &env, discoveryOpts.NodeGroupSpecs)
 		if err != nil {
 			return nil, err
 		}
@@ -144,16 +144,22 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 	}
 	manager.autoDiscoverySpecs = specs
 
-	if err := manager.fetchExplicitNodeGroups(discoveryOpts.NodeGroupSpecs); err != nil {
-		return nil, err
-	}
-
 	retryBackoff := wait.Backoff{
 		Duration: 2 * time.Minute,
 		Factor:   1.0,
 		Jitter:   0.1,
 		Steps:    6,
 		Cap:      10 * time.Minute,
+	}
+
+	// A failed initial inventory must not make an eligible explicit group look unsupported.
+	if hasExplicitDeallocatePolicy(discoveryOpts.NodeGroupSpecs) {
+		if err := kretry.OnError(retryBackoff, isErrorRetriable, manager.azureCache.regenerate); err != nil {
+			return nil, fmt.Errorf("load VMSS inventory for Deallocate groups: %w", err)
+		}
+	}
+	if err := manager.fetchExplicitNodeGroups(discoveryOpts.NodeGroupSpecs); err != nil {
+		return nil, err
 	}
 
 	// skuCache will already be created at this step by newAzureCache()
@@ -173,11 +179,12 @@ func CreateAzureManager(configReader io.Reader, discoveryOpts cloudprovider.Node
 }
 
 type unsupportedDeallocateError struct {
-	name string
+	name   string
+	reason error
 }
 
 func (e *unsupportedDeallocateError) Error() string {
-	return fmt.Sprintf("Deallocate scale-down is not supported by this build, so node group %q is not autoscaled", e.name)
+	return fmt.Sprintf("Deallocate node group %q is not autoscaled: %v", e.name, e.reason)
 }
 
 func (m *AzureManager) fetchExplicitNodeGroups(specs []string) error {
@@ -245,14 +252,13 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
 	}
-	if s.policy == "Deallocate" {
-		return nil, &unsupportedDeallocateError{name: s.Name}
-	}
-
 	// Starting from release 1.30, a cluster may have both VMSS and VMs pools.
 	// Therefore, we cannot solely rely on the VMType to determine the node group type.
 	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMsPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
+	if s.policy == "Deallocate" && isVMsPool {
+		return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("VMs pools are not supported")}
+	}
 	if isVMsPool {
 		pool, err := NewVMPool(s.NodeGroupSpec, m, agentPoolName, sku)
 		if err != nil {
@@ -264,6 +270,9 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 
 	switch m.config.VMType {
 	case providerazureconsts.VMTypeStandard:
+		if s.policy == "Deallocate" {
+			return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("standard pools are not supported")}
+		}
 		return NewAgentPool(s.NodeGroupSpec, m)
 	case providerazureconsts.VMTypeVMSS:
 		scaleSet, err := NewScaleSet(s.NodeGroupSpec, m, -1, false)
@@ -271,6 +280,12 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 			return nil, err
 		}
 		scaleSet.labels, scaleSet.taints = s.labels, s.taints
+		if s.policy == "Deallocate" {
+			if err := scaleSet.validateParking(); err != nil {
+				return nil, &unsupportedDeallocateError{name: s.Name, reason: err}
+			}
+			scaleSet.deallocate = true
+		}
 		return scaleSet, nil
 	default:
 		return nil, fmt.Errorf("vmtype %s not supported", m.config.VMType)
@@ -285,7 +300,7 @@ func (m *AzureManager) Refresh() error {
 			return err
 		}
 	}
-	if m.config.ProviderOnlyDeallocate {
+	if m.providerOnlyDeallocateEnabled() {
 		return m.reconcileProviderOnlyDeleteReceipts()
 	}
 	return nil
@@ -366,12 +381,17 @@ func (m *AzureManager) UnregisterNodeGroup(nodeGroup cloudprovider.NodeGroup) bo
 
 // GetNodeGroupForInstance returns the NodeGroup of the given Instance
 func (m *AzureManager) GetNodeGroupForInstance(instance *azureRef) (cloudprovider.NodeGroup, error) {
-	if m.config.ProviderOnlyDeallocate {
+	if m.providerOnlyDeallocateEnabled() {
 		group, err := m.providerOnlyGroup(instance.Name)
-		if err != nil || group == nil {
+		if err != nil {
 			return nil, err
 		}
-		return group, nil
+		if group != nil && group.providerOnlyDeallocate() {
+			return group, nil
+		}
+		if m.config.ProviderOnlyDeallocate {
+			return nil, nil
+		}
 	}
 	return m.azureCache.FindForInstance(instance, m.config.VMType)
 }

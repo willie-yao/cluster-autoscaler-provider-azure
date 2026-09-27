@@ -1801,6 +1801,37 @@ func TestProviderOnlyDeallocateUnownedNode(t *testing.T) {
 	require.False(t, has)
 }
 
+func TestProviderOnlyDeallocatePerPoolRouting(t *testing.T) {
+	world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+	provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 2, true)
+	provider.azureManager.config.ProviderOnlyDeallocate = false
+	group.deallocate = true
+	node := parkingNode(0, "pool-node", true)
+	found, err := provider.NodeGroupForNode(t.Context(), node)
+	require.NoError(t, err)
+	require.Same(t, group, found)
+	has, err := provider.HasInstance(t.Context(), node)
+	require.NoError(t, err)
+	require.False(t, has)
+	size, err := group.TargetSize(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, 0, size)
+}
+
+func TestHasExplicitDeallocatePolicy(t *testing.T) {
+	for _, tt := range []struct {
+		specs []string
+		want  bool
+	}{
+		{specs: []string{"1:2:Deallocate:main"}, want: true},
+		{specs: []string{"0:1:zero", "1:2:Delete:main"}, want: false},
+		{specs: []string{"0:1:zero"}, want: false},
+		{specs: []string{"bad:Deallocate:name"}, want: false},
+	} {
+		require.Equal(t, tt.want, hasExplicitDeallocatePolicy(tt.specs))
+	}
+}
+
 func TestProviderOnlyDeallocateUnsupportedPools(t *testing.T) {
 	for _, scenario := range []string{"spot", "low", "flexible", "ephemeral", "aks-managed", "standard", "hosted"} {
 		t.Run(scenario, func(t *testing.T) {

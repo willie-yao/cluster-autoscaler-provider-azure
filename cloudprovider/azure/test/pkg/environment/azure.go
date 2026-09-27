@@ -151,9 +151,13 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 			if err := checkCapacity(name, int(*set.SKU.Capacity), limit.ObservedMin, limit.Max); err != nil {
 				return result, err
 			}
+			tagMax := limit.Max
+			if limit.TagMax != 0 {
+				tagMax = limit.TagMax
+			}
 			if value(set.Tags[RunLabel]) != c.RunID ||
 				value(set.Tags["cluster-autoscaler-name"]) != c.DiscoveryValue ||
-				value(set.Tags["min"]) != strconv.Itoa(limit.TagMin) || value(set.Tags["max"]) != strconv.Itoa(limit.Max) {
+				value(set.Tags["min"]) != strconv.Itoa(limit.TagMin) || value(set.Tags["max"]) != strconv.Itoa(tagMax) {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization", name)
 			}
 			if err := checkScaleDownTags(set.Tags); err != nil {
@@ -240,6 +244,16 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 					instance := Instance{
 						ID: normalizeID(*vm.ID), VMID: value(vm.Properties.VMID),
 						ProvisioningState: value(vm.Properties.ProvisioningState),
+					}
+					if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+						if vm.Properties.StorageProfile == nil || vm.Properties.StorageProfile.OSDisk == nil ||
+							vm.Properties.StorageProfile.OSDisk.ManagedDisk == nil {
+							return result, fmt.Errorf("VMSS %s instance lacks a managed OS disk", name)
+						}
+						instance.OSDiskID = normalizeID(value(vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID))
+						if instance.VMID == "" || instance.OSDiskID == "" {
+							return result, fmt.Errorf("VMSS %s instance lacks VM or OS disk identity", name)
+						}
 					}
 					if (c.Phase == "no-join" || c.Phase == "spot-eviction" && name == c.SpotPool ||
 						c.Phase == "spot" && name == c.SpotPool || c.Phase == "cse" && name == c.FailurePool) && instance.VMID == "" {
@@ -485,6 +499,27 @@ func (e *Environment) InstanceRunning(ctx context.Context, pool, id string) (boo
 	return cloud.instanceRunning(ctx, pool, id)
 }
 
+// InstancePowerState reads the exact VM's Azure power state.
+func (e *Environment) InstancePowerState(ctx context.Context, pool, id string) (string, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok {
+		return "", fmt.Errorf("Azure instance-view reader is unavailable")
+	}
+	view, err := cloud.instanceView(ctx, pool, id)
+	if err != nil {
+		return "", err
+	}
+	for _, status := range view.Statuses {
+		if status != nil {
+			code := strings.ToLower(value(status.Code))
+			if strings.HasPrefix(code, "powerstate/") {
+				return strings.TrimPrefix(code, "powerstate/"), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("VMSS instance has no Azure power state")
+}
+
 // FailedCustomScriptRunning checks the authorized VM's power and extension instance view.
 func (e *Environment) FailedCustomScriptRunning(ctx context.Context, pool, id, extensionName string) (bool, error) {
 	cloud, ok := e.Cloud.(*azureCloud)
@@ -580,6 +615,36 @@ func (a *azureCloud) NICExists(ctx context.Context, id string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("read NIC: HTTP %d (not deletion evidence)", response.StatusCode)
+	}
+}
+
+// DiskExists reads a managed OS disk inside the selected worker resource group.
+func (e *Environment) DiskExists(ctx context.Context, id string) (bool, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok {
+		return false, fmt.Errorf("Azure disk reader is unavailable")
+	}
+	if !strings.HasPrefix(strings.ToLower(id), strings.ToLower(e.Config.resourcePrefix())+"/providers/microsoft.compute/disks/") ||
+		strings.ContainsAny(id, "?#") || strings.Contains(strings.TrimPrefix(strings.ToLower(id),
+		strings.ToLower(e.Config.resourcePrefix())+"/providers/microsoft.compute/disks/"), "/") {
+		return false, fmt.Errorf("OS disk ID is outside the authorized worker resource group")
+	}
+	request, err := runtime.NewRequest(ctx, http.MethodGet, cloud.arm.Endpoint()+id+"?api-version=2024-03-02")
+	if err != nil {
+		return false, err
+	}
+	response, err := cloud.arm.Pipeline().Do(request)
+	if err != nil {
+		return false, azureError("read OS disk", err)
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK:
+		return true, nil
+	case http.StatusNotFound:
+		return false, nil
+	default:
+		return false, fmt.Errorf("read OS disk: HTTP %d", response.StatusCode)
 	}
 }
 

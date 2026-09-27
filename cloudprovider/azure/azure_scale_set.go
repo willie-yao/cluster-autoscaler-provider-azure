@@ -64,10 +64,11 @@ type ScaleSet struct {
 	azureRef
 	manager *AzureManager
 
-	minSize int
-	maxSize int
-	labels  map[string]string
-	taints  string
+	minSize    int
+	maxSize    int
+	labels     map[string]string
+	taints     string
+	deallocate bool
 
 	enableForceDelete         bool
 	enableDynamicInstanceList bool
@@ -284,7 +285,7 @@ func (scaleSet *ScaleSet) getCurSize() (int64, *GetVMSSFailedError) {
 
 // getScaleSetSize gets Scale Set size.
 func (scaleSet *ScaleSet) getScaleSetSize() (int64, error) {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		return scaleSet.providerOnlyTargetSize()
 	}
 	// First, get the current size of the ScaleSet
@@ -358,7 +359,7 @@ func (scaleSet *ScaleSet) canIncreaseSize(delta int) (int64, error) {
 
 // IncreaseSize increases Scale Set size
 func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		return scaleSet.increaseWithParked(ctx, delta)
 	}
 	size, err := scaleSet.canIncreaseSize(delta)
@@ -382,7 +383,7 @@ func (scaleSet *ScaleSet) IncreaseSize(ctx context.Context, delta int) error {
 // for atomic-scale-up ProvisioningRequest support to provide a capacity guarantee
 // before workloads are admitted.
 func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) error {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		return cloudprovider.ErrNotImplemented
 	}
 	size, err := scaleSet.canIncreaseSize(delta)
@@ -906,7 +907,7 @@ func (scaleSet *ScaleSet) waitForDeleteInstances(poller *runtime.Poller[armcompu
 
 // DeleteNodes deletes the nodes from the group.
 func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		if !isProviderOnlySyntheticCleanup(nodes) {
 			return scaleSet.parkNodes(ctx, nodes)
 		}
@@ -936,7 +937,7 @@ func (scaleSet *ScaleSet) DeleteNodes(ctx context.Context, nodes []*apiv1.Node) 
 
 // ForceDeleteNodes deletes nodes from the group regardless of constraints.
 func (scaleSet *ScaleSet) ForceDeleteNodes(ctx context.Context, nodes []*apiv1.Node) error {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		if isProviderOnlySyntheticCleanup(nodes) {
 			return scaleSet.deallocateSyntheticNodes(ctx, nodes)
 		}
@@ -999,7 +1000,7 @@ func (scaleSet *ScaleSet) TemplateNodeInfo(ctx context.Context) (*framework.Node
 
 // Nodes returns a list of all nodes that belong to this node group.
 func (scaleSet *ScaleSet) Nodes(ctx context.Context) ([]cloudprovider.Instance, error) {
-	if scaleSet.manager.config.ProviderOnlyDeallocate {
+	if scaleSet.providerOnlyDeallocate() {
 		return scaleSet.providerOnlyNodes()
 	}
 	curSize, getVMSSError := scaleSet.getCurSize()

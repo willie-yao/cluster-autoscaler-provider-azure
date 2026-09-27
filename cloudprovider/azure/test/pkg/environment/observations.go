@@ -34,6 +34,7 @@ var ErrBounds = errors.New("resource bounds violated")
 type Instance struct {
 	ID                string
 	VMID              string
+	OSDiskID          string
 	ProvisioningState string
 	NICs              []string
 }
