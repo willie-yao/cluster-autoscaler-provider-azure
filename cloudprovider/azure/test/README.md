@@ -446,10 +446,19 @@ node network setup can generate a fresh conflist. Keep the join
 bootstrap and route setup working on a restarted VM. Use a pinned
 workload image with `sh`, `sleep`, `httpd` and `wget`; the normal case
 probes Pod IPs and a Service from both worker Nodes. The runner reads
-the retained VM ID, full OS disk ID and power state in Azure; it does
-not repair the guest. It holds B parked for `deallocateHold` and checks
-that a later provider Start registers the same VM with a new Node
-UID, a new boot ID and a PodCIDR.
+the retained VMSS instance ID, `vmId`, OS disk ID and name from the
+instance profile, and power state in Azure; it does not repair the guest.
+Uniform VMSS OS disks are managed by the scale set and are not standalone
+disk resources, so a standalone disk GET cannot prove that a disk remains.
+The normal case uses a namespace with Pod Security enforcement set to
+`privileged` to allow two run-owned `hostPath` marker Pods. The first writes
+a random token under `/var/lib/ca-e2e-marker/<runID>` on B before parking,
+and the second checks the token on B after Start. The Pods are deleted
+after use. Keep the worker host and namespace policy able to run these
+Pods. The test holds B parked for `deallocateHold` and checks that a later
+provider Start registers the same VM with a new Node UID, a new boot ID
+and a PodCIDR. The failed-registration case has no marker Pod because
+the restarted worker never registers.
 
 For `AZ-P3-002`, arm a one-attempt kubelet fault on **only** the captured
 B VM while B is healthy. The fault must do nothing on the arm boot,

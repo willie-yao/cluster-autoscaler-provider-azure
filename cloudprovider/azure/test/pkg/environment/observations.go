@@ -30,11 +30,12 @@ import (
 // ErrBounds identifies positively observed resource-envelope or per-pool breaches.
 var ErrBounds = errors.New("resource bounds violated")
 
-// Instance records only identifiers needed to prove physical deletion.
+// Instance records identifiers needed to prove deletion or retention.
 type Instance struct {
 	ID                string
 	VMID              string
 	OSDiskID          string
+	OSDiskName        string
 	ProvisioningState string
 	NICs              []string
 }

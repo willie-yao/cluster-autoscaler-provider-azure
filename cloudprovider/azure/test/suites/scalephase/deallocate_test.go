@@ -20,6 +20,8 @@ package scalephase_test
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -29,6 +31,7 @@ import (
 	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -45,6 +48,11 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 	It("AZ-P3-001 parks and starts the same worker for new demand", Label("AZ-P3-001", "deallocate"), func(ctx SpecContext) {
 		f := setup(ctx, "deallocate", "AZ-P3-001")
 		anchor, demand, worker := growDeallocateWorker(ctx, f)
+		tokenBytes := make([]byte, 16)
+		_, err := rand.Read(tokenBytes)
+		Expect(err).NotTo(HaveOccurred())
+		token := hex.EncodeToString(tokenBytes)
+		runDeallocateMarker(ctx, f, worker.node, token, true)
 		parkDeallocateWorker(ctx, f, demand, worker)
 		hold, err := deallocateHold(f.env.Config)
 		Expect(err).NotTo(HaveOccurred())
@@ -53,7 +61,8 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			return err
 		}, hold, pollInterval).Should(Succeed())
 		AddReportEntry("parked-worker", map[string]string{
-			"vmID": worker.instance.VMID, "diskID": worker.instance.OSDiskID,
+			"instanceID": worker.instance.ID, "vmID": worker.instance.VMID,
+			"diskID": worker.instance.OSDiskID, "diskName": worker.instance.OSDiskName,
 			"nodeUID": string(worker.node.UID), "bootID": worker.node.Status.NodeInfo.BootID,
 		})
 
@@ -88,7 +97,6 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			_, err = f.env.WorkloadState(ctx, f.namespace.Name, demand.Name, f.env.Config.MainPool, 1, 0)
 			return err
 		}, 20*time.Minute, pollInterval).Should(Succeed())
-		Expect(retainedDisk(ctx, f, worker)).To(Succeed())
 		Eventually(ctx, func() error {
 			logs, err := f.env.ReadControllerLogsSince(ctx, started)
 			if err != nil {
@@ -99,9 +107,11 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			}
 			return nil
 		}, 2*time.Minute, pollInterval).Should(Succeed())
+		runDeallocateMarker(ctx, f, newNode, token, false)
 		Expect(probeDeallocateNetwork(ctx, f)).To(Succeed())
 		AddReportEntry("reused-worker", map[string]string{
-			"vmID": worker.instance.VMID, "diskID": worker.instance.OSDiskID,
+			"instanceID": worker.instance.ID, "vmID": worker.instance.VMID,
+			"diskID": worker.instance.OSDiskID, "diskName": worker.instance.OSDiskName,
 			"oldNodeUID": string(worker.node.UID), "newNodeUID": string(newNode.UID),
 			"oldBootID": worker.node.Status.NodeInfo.BootID, "newBootID": newNode.Status.NodeInfo.BootID,
 		})
@@ -200,9 +210,6 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			if state != "deallocated" {
 				return fmt.Errorf("waiting for failed registration cleanup to deallocate VM, got %s", state)
 			}
-			if err := retainedDisk(ctx, f, worker); err != nil {
-				return err
-			}
 			logs, err := f.env.ReadControllerLogsSince(ctx, started)
 			if err != nil {
 				return err
@@ -213,7 +220,8 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			return nil
 		}, 30*time.Minute, pollInterval).Should(Succeed())
 		AddReportEntry("failed-registration-retained", map[string]string{
-			"vmID": worker.instance.VMID, "diskID": worker.instance.OSDiskID,
+			"instanceID": worker.instance.ID, "vmID": worker.instance.VMID,
+			"diskID": worker.instance.OSDiskID, "diskName": worker.instance.OSDiskName,
 			"oldNodeUID": string(worker.node.UID), "oldBootID": worker.node.Status.NodeInfo.BootID,
 			"faultBootID":      faultBootID,
 			"physicalCapacity": fmt.Sprint(final.Pools[f.env.Config.MainPool].Capacity),
@@ -280,7 +288,13 @@ func growDeallocateWorker(ctx SpecContext, f *fixture) (*appsv1.Deployment, *app
 			Expect(ok).To(BeTrue(), "new Node must match its Azure VM")
 			Expect(instance.VMID).NotTo(BeEmpty())
 			Expect(instance.OSDiskID).NotTo(BeEmpty())
+			Expect(instance.OSDiskName).NotTo(BeEmpty())
 			Expect(node.Status.NodeInfo.BootID).NotTo(BeEmpty())
+			AddReportEntry("deallocate-worker-before", map[string]string{
+				"instanceID": instance.ID, "vmID": instance.VMID,
+				"diskID": instance.OSDiskID, "diskName": instance.OSDiskName,
+				"nodeUID": string(node.UID), "bootID": node.Status.NodeInfo.BootID,
+			})
 			return anchor, demand, parkedWorker{instance: instance, node: node}
 		}
 	}
@@ -304,6 +318,12 @@ func parkDeallocateWorker(ctx SpecContext, f *fixture, demand *appsv1.Deployment
 		}
 		return parkedStateFromSnapshot(ctx, f, worker, parked)
 	}, 20*time.Minute, pollInterval).Should(Succeed())
+	current := parked.Pools[f.env.Config.MainPool].Instances[worker.instance.ID]
+	AddReportEntry("deallocate-worker-parked", map[string]string{
+		"instanceID": current.ID, "vmID": current.VMID,
+		"diskID": current.OSDiskID, "diskName": current.OSDiskName,
+		"oldNodeUID": string(worker.node.UID), "oldBootID": worker.node.Status.NodeInfo.BootID,
+	})
 	return parked
 }
 
@@ -340,28 +360,110 @@ func parkedStateFromSnapshot(ctx context.Context, f *fixture, worker parkedWorke
 	if state != "deallocated" {
 		return fmt.Errorf("retained worker power state is %s, want deallocated", state)
 	}
-	return retainedDisk(ctx, f, worker)
-}
-
-func retainedDisk(ctx context.Context, f *fixture, worker parkedWorker) error {
-	exists, err := f.env.DiskExists(ctx, worker.instance.OSDiskID)
-	if err != nil {
-		return err
-	}
-	if !exists {
-		return fmt.Errorf("retained VM OS disk %s is absent", worker.instance.OSDiskID)
-	}
 	return nil
 }
 
 func sameWorker(snapshot environment.Snapshot, pool string, before parkedWorker) error {
 	current, ok := snapshot.Pools[pool].Instances[before.instance.ID]
-	if !ok || !strings.EqualFold(current.VMID, before.instance.VMID) ||
+	if !ok || !strings.EqualFold(current.ID, before.instance.ID) ||
+		current.VMID == "" || !strings.EqualFold(current.VMID, before.instance.VMID) ||
+		current.OSDiskID == "" ||
 		!strings.EqualFold(current.OSDiskID, before.instance.OSDiskID) ||
+		current.OSDiskName == "" || current.OSDiskName != before.instance.OSDiskName ||
 		current.ProvisioningState != "Succeeded" {
-		return fmt.Errorf("VM or full OS disk identity changed for %s", before.instance.ID)
+		return fmt.Errorf("VMSS instance, VM or full OS disk identity changed for %s", before.instance.ID)
 	}
 	return nil
+}
+
+func deallocateMarkerPod(c environment.Config, namespace string, node corev1.Node, token string, write bool) *corev1.Pod {
+	name, command := "deallocate-marker-read", `test "$(cat /marker/token)" = "$TOKEN"`
+	if write {
+		name, command = "deallocate-marker-write", `printf '%s' "$TOKEN" > /marker/token`
+	}
+	path := corev1.HostPathDirectoryOrCreate
+	return &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace,
+			Labels: map[string]string{environment.RunLabel: c.RunID}},
+		Spec: corev1.PodSpec{
+			AutomountServiceAccountToken: ptr.To(false),
+			NodeName:                     node.Name,
+			RestartPolicy:                corev1.RestartPolicyNever,
+			Volumes: []corev1.Volume{{Name: "marker", VolumeSource: corev1.VolumeSource{
+				HostPath: &corev1.HostPathVolumeSource{Path: "/var/lib/ca-e2e-marker/" + c.RunID, Type: &path},
+			}}},
+			Containers: []corev1.Container{{
+				Name: "marker", Image: c.WorkloadImage,
+				Command:      []string{"sh", "-c", command},
+				Env:          []corev1.EnvVar{{Name: "TOKEN", Value: token}},
+				VolumeMounts: []corev1.VolumeMount{{Name: "marker", MountPath: "/marker", ReadOnly: !write}},
+				Resources: corev1.ResourceRequirements{Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("10m"), corev1.ResourceMemory: resource.MustParse("16Mi"),
+				}},
+				SecurityContext: &corev1.SecurityContext{
+					AllowPrivilegeEscalation: ptr.To(false),
+					Capabilities:             &corev1.Capabilities{Drop: []corev1.Capability{"ALL"}},
+					SeccompProfile:           &corev1.SeccompProfile{Type: corev1.SeccompProfileTypeRuntimeDefault},
+				},
+			}},
+		},
+	}
+}
+
+func runDeallocateMarker(ctx SpecContext, f *fixture, node corev1.Node, token string, write bool) {
+	var currentNode corev1.Node
+	Expect(f.env.K8s.Get(ctx, client.ObjectKey{Name: node.Name}, &currentNode)).To(Succeed())
+	Expect(currentNode.UID).To(Equal(node.UID))
+	pod := deallocateMarkerPod(f.env.Config, f.namespace.Name, node, token, write)
+	Expect(f.env.K8s.Create(ctx, pod)).To(Succeed())
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(deleteDeallocateMarkerPod(ctx, f, pod)).To(Succeed())
+	})
+	Eventually(ctx, func() error {
+		var current corev1.Pod
+		if err := f.env.K8s.Get(ctx, client.ObjectKeyFromObject(pod), &current); err != nil {
+			return err
+		}
+		if current.UID != pod.UID || current.Labels[environment.RunLabel] != f.env.Config.RunID ||
+			current.Spec.NodeName != node.Name {
+			return fmt.Errorf("marker Pod identity or worker changed")
+		}
+		if current.Status.Phase == corev1.PodFailed {
+			StopTrying("marker Pod failed on its assigned worker").Now()
+		}
+		if current.Status.Phase != corev1.PodSucceeded {
+			return fmt.Errorf("waiting for marker Pod on %s, phase %s", node.Name, current.Status.Phase)
+		}
+		return nil
+	}, 5*time.Minute, pollInterval).Should(Succeed())
+	Expect(f.env.K8s.Get(ctx, client.ObjectKey{Name: node.Name}, &currentNode)).To(Succeed())
+	Expect(currentNode.UID).To(Equal(node.UID))
+	Expect(deleteDeallocateMarkerPod(ctx, f, pod)).To(Succeed())
+	Eventually(ctx, func() error {
+		err := f.env.K8s.Get(ctx, client.ObjectKeyFromObject(pod), &corev1.Pod{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("marker Pod still exists")
+	}, 2*time.Minute, pollInterval).Should(Succeed())
+}
+
+func deleteDeallocateMarkerPod(ctx context.Context, f *fixture, pod *corev1.Pod) error {
+	var current corev1.Pod
+	err := f.env.K8s.Get(ctx, client.ObjectKeyFromObject(pod), &current)
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if current.UID != pod.UID || current.Labels[environment.RunLabel] != f.env.Config.RunID {
+		return fmt.Errorf("marker Pod identity or run tag changed")
+	}
+	return f.env.K8s.Delete(ctx, &current, client.Preconditions{UID: &pod.UID})
 }
 
 func operatorFaultReceipt(ctx context.Context, f *fixture, name string, worker parkedWorker, bootID string) error {
