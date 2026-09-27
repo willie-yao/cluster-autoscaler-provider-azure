@@ -356,7 +356,8 @@ func retainedDisk(ctx context.Context, f *fixture, worker parkedWorker) error {
 
 func sameWorker(snapshot environment.Snapshot, pool string, before parkedWorker) error {
 	current, ok := snapshot.Pools[pool].Instances[before.instance.ID]
-	if !ok || current.VMID != before.instance.VMID || current.OSDiskID != before.instance.OSDiskID ||
+	if !ok || !strings.EqualFold(current.VMID, before.instance.VMID) ||
+		!strings.EqualFold(current.OSDiskID, before.instance.OSDiskID) ||
 		current.ProvisioningState != "Succeeded" {
 		return fmt.Errorf("VM or full OS disk identity changed for %s", before.instance.ID)
 	}
