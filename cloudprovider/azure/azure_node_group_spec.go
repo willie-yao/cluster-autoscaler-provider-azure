@@ -24,8 +24,14 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/config/dynamic"
 )
 
+const (
+	scaleDownPolicyDelete     = "Delete"
+	scaleDownPolicyDeallocate = "Deallocate"
+)
+
 type azureNodeGroupSpec struct {
 	*dynamic.NodeGroupSpec
+	policy string
 	labels map[string]string
 	taints string
 }
@@ -33,7 +39,7 @@ type azureNodeGroupSpec struct {
 // parseAzureNodeGroupSpec parses a node group spec. It accepts the core form
 // <min>:<max>:<name>, the AKS form <min>:<max>:<policy>:<name>, and the AKS form
 // with labels and taints, <min>:<max>:<policy>:<name>:<labels JSON>|<taints>.
-// The policy must be Delete.
+// The policy is Delete or Deallocate, and the core form uses Delete.
 func parseAzureNodeGroupSpec(value string, scaleToZeroSupported bool) (azureNodeGroupSpec, error) {
 	parts := strings.SplitN(value, ":", 5)
 	if len(parts) <= 3 {
@@ -41,18 +47,18 @@ func parseAzureNodeGroupSpec(value string, scaleToZeroSupported bool) (azureNode
 		if err != nil {
 			return azureNodeGroupSpec{}, err
 		}
-		return azureNodeGroupSpec{NodeGroupSpec: spec}, nil
+		return azureNodeGroupSpec{NodeGroupSpec: spec, policy: scaleDownPolicyDelete}, nil
 	}
 
-	if parts[2] != "Delete" {
-		return azureNodeGroupSpec{}, fmt.Errorf("invalid scale down policy %q in node group spec %q: only Delete is supported; Deallocate needs core support", parts[2], value)
+	if parts[2] != scaleDownPolicyDelete && parts[2] != scaleDownPolicyDeallocate {
+		return azureNodeGroupSpec{}, fmt.Errorf("invalid scale down policy %q in node group spec %q: want Delete or Deallocate", parts[2], value)
 	}
 	spec, err := dynamic.SpecFromString(parts[0]+":"+parts[1]+":"+parts[3], scaleToZeroSupported)
 	if err != nil {
 		return azureNodeGroupSpec{}, fmt.Errorf("node group spec %q: %w", value, err)
 	}
 
-	result := azureNodeGroupSpec{NodeGroupSpec: spec}
+	result := azureNodeGroupSpec{NodeGroupSpec: spec, policy: parts[2]}
 	if len(parts) == 5 {
 		labelsAndTaints := strings.SplitN(parts[4], "|", 2)
 		if err := json.Unmarshal([]byte(labelsAndTaints[0]), &result.labels); err != nil {

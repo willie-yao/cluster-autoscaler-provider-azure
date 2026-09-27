@@ -56,15 +56,20 @@ They have no effect.
 ## AKS node group specs
 
 The Azure provider accepts `min:max:name` as before. It also accepts
-`min:max:Delete:name:labels|taints`, where labels are a JSON object with string
-values and taints use `key=value:effect`, separated by commas. The policy-only form
-`min:max:Delete:name` also works. The settings file uses the same fields as
+`min:max:policy:name:labels|taints`, where policy is `Delete` or `Deallocate`,
+labels are a JSON object with string values, and taints use
+`key=value:effect`, separated by commas. The policy-only form
+`min:max:policy:name` also works. The settings file uses the same fields as
 separate JSON properties and defaults the policy to `Delete`.
 
-The provider rejects `Deallocate` in both the settings file and extended
-specs. Deallocate would keep a stopped VM and its Node object, but the
-unchanged autoscaler core does not support that flow. Silently treating it as
-Delete would remove Nodes and VMs instead.
+The provider accepts `Deallocate` in both the settings file and extended
+specs, but it logs an error and skips each well-formed `Deallocate` group.
+It does not register the group through auto-discovery either. Other groups
+continue to autoscale. A malformed `--nodes` spec still causes a startup error.
+An invalid settings file follows the startup behavior described above.
+Deallocate would keep a stopped VM and its Node object, but the unchanged
+autoscaler core does not support that flow. Treating it as Delete would
+remove Nodes and VMs instead.
 
 The reference AKS provider applies labels and taints from extended specs to
 both VMs pools and VMSS templates. For VMSS pools, nonempty spec labels replace

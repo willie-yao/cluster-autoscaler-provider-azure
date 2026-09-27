@@ -74,14 +74,20 @@ func TestDecodeAKSSettings(t *testing.T) {
 			wantErr: "max size must be at least min size",
 		},
 		{
-			name:    "unsupported policy",
-			data:    `{"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5,"scaleDownPolicy":"Deallocate"}]}`,
-			wantErr: "scaleDownPolicy \"Deallocate\" is not supported; use Delete",
+			name: "mixed policies",
+			data: `{"nodeGroups":[{"name":"paused","minSize":1,"maxSize":5,"scaleDownPolicy":"Deallocate"},
+				{"name":"active","minSize":0,"maxSize":10,"scaleDownPolicy":"Delete"}]}`,
+			want: []string{"1:5:Deallocate:paused:{}|", "0:10:Delete:active:{}|"},
 		},
 		{
 			name:    "unknown policy",
 			data:    `{"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5,"scaleDownPolicy":"Keep"}]}`,
-			wantErr: "scaleDownPolicy \"Keep\" is not supported; use Delete",
+			wantErr: "scaleDownPolicy \"Keep\" is not supported; use Delete or Deallocate",
+		},
+		{
+			name:    "invalid deallocate sizes",
+			data:    `{"nodeGroups":[{"name":"pool","minSize":5,"maxSize":1,"scaleDownPolicy":"Deallocate"}]}`,
+			wantErr: "max size must be at least min size",
 		},
 		{
 			name: "numeric label converted by yaml decoder",
@@ -147,6 +153,18 @@ func TestUseAKSSettings(t *testing.T) {
 	if !reflect.DeepEqual(opts.NodeGroups, []string{"2:8:Delete:file-pool:{}|"}) ||
 		!reflect.DeepEqual(opts.NodeGroupAutoDiscovery, discovery) {
 		t.Fatalf("file should replace --nodes but not auto-discovery: %+v", opts)
+	}
+
+	writeAKSSettings(t, path, `{"nodeGroups":[{"name":"paused","minSize":1,"maxSize":5,"scaleDownPolicy":"Deallocate"},
+		{"name":"file-pool","minSize":2,"maxSize":8}]}`)
+	opts.NodeGroups = original
+	fetcher, err = useAKSSettings(&opts, path)
+	if err != nil || fetcher == nil {
+		t.Fatalf("mixed settings returned fetcher %v, error %v", fetcher, err)
+	}
+	if !reflect.DeepEqual(opts.NodeGroups, []string{"1:5:Deallocate:paused:{}|", "2:8:Delete:file-pool:{}|"}) ||
+		!reflect.DeepEqual(opts.NodeGroupAutoDiscovery, discovery) {
+		t.Fatalf("file should pass both groups to the provider: %+v", opts)
 	}
 }
 
