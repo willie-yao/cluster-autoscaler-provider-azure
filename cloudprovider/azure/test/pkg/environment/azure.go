@@ -251,7 +251,8 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 							return result, fmt.Errorf("VMSS %s instance lacks a managed OS disk", name)
 						}
 						instance.OSDiskID = normalizeID(value(vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID))
-						if instance.VMID == "" || instance.OSDiskID == "" {
+						instance.OSDiskName = value(vm.Properties.StorageProfile.OSDisk.Name)
+						if instance.VMID == "" || instance.OSDiskID == "" || instance.OSDiskName == "" {
 							return result, fmt.Errorf("VMSS %s instance lacks VM or OS disk identity", name)
 						}
 					}
@@ -615,36 +616,6 @@ func (a *azureCloud) NICExists(ctx context.Context, id string) (bool, error) {
 		return true, nil
 	default:
 		return false, fmt.Errorf("read NIC: HTTP %d (not deletion evidence)", response.StatusCode)
-	}
-}
-
-// DiskExists reads a managed OS disk inside the selected worker resource group.
-func (e *Environment) DiskExists(ctx context.Context, id string) (bool, error) {
-	cloud, ok := e.Cloud.(*azureCloud)
-	if !ok {
-		return false, fmt.Errorf("Azure disk reader is unavailable")
-	}
-	if !strings.HasPrefix(strings.ToLower(id), strings.ToLower(e.Config.resourcePrefix())+"/providers/microsoft.compute/disks/") ||
-		strings.ContainsAny(id, "?#") || strings.Contains(strings.TrimPrefix(strings.ToLower(id),
-		strings.ToLower(e.Config.resourcePrefix())+"/providers/microsoft.compute/disks/"), "/") {
-		return false, fmt.Errorf("OS disk ID is outside the authorized worker resource group")
-	}
-	request, err := runtime.NewRequest(ctx, http.MethodGet, cloud.arm.Endpoint()+id+"?api-version=2024-03-02")
-	if err != nil {
-		return false, err
-	}
-	response, err := cloud.arm.Pipeline().Do(request)
-	if err != nil {
-		return false, azureError("read OS disk", err)
-	}
-	defer response.Body.Close()
-	switch response.StatusCode {
-	case http.StatusOK:
-		return true, nil
-	case http.StatusNotFound:
-		return false, nil
-	default:
-		return false, fmt.Errorf("read OS disk: HTTP %d", response.StatusCode)
 	}
 }
 
