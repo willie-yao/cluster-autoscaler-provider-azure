@@ -24,6 +24,35 @@ examples are described in the [provider guide](../cloudprovider/azure/README.md)
 Ordinary scale-down uses Azure Delete operations. This source tree does not
 add stopped-VM reuse or the AKS deallocate mode.
 
+## AKS settings file
+
+When `--config-path` is set, the application reads `nodeGroups` from the
+mounted settings file before building the autoscaler. For example, AKS mounts
+`/opt/conf/autoscaler/settings.json` with this content:
+
+```json
+{
+  "nodeGroups": [
+    {"name": "pool-vmss", "minSize": 0, "maxSize": 10, "scaleDownPolicy": "Delete"}
+  ]
+}
+```
+
+The settings file replaces `--nodes` while `--config-path` is set. If the file
+is missing or invalid at startup, the application logs the error and starts
+with no explicit node groups. It checks the file before each autoscaler loop
+and exits with status 0 when the node groups change, so the pod can restart
+with the new values. Other settings in the file do not change the node groups.
+If `--config-path` is empty, `--nodes` and auto-discovery work as before.
+Auto-discovery also remains active when it is set alongside `--config-path`.
+The file path comes from the flag. The AKS fork instead always reads
+`/opt/conf/autoscaler/settings.json`, so the two agree when AKS passes that
+standard path.
+
+The flags `--enable-force-delete`, `--enable-dynamic-instance-list` and
+`--enable-detailed-cse-message` are accepted for AKS argument compatibility.
+They have no effect.
+
 ## Module and package boundaries
 
 | Location | Responsibility |
