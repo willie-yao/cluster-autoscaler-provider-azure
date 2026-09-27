@@ -27,6 +27,11 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
 )
 
+const (
+	scaleDownPolicyDelete     = "Delete"
+	scaleDownPolicyDeallocate = "Deallocate"
+)
+
 type aksNodeGroup struct {
 	Name            string            `json:"name"`
 	MinSize         int               `json:"minSize"`
@@ -49,7 +54,7 @@ func decodeAKSSettings(data []byte) (aksSettings, error) {
 	for i := range settings.NodeGroups {
 		group := &settings.NodeGroups[i]
 		if group.ScaleDownPolicy == "" {
-			group.ScaleDownPolicy = "Delete"
+			group.ScaleDownPolicy = scaleDownPolicyDelete
 		}
 		if group.Name == "" {
 			return aksSettings{}, fmt.Errorf("invalid node group: name must not be blank")
@@ -60,8 +65,8 @@ func decodeAKSSettings(data []byte) (aksSettings, error) {
 		if group.MaxSize < group.MinSize {
 			return aksSettings{}, fmt.Errorf("invalid node group %q: max size must be at least min size", group.Name)
 		}
-		if group.ScaleDownPolicy != "Delete" {
-			return aksSettings{}, fmt.Errorf("invalid node group %q: scaleDownPolicy %q is not supported; use Delete", group.Name, group.ScaleDownPolicy)
+		if group.ScaleDownPolicy != scaleDownPolicyDelete && group.ScaleDownPolicy != scaleDownPolicyDeallocate {
+			return aksSettings{}, fmt.Errorf("invalid node group %q: scaleDownPolicy %q is not supported; use Delete or Deallocate", group.Name, group.ScaleDownPolicy)
 		}
 	}
 	return settings, nil

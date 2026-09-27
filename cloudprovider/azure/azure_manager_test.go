@@ -837,6 +837,74 @@ func TestFetchExplicitNodeGroups(t *testing.T) {
 	assert.Equal(t, expectedErr, err, "manager.fetchExplicitNodeGroups return error does not match, expected: %v, actual: %v", expectedErr, err)
 }
 
+func TestFetchExplicitNodeGroupsSkipsDeallocate(t *testing.T) {
+	deallocate := "1:5:Deallocate:paused-vmss:{}|"
+	active := "1:5:Delete:test-asg:{}|"
+	for _, tc := range []struct {
+		name  string
+		specs []string
+	}{
+		{name: "deallocate first", specs: []string{deallocate, active}},
+		{name: "deallocate last", specs: []string{active, deallocate}},
+		{name: "delete spec for skipped group", specs: []string{"1:5:Delete:paused-vmss:{}|", active, deallocate}},
+		{name: "upper case deallocate and auto-discovery", specs: []string{"1:5:Deallocate:PAUSED-VMSS:{}|", active}},
+		{name: "upper case delete spec for skipped group", specs: []string{"1:5:Delete:PAUSED-VMSS:{}|", active, deallocate}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			manager := newTestAzureManager(t)
+			tagValue, min, max := "true", "1", "5"
+			vmss := fakeVMSSWithTags("paused-vmss", map[string]*string{
+				"aks-discovery": &tagValue, "min": &min, "max": &max,
+			})
+			manager.azureCache.setScaleSet("paused-vmss", &vmss)
+
+			if err := manager.fetchExplicitNodeGroups(tc.specs); err != nil {
+				t.Fatal(err)
+			}
+			groups := manager.azureCache.getRegisteredNodeGroups()
+			if len(groups) != 1 || groups[0].Id() != "test-asg" {
+				t.Fatalf("registered node groups = %v, want only test-asg", groups)
+			}
+			if !manager.explicitlyConfigured["paused-vmss"] {
+				t.Fatal("skipped group not excluded from auto-discovery")
+			}
+
+			specs, err := ParseLabelAutoDiscoverySpecs(cloudprovider.NodeGroupDiscoveryOptions{
+				NodeGroupAutoDiscoverySpecs: []string{"label:aks-discovery=true"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			manager.autoDiscoverySpecs = specs
+			discovered, err := manager.getFilteredNodeGroups(specs)
+			if err != nil || len(discovered) != 1 || discovered[0].Id() != "paused-vmss" {
+				t.Fatalf("auto-discovery candidates = %v, error %v, want paused-vmss", discovered, err)
+			}
+			if err := manager.fetchAutoNodeGroups(); err != nil {
+				t.Fatal(err)
+			}
+			groups = manager.azureCache.getRegisteredNodeGroups()
+			if len(groups) != 1 || groups[0].Id() != "test-asg" {
+				t.Fatalf("registered node groups after auto-discovery = %v, want only test-asg", groups)
+			}
+		})
+	}
+}
+
+func TestFetchExplicitNodeGroupsMalformedDeallocate(t *testing.T) {
+	manager := newTestAzureManager(t)
+	err := manager.fetchExplicitNodeGroups([]string{
+		"1:5:Delete:test-asg:{}|",
+		"1:5:Deallocate:paused-vmss:{|",
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid labels") {
+		t.Fatalf("malformed Deallocate spec error = %v, want invalid labels", err)
+	}
+	if len(manager.azureCache.getRegisteredNodeGroups()) != 0 {
+		t.Fatal("registered groups from an invalid spec list")
+	}
+}
+
 func TestGetFilteredAutoscalingGroupsVmss(t *testing.T) {
 	originalEnv := saveAndClearEnv()
 	t.Cleanup(func() {

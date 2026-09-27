@@ -18,6 +18,7 @@ package azure
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 	"strings"
@@ -37,34 +38,44 @@ func TestParseAzureNodeGroupSpec(t *testing.T) {
 		wantName   string
 		wantMin    int
 		wantMax    int
+		wantPolicy string
 		wantLabels map[string]string
 		wantTaints string
 		wantErr    string
 	}{
 		{
 			name: "plain vmss", value: "0:10:pool", zero: true,
-			wantName: "pool", wantMin: 0, wantMax: 10,
+			wantName: "pool", wantMin: 0, wantMax: 10, wantPolicy: "Delete",
 		},
 		{
 			name: "plain standard", value: "1:5:pool",
-			wantName: "pool", wantMin: 1, wantMax: 5,
+			wantName: "pool", wantMin: 1, wantMax: 5, wantPolicy: "Delete",
 		},
 		{
 			name: "policy only", value: "1:50:Delete:pool", zero: true,
-			wantName: "pool", wantMin: 1, wantMax: 50,
+			wantName: "pool", wantMin: 1, wantMax: 50, wantPolicy: "Delete",
 		},
 		{
 			name: "empty labels and taints", value: "1:50:Delete:pool:{}|", zero: true,
-			wantName: "pool", wantMin: 1, wantMax: 50, wantLabels: map[string]string{},
+			wantName: "pool", wantMin: 1, wantMax: 50, wantPolicy: "Delete", wantLabels: map[string]string{},
 		},
 		{
 			name: "labels only", value: `1:50:Delete:pool:{"environment":"prod"}`, zero: true,
-			wantName: "pool", wantMin: 1, wantMax: 50, wantLabels: map[string]string{"environment": "prod"},
+			wantName: "pool", wantMin: 1, wantMax: 50, wantPolicy: "Delete", wantLabels: map[string]string{"environment": "prod"},
 		},
 		{
 			name: "taints and labels with colons", value: `0:10:Delete:pool/Standard_D2_v2:{"zone":"east:1"}|key=value:NoSchedule,other=yes:NoExecute`, zero: true,
-			wantName: "pool/Standard_D2_v2", wantMin: 0, wantMax: 10, wantLabels: map[string]string{"zone": "east:1"},
+			wantName: "pool/Standard_D2_v2", wantMin: 0, wantMax: 10, wantPolicy: "Delete", wantLabels: map[string]string{"zone": "east:1"},
 			wantTaints: "key=value:NoSchedule,other=yes:NoExecute",
+		},
+		{
+			name: "deallocate policy only", value: "1:50:Deallocate:pool", zero: true,
+			wantName: "pool", wantMin: 1, wantMax: 50, wantPolicy: "Deallocate",
+		},
+		{
+			name: "deallocate with labels and taints", value: `0:10:Deallocate:pool:{"team":"prod"}|dedicated=yes:NoSchedule`, zero: true,
+			wantName: "pool", wantMin: 0, wantMax: 10, wantPolicy: "Deallocate",
+			wantLabels: map[string]string{"team": "prod"}, wantTaints: "dedicated=yes:NoSchedule",
 		},
 		{name: "too few parts", value: "1:5", wantErr: "wrong nodes configuration"},
 		{name: "invalid minimum", value: "wrong:5:pool", wantErr: "failed to set min size"},
@@ -73,8 +84,10 @@ func TestParseAzureNodeGroupSpec(t *testing.T) {
 		{name: "zero disallowed for standard", value: "0:5:pool", wantErr: "min size must be >= 1"},
 		{name: "maximum below minimum", value: "5:1:Delete:pool", zero: true, wantErr: "max size must be greater"},
 		{name: "empty name", value: "1:5:Delete:", zero: true, wantErr: "name must not be blank"},
-		{name: "unknown policy", value: "1:5:Keep:pool:{}|", wantErr: "only Delete is supported"},
-		{name: "unsupported deallocate", value: "1:5:Deallocate:pool:{}|", wantErr: "Deallocate needs core support"},
+		{name: "unknown policy", value: "1:5:Keep:pool:{}|", wantErr: "want Delete or Deallocate"},
+		{name: "deallocate invalid maximum", value: "1:wrong:Deallocate:pool", wantErr: "failed to set max size"},
+		{name: "deallocate invalid name", value: "1:5:Deallocate:", wantErr: "name must not be blank"},
+		{name: "deallocate invalid json", value: "1:5:Deallocate:pool:{|", wantErr: "invalid labels"},
 		{name: "invalid json", value: "1:5:Delete:pool:{|", wantErr: "invalid labels"},
 		{name: "invalid label value", value: `1:5:Delete:pool:{"team":42}|`, wantErr: "invalid labels"},
 	} {
@@ -92,12 +105,22 @@ func TestParseAzureNodeGroupSpec(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if spec.Name != tc.wantName || spec.MinSize != tc.wantMin || spec.MaxSize != tc.wantMax ||
+			if spec.Name != tc.wantName || spec.MinSize != tc.wantMin || spec.MaxSize != tc.wantMax || spec.policy != tc.wantPolicy ||
 				spec.SupportScaleToZero != tc.zero || !reflect.DeepEqual(spec.labels, tc.wantLabels) || spec.taints != tc.wantTaints {
-				t.Errorf("parseAzureNodeGroupSpec(%q) = %+v, labels %v, taints %q", tc.value, spec.NodeGroupSpec, spec.labels, spec.taints)
+				t.Errorf("parseAzureNodeGroupSpec(%q) = %+v, policy %q, labels %v, taints %q", tc.value, spec.NodeGroupSpec, spec.policy, spec.labels, spec.taints)
 			}
 		})
 	}
+}
+
+func TestBuildNodeGroupFromSpecUnsupportedDeallocate(t *testing.T) {
+	manager := newTestAzureManager(t)
+	group, err := manager.buildNodeGroupFromSpec("1:5:Deallocate:paused-vmss:{}|")
+	require.Nil(t, group)
+	var policyErr *unsupportedDeallocateError
+	require.True(t, errors.As(err, &policyErr))
+	require.Equal(t, "paused-vmss", policyErr.name)
+	require.Equal(t, `Deallocate scale-down is not supported by this build, so node group "paused-vmss" is not autoscaled`, err.Error())
 }
 
 func TestExtendedScaleSetNodeTemplate(t *testing.T) {
