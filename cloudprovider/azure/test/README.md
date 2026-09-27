@@ -11,7 +11,7 @@ cluster through ASO, as the upstream `kubernetes/autoscaler` Azure job does,
 and [hack/ci-e2e.sh](hack/ci-e2e.sh) deploys the autoscaler and runs one shard of
 the default specs. See [CAPZ Prow jobs](#capz-prow-jobs).
 
-The nine phased cases need VMSS that AKS can't build. For them,
+The eleven phased cases need VMSS that AKS can't build. For them,
 [hack/fixture.sh](hack/fixture.sh) builds the self-managed VMSS fixture, a VMSS
 Uniform cluster with its own control plane VM. See
 [Manual VMSS fixture](#manual-vmss-fixture).
@@ -37,7 +37,7 @@ Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
 
-Nine additional cases run in `suites/scalephase` with
+Eleven additional cases run in `suites/scalephase` with
 `TEST_SUITE=scalephase`. The large-pool case alone has higher limits:
 55 VMs and 60 vCPUs. All other cases remain at four VMs and eight
 vCPUs. The 29 default `scaleup` cases keep their two-pool fixture.
@@ -209,7 +209,7 @@ the read. The binding names the System VMSS in `systemPool` and omits
 `controlPlaneID`. Omit `resourceGroupMode` for the strict operator fixture
 described below.
 
-AKS mode can't bind a `phase`, so the nine phased cases skip when an AKS
+AKS mode can't bind a `phase`, so the eleven phased cases skip when an AKS
 binding selects them. They need custom VMSS that only `fixture.sh` builds,
 and they stay manual on that fixture:
 
@@ -224,6 +224,8 @@ and they stay manual on that fixture:
 | `AZ-P1-013` | `spot-eviction` |
 | `AZ-P1-014` | `missing-vmss` |
 | `AZ-P1-015` | `local-storage` |
+| `AZ-P3-001` | `deallocate` |
+| `AZ-P3-002` | `deallocate-failed` |
 
 No default case depends on the control plane VM, so no default case skips in
 AKS mode. Six of them need extra preparation, which `E2E_PREPARE` selects, as
@@ -271,8 +273,9 @@ Without `E2E_PREPARE`, the marker has `allow-kube-system-fixture: CA-011` for
 shard E. The marker for `etag` and `taint` has no fixture key. The `Slow`
 label marks longer cases, and the upstream `Feature:ClusterSizeAutoscalingScaleUp`
 and `Feature:ClusterSizeAutoscalingScaleDown` labels mark the matching `CA-`
-cases. The nine `scalephase` filters are `balance`, `no-join`, `minimum`,
-`spot`, `large`, `cse`, `spot-eviction`, `missing-vmss` and `local-storage`.
+cases. The eleven `scalephase` filters are `balance`, `no-join`, `minimum`,
+`spot`, `large`, `cse`, `spot-eviction`, `missing-vmss`, `local-storage`,
+`deallocate` and `deallocate-failed`.
 Each selects one case on its own `fixture.sh` phase. The proposed job YAML is
 kept outside the repo until the repo owner, Prow org, registry and CI image are
 chosen.
@@ -287,7 +290,7 @@ separately according to the [operator contract](#operator-contract), then run
 ### Manual VMSS fixture
 
 The script [hack/fixture.sh](hack/fixture.sh) builds the self-managed VMSS
-fixture by hand. Use it for the nine phased cases. It can also prepare
+fixture by hand. Use it for the eleven phased cases. It can also prepare
 filters G to J outside Prow. The script owns only the named run's
 Azure groups and the Kubernetes cluster it creates. The Go tests still read
 Azure; they do not call the script or gain Azure write access. Copy
@@ -427,6 +430,18 @@ before creating a B1ms worker, and `signal start` checks quota
 again before scaling toward 50. The worker subnet has room for
 50 VMs and the Pod CIDR remains `192.168.0.0/16`.
 
+The provider-only deallocate cases run on their own run, from a
+separate `up`. Give that run its own budget share and include the
+earlier runs' estimates in `PAST_RUN_COST_USD`. Run `phase deallocate`,
+`ca-deploy`, `ca-start` and `AZ-P3-001`, then `phase deallocate-failed`,
+`ca-deploy`, `ca-start` and `AZ-P3-002`. These phases set
+`--nodes=1:2:Deallocate:<mainPool>`, `AZURE_PROVIDER_ONLY_DEALLOCATE=false`
+and Node `delete` for the controller. Wait until the controller has parked
+the worker that `AZ-P3-001` used again, then run `phase deallocate-failed`.
+It deletes that parked VM, so main starts again from one worker. The
+script doesn't arm the kubelet fault for `AZ-P3-002`. The operator does
+that, as described in [Phased fixtures](#phased-fixtures).
+
 After each run, call `down`, even if a case failed. It stops CA,
 deletes only run-owned test namespaces, revokes the cluster's
 bootstrap tokens, removes the three saved role assignments,
@@ -528,7 +543,8 @@ Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
 For a phased case, use a separate copy of the binding and set `phase` to
 `balance`, `no-join`, `minimum`, `spot`, `large`, `cse`,
-`spot-eviction`, `missing-vmss` or `local-storage`.
+`spot-eviction`, `missing-vmss`, `local-storage`, `deallocate` or
+`deallocate-failed`.
 The balance phase also requires
 `balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
 or leave them empty in the other phases. Spot requires `spotPool` and
@@ -539,7 +555,9 @@ binding requires the Spot pool fields and `evictSpot: true`.
 A `missing-vmss` binding requires `missingPool` and
 `deleteMissingPool: true`. A `local-storage` binding requires
 `skipLocalStorage` true or false. Each other phase must omit
-those fields. Use an operator-measured `demandCPU` for one Pod per B1ms worker
+those fields. Set `deallocateHold` only for a deallocate phase. It defaults to
+one minute and accepts values from one to thirty minutes. Use an
+operator-measured `demandCPU` for one Pod per B1ms worker
 in the large phase. A missing phase skips the new cases. A wrong marker
 or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
@@ -817,6 +835,71 @@ physical VM, Node and NIC deletion and
 that the Pod restarts on the survivor.
 The EmptyDir contents need not survive.
 
+For `AZ-P3-001`, set `phase: deallocate`, main discovery tags `min=1`,
+`max=2`, physical main capacity one, and zero tags `min=0`, `max=0`.
+For `AZ-P3-002`, use a `deallocate-failed` fixture with the same
+tags and one main worker, and no VM left parked by `AZ-P3-001`. A
+parked B stays in the scale set, and core may grow C while B is being
+deallocated, so allow physical main capacity up to three for this case. The control plane plus three
+D2s_v5 workers reach the four-VM, eight-vCPU cap. No other VM may
+be created. Use zone 1, Uniform, Regular priority, managed full OS
+disks and no `aks-managed-*` tags. The single controller needs both
+`--node-group-auto-discovery=label:cluster-autoscaler-name=<discoveryValue>`
+and exactly one `--nodes=1:2:Deallocate:<mainPool>`. It also needs exactly
+one literal `AZURE_PROVIDER_ONLY_DEALLOCATE=false` environment variable. The
+variable overrides the cloud config, so the runner can check that parking
+comes from the `Deallocate` spec and not from the global setting. Use
+`--max-nodes-total=4`, `--v=3`, the bounded scale-down flags above
+and, for `AZ-P3-002`, `--max-node-provision-time=15m`.
+Set `allow-deallocate-fixture: AZ-P3-001` or
+`allow-deallocate-failed-fixture: AZ-P3-002` on the operator marker.
+The other cases do not accept this explicit group.
+
+Grant the autoscaler ServiceAccount Node `delete` as well as its usual
+Node and eviction permissions. The provider deletes the old Node after
+parking B, so it cannot keep the old UID. The restarted VM registers a
+new Node, which may get a new PodCIDR. Calico VXLAN with its own IPAM,
+as `fixture.sh` installs it, needs no change. A CNI that uses the Node
+PodCIDR, such as a host-local bridge, needs a per-boot hook on every
+worker that removes the old bridge conflist before the new PodCIDR is
+assigned. Keep the join bootstrap and route setup working on a
+restarted VM. The normal case probes Pod IPs and a Service from both
+worker Nodes with the workload image. The runner reads
+the retained VMSS instance ID, `vmId`, OS disk ID and name from the
+instance profile, and power state in Azure; it does not repair the guest.
+Uniform VMSS OS disks are managed by the scale set and are not standalone
+disk resources, so a standalone disk GET cannot prove that a disk remains.
+The normal case uses a namespace with Pod Security enforcement set to
+`privileged` to allow two run-owned `hostPath` marker Pods. The first writes
+a random token under `/var/lib/ca-e2e-marker/<runID>` on B before parking,
+and the second checks the token on B after Start. The Pods are deleted
+after use. Keep the worker host and namespace policy able to run these
+Pods. The test holds B parked for `deallocateHold` and checks that a later
+provider Start registers the same VM with a new Node UID, a new boot ID
+and a PodCIDR. The failed-registration case has no marker Pod because
+the restarted worker never registers.
+
+For `AZ-P3-002`, arm a one-attempt kubelet fault on **only** the captured
+B VM while B is healthy. The fault must do nothing on the arm boot,
+block kubelet for the whole first new boot, and release on a later
+new boot. Do not change the VMSS model or another guest. The case
+creates `arm-kubelet-fault` in its run-owned namespace with exact
+`run-id`, `resource-id`, `vm-id`, `disk-id` and `boot-id` data. Before
+acting, compare these fields against the actual tagged VMSS and
+instance, including `autoscaler-e2e-run=<runID>`, and refuse any
+mismatch. Then create `fault-armed` in that namespace with the same
+fields and run label `autoscaler-e2e-run=<runID>`. Do not create the
+receipt until the gate is installed, the current boot is unchanged,
+and kubelet is still running. After the runner parks B and the
+provider starts it, observe the guest through the run-owned Bastion
+path. Only when the new boot's gate has blocked kubelet, create
+`fault-observed` with the same VM and disk fields and the **new**
+`boot-id`, plus the run label. The runner never writes to Azure or a
+guest. It checks that no B Node registers, demand remains pending,
+and the core's unregistered cleanup calls synthetic Deallocate rather
+than deleting B or its disk. A boot between arming and the designated
+Start invalidates this fixture.
+
 The workload image must provide `sh`, `sleep`, `printf`, `httpd` and `wget`,
 because the fixture's network probe uses the same image. Pin its digest. The
 test Pods exit on SIGTERM, so deleting them does not wait for the grace
@@ -871,8 +954,9 @@ Public-source cases use their own `AZ-001` or `CA-NNN` label. See the
 The specs also carry the standard Kubernetes E2E labels. `Slow` marks cases
 that run longer than two minutes. `Feature:ClusterSizeAutoscalingScaleUp` and
 `Feature:ClusterSizeAutoscalingScaleDown` mark the matching `CA-` cases, as
-upstream does. `Disruptive` marks `AZ-P1-013` and `AZ-P1-014`, which evict a
-VM or delete a VMSS from outside the cluster. `smoke` selects `AZ-P1-001` to
+upstream does. `Disruptive` marks `AZ-P1-013`, `AZ-P1-014` and `AZ-P3-002`,
+which evict a VM, delete a VMSS or block kubelet on a VM from outside the
+cluster. `smoke` selects `AZ-P1-001` to
 `AZ-P1-003`. Each `scalephase` case also has its phase name as a label.
 Public tests spanning three workers
 select only the two owned pools, so `B=1` grows to main/zero `2/1`, still within
@@ -972,6 +1056,8 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-013` | A run-owned simulated Spot eviction lowers the pool target, then a new VM and Ready Pod replace the original before physical return to zero |
 | `AZ-P1-014` | An empty discovered VMSS is removed by the operator; the same controller keeps reporting status and scales main for demand |
 | `AZ-P1-015` | An EmptyDir Pod blocks scale-down with local-storage protection enabled; when disabled, its worker is removed and the Pod reschedules |
+| `AZ-P3-001` | A per-pool `Deallocate` main pool parks a worker, deleting its Node and keeping its VM and OS disk, then starts the same VM for new demand; it registers a new Node with a new boot ID, the disk marker survives, and Pod traffic works before and after |
+| `AZ-P3-002` | A parked worker whose kubelet the operator blocks on the next boot never registers after Start, and the core's unregistered cleanup deallocates it instead of deleting the VM or its disk |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -992,7 +1078,7 @@ test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
 public source, and six supplemental cases bring the default suite to 29
-registered specs. Nine phased cases bring the full module to 38
+registered specs. Eleven phased cases bring the full module to 40
 registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |
@@ -1016,6 +1102,7 @@ registered specs. Registration is not execution.
 | `AZ-P1-013` | Replace one exact evicted Spot VM and Pod | [spot_eviction_test.go](suites/scalephase/spot_eviction_test.go) |
 | `AZ-P1-014` | Keep main scaling after an empty discovered VMSS is removed | [missing_vmss_test.go](suites/scalephase/missing_vmss_test.go) |
 | `AZ-P1-015` | Compare local-storage scale-down protection enabled and disabled | [local_storage_test.go](suites/scalephase/local_storage_test.go) |
+| `AZ-P3-001`, `AZ-P3-002` | Park and restart the same VM with a per-pool Deallocate policy, and deallocate a restarted VM that never registers | [deallocate_test.go](suites/scalephase/deallocate_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.
@@ -1029,8 +1116,10 @@ every removed NIC; cases claiming physical deletion use explicit VM/Node/NIC
 assertions. DRA growth and the Azure Disk case are main-only, not
 scale-from-zero.
 
-The suite covers public Delete-mode cases and the specified taint case. It does
-not cover all AKS behavior, deallocate mode or every Azure backend. Read older
+The suite covers public Delete-mode cases and the specified taint case.
+`AZ-P3-001` and `AZ-P3-002` cover the optional provider-only deallocate mode.
+The suite does not cover all AKS behavior, the AKS deallocate mode or every
+Azure backend. Read older
 live outcomes at their recorded test and runtime commits. New source changes
 do not inherit live credit from an earlier run.
 

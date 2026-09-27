@@ -25,6 +25,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -104,12 +105,15 @@ type Config struct {
 	MissingPool          string `json:"missingPool,omitempty"`
 	DeleteMissingPool    bool   `json:"deleteMissingPool,omitempty"`
 	SkipLocalStorage     *bool  `json:"skipLocalStorage,omitempty"`
+	DeallocateHold       string `json:"deallocateHold,omitempty"`
 }
 
-// PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
+// PoolBounds keeps each phase's allowed Azure capacity separate from its
+// discovery tag bounds. A zero TagMax means the tag maximum equals Max.
 type PoolBounds struct {
-	TagMin, ObservedMin, Max int
-	Label                    string
+	TagMin, TagMax   int
+	ObservedMin, Max int
+	Label            string
 }
 
 // Pools returns the bounds of each VMSS that the phase authorizes.
@@ -161,6 +165,13 @@ func (c Config) Pools() map[string]PoolBounds {
 			c.ScalePool: {Max: 50, Label: c.ScaleLabel},
 		}
 	}
+	if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+		zero.Max = 0
+		if c.Phase == "deallocate-failed" {
+			main.TagMax = 2
+			main.Max = 3
+		}
+	}
 	return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
 }
 
@@ -184,6 +195,15 @@ func (c Config) PoolNames() []string {
 		names = append(names, c.ScalePool)
 	}
 	return names
+}
+
+// DeallocateNodeSpec returns the one explicit main pool spec that the
+// deallocate phases allow, or nil for other phases.
+func (c Config) DeallocateNodeSpec() []string {
+	if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+		return []string{"1:2:Deallocate:" + c.MainPool}
+	}
+	return nil
 }
 
 // Limits returns the VM and vCPU limits of the phase. Only the large phase
@@ -312,6 +332,13 @@ func (c Config) Validate() error {
 			seen[strings.ToLower(name)] = true
 		}
 	case "no-join", "minimum":
+	case "deallocate", "deallocate-failed":
+		if c.DeallocateHold != "" {
+			hold, err := time.ParseDuration(c.DeallocateHold)
+			if err != nil || hold < time.Minute || hold > 30*time.Minute {
+				return fmt.Errorf("deallocateHold must be between one and thirty minutes")
+			}
+		}
 	case "spot", "spot-eviction":
 		if err := c.validateAdditionalPool(c.SpotPool, c.SpotLabel); err != nil {
 			return fmt.Errorf("spot phase: %w", err)
@@ -360,6 +387,9 @@ func (c Config) Validate() error {
 	}
 	if c.Phase != "local-storage" && c.SkipLocalStorage != nil {
 		return fmt.Errorf("skipLocalStorage requires the local-storage phase")
+	}
+	if c.Phase != "deallocate" && c.Phase != "deallocate-failed" && c.DeallocateHold != "" {
+		return fmt.Errorf("deallocateHold requires a deallocate phase")
 	}
 	return nil
 }

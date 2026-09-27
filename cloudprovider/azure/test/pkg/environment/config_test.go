@@ -144,6 +144,16 @@ func TestConfigValidate(t *testing.T) {
 		}},
 		{name: "local storage setting omitted", change: func(c *Config) { c.Phase = "local-storage" }},
 		{name: "local storage setting outside phase", change: func(c *Config) { c.SkipLocalStorage = ptr.To(true) }},
+		{name: "deallocate hold outside phase", change: func(c *Config) { c.DeallocateHold = "2m" }},
+		{name: "deallocate hold too short", change: func(c *Config) {
+			c.Phase, c.DeallocateHold = "deallocate", "10s"
+		}},
+		{name: "deallocate hold too long", change: func(c *Config) {
+			c.Phase, c.DeallocateHold = "deallocate-failed", "40m"
+		}},
+		{name: "invalid deallocate hold", change: func(c *Config) {
+			c.Phase, c.DeallocateHold = "deallocate", "later"
+		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -196,6 +206,8 @@ func TestConfigPhasePools(t *testing.T) {
 		{name: "Spot eviction", phase: "spot-eviction", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
 		{name: "missing VMSS", phase: "missing-vmss", names: 3, mainTagMin: 1, mainMax: 2, zeroMax: 0},
 		{name: "local storage", phase: "local-storage", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "park and reuse", phase: "deallocate", names: 2, mainTagMin: 1, mainMax: 2, zeroMax: 0},
+		{name: "failed registration", phase: "deallocate-failed", names: 2, mainTagMin: 1, mainMax: 3, zeroMax: 0},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -232,6 +244,14 @@ func TestConfigPhasePools(t *testing.T) {
 			}
 			if tt.phase == "minimum" && pools[c.MainPool].ObservedMin != 1 {
 				t.Fatal("minimum phase must allow the below-minimum starting capacity")
+			}
+			if tt.phase == "deallocate" || tt.phase == "deallocate-failed" {
+				if got := c.DeallocateNodeSpec(); len(got) != 1 || got[0] != "1:2:Deallocate:main" {
+					t.Fatalf("unexpected Deallocate spec: %v", got)
+				}
+				if tt.phase == "deallocate-failed" && pools[c.MainPool].TagMax != 2 {
+					t.Fatalf("failed registration must keep discovery max 2: %+v", pools[c.MainPool])
+				}
 			}
 			vms, cpus := c.Limits()
 			if tt.phase == "large" {

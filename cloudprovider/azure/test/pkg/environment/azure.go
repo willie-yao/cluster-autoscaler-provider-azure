@@ -189,11 +189,15 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 			if err := checkCapacity(name, int(*set.SKU.Capacity), limit.ObservedMin, limit.Max); err != nil {
 				return result, err
 			}
+			tagMax := limit.Max
+			if limit.TagMax != 0 {
+				tagMax = limit.TagMax
+			}
 			if ptr.Deref(set.Tags[RunLabel], "") != c.RunID ||
 				ptr.Deref(set.Tags["cluster-autoscaler-name"], "") != c.DiscoveryValue ||
-				ptr.Deref(set.Tags["min"], "") != strconv.Itoa(limit.TagMin) || ptr.Deref(set.Tags["max"], "") != strconv.Itoa(limit.Max) {
+				ptr.Deref(set.Tags["min"], "") != strconv.Itoa(limit.TagMin) || ptr.Deref(set.Tags["max"], "") != strconv.Itoa(tagMax) {
 				return result, fmt.Errorf("VMSS %s ownership/discovery/bounds do not match authorization, tags min=%q max=%q, want %d and %d",
-					name, ptr.Deref(set.Tags["min"], ""), ptr.Deref(set.Tags["max"], ""), limit.TagMin, limit.Max)
+					name, ptr.Deref(set.Tags["min"], ""), ptr.Deref(set.Tags["max"], ""), limit.TagMin, tagMax)
 			}
 			if err := checkScaleDownTags(set.Tags); err != nil {
 				return result, fmt.Errorf("VMSS %s: %w", name, err)
@@ -274,6 +278,17 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 					instance := Instance{
 						ID: normalizeID(*vm.ID), VMID: ptr.Deref(vm.Properties.VMID, ""),
 						ProvisioningState: ptr.Deref(vm.Properties.ProvisioningState, ""),
+					}
+					if c.Phase == "deallocate" || c.Phase == "deallocate-failed" {
+						if vm.Properties.StorageProfile == nil || vm.Properties.StorageProfile.OSDisk == nil ||
+							vm.Properties.StorageProfile.OSDisk.ManagedDisk == nil {
+							return result, fmt.Errorf("VMSS %s instance lacks a managed OS disk", name)
+						}
+						instance.OSDiskID = normalizeID(ptr.Deref(vm.Properties.StorageProfile.OSDisk.ManagedDisk.ID, ""))
+						instance.OSDiskName = ptr.Deref(vm.Properties.StorageProfile.OSDisk.Name, "")
+						if instance.VMID == "" || instance.OSDiskID == "" || instance.OSDiskName == "" {
+							return result, fmt.Errorf("VMSS %s instance lacks VM or OS disk identity", name)
+						}
 					}
 					if (c.Phase == "no-join" || c.Phase == "spot-eviction" && name == c.SpotPool ||
 						c.Phase == "spot" && name == c.SpotPool || c.Phase == "cse" && name == c.FailurePool) && instance.VMID == "" {
@@ -542,6 +557,28 @@ func (e *Environment) InstanceRunning(ctx context.Context, pool, id string) (boo
 		return false, fmt.Errorf("Azure instance-view reader is unavailable")
 	}
 	return cloud.instanceRunning(ctx, pool, id)
+}
+
+// InstancePowerState returns the Azure power state of the VM id in pool, such
+// as "running" or "deallocated".
+func (e *Environment) InstancePowerState(ctx context.Context, pool, id string) (string, error) {
+	cloud, ok := e.Cloud.(*azureCloud)
+	if !ok {
+		return "", fmt.Errorf("Azure instance-view reader is unavailable")
+	}
+	view, err := cloud.instanceView(ctx, pool, id)
+	if err != nil {
+		return "", err
+	}
+	for _, status := range view.Statuses {
+		if status != nil {
+			code := strings.ToLower(ptr.Deref(status.Code, ""))
+			if strings.HasPrefix(code, "powerstate/") {
+				return strings.TrimPrefix(code, "powerstate/"), nil
+			}
+		}
+	}
+	return "", fmt.Errorf("VMSS instance has no Azure power state")
 }
 
 // FailedCustomScriptRunning reports whether the VM id in the failed-extension

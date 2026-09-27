@@ -1206,6 +1206,8 @@ binding() {
              .phase="local-storage" | .skipLocalStorage=true
            elif $phase=="local-storage-false" then
              .phase="local-storage" | .skipLocalStorage=false
+           elif $phase=="deallocate" or $phase=="deallocate-failed" then
+             .deallocateHold="1m"
            else . end' > "$REPORT_DIR/environment.json"
 }
 # Writes the chart values for the autoscaler in phase $1.
@@ -1217,6 +1219,8 @@ ca_values() {
         no-join) provision=3m ;;
         large) provision=20m; limit=52 ;;
         local-storage-false) local_storage=false ;;
+        deallocate) verbosity=3 ;;
+        deallocate-failed) verbosity=3; provision=15m ;;
     esac
     local ca_identity tag
     ca_identity=$(az identity show -g "$INFRA_RG" -n "$PREFIX-ca" --query clientId -o tsv)
@@ -1281,15 +1285,21 @@ EOF
             ;;
         minimum)
             printf '  enforce-node-group-min-size: true\n' >> "$PRIVATE_DIR/ca-values.yaml" ;;
+        deallocate|deallocate-failed)
+            printf '  nodes: "1:2:Deallocate:%s-m"\n' "$PREFIX" >> "$PRIVATE_DIR/ca-values.yaml" ;;
     esac
     printf 'updateStrategy:\n  type: Recreate\n' >> "$PRIVATE_DIR/ca-values.yaml"
-    if [[ $phase = cse || $phase = spot-eviction ]]; then
+    if [[ $phase = cse || $phase = spot-eviction || $phase = deallocate* ]]; then
         printf 'extraEnv:\n' >> "$PRIVATE_DIR/ca-values.yaml"
         if [[ $phase = cse ]]; then
             printf '  AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING: "false"\n  AZURE_ENABLE_DETAILED_CSE_MESSAGE: "false"\n' \
                 >> "$PRIVATE_DIR/ca-values.yaml"
-        else
+        elif [[ $phase = spot-eviction ]]; then
             printf '  AZURE_GET_VMSS_SIZE_REFRESH_PERIOD: "5"\n' >> "$PRIVATE_DIR/ca-values.yaml"
+        else
+            # The variable overrides the cloud config, so only the per-pool
+            # Deallocate spec can park VMs.
+            printf '  AZURE_PROVIDER_ONLY_DEALLOCATE: "false"\n' >> "$PRIVATE_DIR/ca-values.yaml"
         fi
     fi
     if [[ $phase = etag ]]; then
@@ -1321,6 +1331,17 @@ ca_deploy() {
         select(.name == "ARM_RESOURCE_GROUP")) = {"name":"ARM_RESOURCE_GROUP","value":strenv(WORKERS_RG)}
     ' "$PRIVATE_DIR/ca-unpatched.yaml"
     cp "$PRIVATE_DIR/ca-unpatched.yaml" "$PRIVATE_DIR/ca-rendered.yaml"
+    if [[ $phase = deallocate || $phase = deallocate-failed ]]; then
+        # The provider deletes the Node of each VM it parks.
+        yq eval --inplace '
+          (select(.kind == "ClusterRole") | .rules[] |
+            select(.resources[] == "nodes") | .verbs) += ["delete"]
+        ' "$PRIVATE_DIR/ca-rendered.yaml"
+        [[ $(yq eval 'select(.kind == "ClusterRole") | .rules[] |
+            select(.resources[] == "nodes") | .verbs[] |
+            select(. == "delete")' "$PRIVATE_DIR/ca-rendered.yaml") = delete ]] ||
+            fail "Controller Node delete grant was not rendered"
+    fi
     [[ $(yq eval 'select(.kind == "Deployment") | .spec.replicas' "$PRIVATE_DIR/ca-rendered.yaml") = 0 &&
         $(yq eval 'select(.kind == "Deployment") | .spec.strategy.type' "$PRIVATE_DIR/ca-rendered.yaml") = Recreate ]] ||
         fail "Controller must start paused with Recreate strategy"
@@ -1368,6 +1389,22 @@ main_bounds() {
         az vmss wait -g "$WORKERS_RG" -n "$name" --updated --interval 10 --timeout 900
     fi
     check_pool "$name" "$min" "$max" Standard_D2s_v5
+}
+# Deletes the main VMs that a deallocate case left parked, so that main
+# returns to its one running worker.
+remove_parked_main() {
+    local name=$PREFIX-m ids count
+    owned "$(resource_id "$WORKERS_RG" Microsoft.Compute "virtualMachineScaleSets/$name")"
+    ids=$(az vmss list-instances -g "$WORKERS_RG" -n "$name" --expand instanceView -o json |
+        jq -r '.[] | select([.instanceView.statuses[]?.code] | index("PowerState/deallocated")) | .instanceId')
+    [[ -n $ids ]] || return 0
+    count=$(wc -w <<< "$ids")
+    (( $(pool_actual "$name") - count == 1 )) ||
+        fail "Main must keep exactly one worker besides its parked VMs"
+    note "Deleting parked main instances: $(tr '\n' ' ' <<< "$ids")"
+    # Instance IDs are numbers, so word splitting passes one argument each.
+    # shellcheck disable=SC2086
+    az vmss delete-instances -g "$WORKERS_RG" -n "$name" --instance-ids $ids --output none
 }
 # Keeps the zero pool if it has max $1, the no-join tag of special mode $3
 # and taint $4. Otherwise recreates it with bootstrap $2.
@@ -1424,6 +1461,9 @@ phase() {
             retained=x; marker_key=allow-missing-vmss-fixture; marker_value=AZ-P1-014 ;;
         local-storage-true|local-storage-false)
             marker_key=allow-local-storage-fixture; marker_value=AZ-P1-015 ;;
+        deallocate) marker_key=allow-deallocate-fixture; marker_value=AZ-P3-001 ;;
+        deallocate-failed)
+            marker_key=allow-deallocate-failed-fixture; marker_value=AZ-P3-002 ;;
         *) fail "Unknown phase: $name" ;;
     esac
     ensure_kubeconfig
@@ -1445,6 +1485,9 @@ phase() {
         fi
         remove_pool "$PREFIX-$extra"
     done
+    if [[ -f $PRIVATE_DIR/profile && $(profile) = deallocate* ]]; then
+        remove_parked_main
+    fi
     main_bounds "$min" "$max"
     zero_model "$zero_max" "$bootstrap" "$zero_special" "$taint"
     case $name in
@@ -1786,7 +1829,7 @@ watch() {
 # budget and the watch process.
 run_case() {
     local label=$1 phase timeout suite timeout_minutes
-    [[ $label =~ ^(AZ-P1-0(0[1-9]|1[0-5])|AZ-SUP-ETAG|AZ-001|CA-0(0[1-2]|0[4-9]|1[0-9]|2[0-2]))$ ]] ||
+    [[ $label =~ ^(AZ-P1-0(0[1-9]|1[0-5])|AZ-P3-00[12]|AZ-SUP-ETAG|AZ-001|CA-0(0[1-2]|0[4-9]|1[0-9]|2[0-2]))$ ]] ||
         fail "Unknown maintained E2E case ID"
     no_test_namespace
     check_budget
@@ -1800,7 +1843,7 @@ run_case() {
     phase=$(profile)
     suite=scaleup
     timeout_minutes=90
-    case $label in AZ-P1-00[7-9]|AZ-P1-01[0-5]) suite=scalephase ;; esac
+    case $label in AZ-P1-00[7-9]|AZ-P1-01[0-5]|AZ-P3-00[12]) suite=scalephase ;; esac
     case $label in
         AZ-P1-005) [[ $phase = taint ]] || fail "Select phase taint first" ;;
         AZ-P1-006) [[ $phase = disk && -f $PRIVATE_DIR/disk-ready ]] ||
@@ -1818,6 +1861,9 @@ run_case() {
         AZ-P1-014) [[ $phase = missing-vmss ]] || fail "Select phase missing-vmss first" ;;
         AZ-P1-015) [[ $phase = local-storage-true ||
             $phase = local-storage-false ]] || fail "Select a local-storage phase first" ;;
+        AZ-P3-001) [[ $phase = deallocate ]] || fail "Select phase deallocate first" ;;
+        AZ-P3-002) [[ $phase = deallocate-failed ]] ||
+            fail "Select phase deallocate-failed first"; timeout_minutes=100 ;;
         *) [[ $phase = default ]] || fail "Run ordinary specs only on the default fixture" ;;
     esac
     local started now

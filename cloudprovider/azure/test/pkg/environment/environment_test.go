@@ -234,6 +234,37 @@ func TestCheckControllerArguments(t *testing.T) {
 	}
 }
 
+func TestCheckDeallocateControllerArguments(t *testing.T) {
+	t.Parallel()
+	c := testConfig()
+	c.Phase = "deallocate"
+	base := []string{
+		"--node-group-auto-discovery=label:cluster-autoscaler-name=" + c.DiscoveryValue,
+		"--scale-down-delay-after-add=10s", "--scale-down-unneeded-time=10s",
+		"--unremovable-node-recheck-timeout=10s",
+	}
+	for _, tt := range []struct {
+		name, spec string
+		allowed    bool
+	}{
+		{name: "exact pool policy", spec: c.DeallocateNodeSpec()[0], allowed: true},
+		{name: "wrong pool", spec: "1:2:Deallocate:other"},
+		{name: "wrong policy", spec: "1:2:Delete:main"},
+		{name: "wrong bounds", spec: "1:3:Deallocate:main"},
+		{name: "no explicit pool"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			args := append([]string(nil), base...)
+			if tt.spec != "" {
+				args = append(args, "--nodes="+tt.spec)
+			}
+			if err := checkControllerArguments(args, c.DiscoveryValue, false, c.DeallocateNodeSpec()...); (err == nil) != tt.allowed {
+				t.Fatalf("args %v: error=%v, allowed=%t", args, err, tt.allowed)
+			}
+		})
+	}
+}
+
 func TestCheckPhaseArguments(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {
@@ -275,6 +306,14 @@ func TestCheckPhaseArguments(t *testing.T) {
 			args: []string{"--max-nodes-total=4", "--skip-nodes-with-local-storage=true"}},
 		{name: "local storage can move", phase: "local-storage", valid: true,
 			args: []string{"--max-nodes-total=4", "--skip-nodes-with-local-storage=false"}},
+		{name: "deallocate park", phase: "deallocate", valid: true,
+			args: []string{"--max-nodes-total=4", "--v=3"}},
+		{name: "deallocate missing log level", phase: "deallocate",
+			args: []string{"--max-nodes-total=4"}},
+		{name: "failed registration", phase: "deallocate-failed", valid: true,
+			args: []string{"--max-nodes-total=4", "--v=3", "--max-node-provision-time=15m"}},
+		{name: "failed registration missing timeout", phase: "deallocate-failed",
+			args: []string{"--max-nodes-total=4", "--v=3"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -304,6 +343,9 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 		{name: "wrong failed VM flag", phase: "cse", flag: "other"},
 		{name: "Spot five-second refresh", phase: "spot-eviction", value: "5", valid: true},
 		{name: "Spot stale refresh", phase: "spot-eviction", value: "30"},
+		{name: "deallocate per-pool route", phase: "deallocate", value: "false", valid: true},
+		{name: "deallocate global route", phase: "deallocate-failed", value: "true"},
+		{name: "deallocate global setting unpinned", phase: "deallocate"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -317,6 +359,11 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 			if tt.phase == "spot-eviction" {
 				variables = append(variables, corev1.EnvVar{
 					Name: "AZURE_GET_VMSS_SIZE_REFRESH_PERIOD", Value: tt.value,
+				})
+			}
+			if tt.value != "" && (tt.phase == "deallocate" || tt.phase == "deallocate-failed") {
+				variables = append(variables, corev1.EnvVar{
+					Name: "AZURE_PROVIDER_ONLY_DEALLOCATE", Value: tt.value,
 				})
 			}
 			if err := checkPhaseControllerEnv(variables, c); (err == nil) != tt.valid {

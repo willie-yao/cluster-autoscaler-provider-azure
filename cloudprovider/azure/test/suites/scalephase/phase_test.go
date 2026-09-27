@@ -86,6 +86,9 @@ func setup(ctx context.Context, phase, caseID string) *fixture {
 	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
 		GenerateName: "azure-e2e-", Labels: map[string]string{environment.RunLabel: cfg.RunID},
 	}}
+	if phase == "deallocate" {
+		ns.Labels["pod-security.kubernetes.io/enforce"] = "privileged"
+	}
 	Expect(e.K8s.Create(ctx, ns)).To(Succeed())
 	owned := ns.DeepCopy()
 	DeferCleanup(func(ctx SpecContext) {

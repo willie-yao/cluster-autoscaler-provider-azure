@@ -30,10 +30,13 @@ import (
 // ErrBounds marks an observed breach of the VM, vCPU or per-pool limits.
 var ErrBounds = errors.New("resource bounds violated")
 
-// Instance holds the identifiers of one VMSS VM that prove its deletion.
+// Instance holds the identifiers of one VMSS VM that prove its deletion or
+// retention.
 type Instance struct {
 	ID                string
 	VMID              string
+	OSDiskID          string
+	OSDiskName        string
 	ProvisioningState string
 	NICs              []string
 }

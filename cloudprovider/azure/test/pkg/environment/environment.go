@@ -143,7 +143,7 @@ func (e *Environment) controller(ctx context.Context, groups []string) error {
 			return err
 		}
 		args := slices.Concat(container.Command, container.Args)
-		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage); err != nil {
+		if err := checkControllerArguments(args, c.DiscoveryValue, c.Phase == "local-storage" && c.SkipLocalStorage != nil && !*c.SkipLocalStorage, c.DeallocateNodeSpec()...); err != nil {
 			return err
 		}
 		if err := CheckPhaseArguments(args, c); err != nil {
@@ -180,7 +180,13 @@ func (e *Environment) controller(ctx context.Context, groups []string) error {
 		if err := checkPhaseControllerEnv(container.Env, c); err != nil {
 			return err
 		}
-		if err := CheckPhaseArguments(slices.Concat(container.Command, container.Args), c); err != nil {
+		args := slices.Concat(container.Command, container.Args)
+		if len(c.DeallocateNodeSpec()) != 0 {
+			if err := checkControllerArguments(args, c.DiscoveryValue, false, c.DeallocateNodeSpec()...); err != nil {
+				return err
+			}
+		}
+		if err := CheckPhaseArguments(args, c); err != nil {
 			return err
 		}
 	}
@@ -236,6 +242,12 @@ func CheckPhaseArguments(args []string, c Config) error {
 	case "local-storage":
 		required["max-nodes-total"] = "4"
 		required["skip-nodes-with-local-storage"] = strconv.FormatBool(*c.SkipLocalStorage)
+	case "deallocate", "deallocate-failed":
+		required["max-nodes-total"] = "4"
+		required["v"] = "3"
+		if c.Phase == "deallocate-failed" {
+			required["max-node-provision-time"] = "15m"
+		}
 	}
 	for key, value := range required {
 		found := 0
@@ -265,6 +277,9 @@ func checkPhaseControllerEnv(variables []corev1.EnvVar, c Config) error {
 		required["AZURE_ENABLE_DETAILED_CSE_MESSAGE"] = "false"
 	case "spot-eviction":
 		required["AZURE_GET_VMSS_SIZE_REFRESH_PERIOD"] = "5"
+	case "deallocate", "deallocate-failed":
+		// The variable overrides the cloud config, so parking must come from the per-pool spec.
+		required["AZURE_PROVIDER_ONLY_DEALLOCATE"] = "false"
 	}
 	for name, expected := range required {
 		count := 0
@@ -343,8 +358,9 @@ func CheckControllerArguments(args []string, discoveryValue string) error {
 	return checkControllerArguments(args, discoveryValue, false)
 }
 
-func checkControllerArguments(args []string, discoveryValue string, allowLocalStorageFalse bool) error {
+func checkControllerArguments(args []string, discoveryValue string, allowLocalStorageFalse bool, deallocateSpec ...string) error {
 	var discovery int
+	var explicit int
 	timings := map[string]bool{
 		"scale-down-delay-after-add":       false,
 		"scale-down-unneeded-time":         false,
@@ -352,7 +368,10 @@ func checkControllerArguments(args []string, discoveryValue string, allowLocalSt
 	}
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "--nodes") {
-			return fmt.Errorf("explicit node groups are outside this discovery fixture")
+			if len(deallocateSpec) == 0 || arg != "--nodes="+deallocateSpec[0] {
+				return fmt.Errorf("unexpected explicit node group in this fixture")
+			}
+			explicit++
 		}
 		if strings.HasPrefix(arg, "--node-group-auto-discovery") {
 			if arg != "--node-group-auto-discovery=label:cluster-autoscaler-name="+discoveryValue {
@@ -387,6 +406,9 @@ func checkControllerArguments(args []string, discoveryValue string, allowLocalSt
 	}
 	if discovery != 1 {
 		return fmt.Errorf("expected exactly one authorized discovery argument")
+	}
+	if len(deallocateSpec) != explicit {
+		return fmt.Errorf("deallocate phase requires exactly one explicit Deallocate node group")
 	}
 	for key, explicit := range timings {
 		if !explicit {
