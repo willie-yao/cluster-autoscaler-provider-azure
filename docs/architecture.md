@@ -53,6 +53,25 @@ The flags `--enable-force-delete`, `--enable-dynamic-instance-list` and
 `--enable-detailed-cse-message` are accepted for AKS argument compatibility.
 They have no effect.
 
+## AKS node group specs
+
+The Azure provider accepts `min:max:name` as before. It also accepts
+`min:max:Delete:name:labels|taints`, where labels are a JSON object with string
+values and taints use `key=value:effect`, separated by commas. The policy-only form
+`min:max:Delete:name` also works. The settings file uses the same fields as
+separate JSON properties and defaults the policy to `Delete`.
+
+The provider rejects `Deallocate` in both the settings file and extended
+specs. Deallocate would keep a stopped VM and its Node object, but the
+unchanged autoscaler core does not support that flow. Silently treating it as
+Delete would remove Nodes and VMs instead.
+
+The reference AKS provider applies labels and taints from extended specs to
+both VMs pools and VMSS templates. For VMSS pools, nonempty spec labels replace
+labels from node template tags, and spec taints replace tag taints. Without
+these fields, VMSS tags work as before. For VMs pools, spec labels override
+matching agent pool labels, and spec taints are added to agent pool taints.
+
 ## Module and package boundaries
 
 | Location | Responsibility |

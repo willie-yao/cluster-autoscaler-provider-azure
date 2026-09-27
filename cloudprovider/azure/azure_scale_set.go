@@ -19,6 +19,7 @@ package azure
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -66,6 +67,8 @@ type ScaleSet struct {
 
 	minSize int
 	maxSize int
+	labels  map[string]string
+	taints  string
 
 	enableForceDelete         bool
 	enableDynamicInstanceList bool
@@ -943,9 +946,8 @@ func (scaleSet *ScaleSet) TemplateNodeInfo(ctx context.Context) (*framework.Node
 		return nil, err
 	}
 
-	inputLabels := map[string]string{}
-	inputTaints := ""
-	template, err := buildNodeTemplateFromVMSS(vmss, inputLabels, inputTaints)
+	// The template code adds predicted labels to this map, so pass a copy.
+	template, err := buildNodeTemplateFromVMSS(vmss, maps.Clone(scaleSet.labels), scaleSet.taints)
 	if err != nil {
 		return nil, err
 	}
