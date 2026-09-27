@@ -21,7 +21,7 @@ endif
 VERSION_LDFLAG := -X $(VERSION_PKG).ClusterAutoscalerVersion=$(VERSION)
 LDFLAGS_VALUE := $(strip $(LDFLAGS) $(VERSION_LDFLAG))
 
-.PHONY: all build build-arch test-azure test-unit test-ci test-chart test-core-integration test-e2e-local clean format image
+.PHONY: all build build-arch test-azure test-unit test-ci test-chart test-core-integration test-e2e-local verify-instance-types clean format image
 
 all: build
 
@@ -46,6 +46,9 @@ test-e2e-local:
 	$(MAKE) -C cloudprovider/azure/test test-local
 
 test-ci: test-unit test-core-integration test-e2e-local
+
+verify-instance-types:
+	go run ./hack/verify-instance-types
 
 clean:
 	rm -f cluster-autoscaler-*

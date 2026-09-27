@@ -30,6 +30,29 @@ go test ./version -count=1
 Azure SDK fake-transport tests exercise deserialization and paging without
 claiming any cloud operation occurred.
 
+## Static Azure SKU list
+
+Run `make verify-instance-types` from the repository root to compare the
+committed fallback list with a new list from Azure. The check prints added and
+removed SKUs and each changed field, then exits with an error if the lists
+differ. It writes the new list to a temporary directory and leaves the
+committed list unchanged.
+
+The check needs Go, Azure CLI, and an `az login` session with permission to
+read VM SKU information in the selected subscription. Check the subscription
+with `az account show --query id -o tsv` before running it. The generator
+calls `az vm list-skus -o json` for that subscription, with no location flag.
+Azure may omit SKUs that are unavailable to the subscription, so a removed
+SKU in the report does not necessarily mean Azure retired it. The check
+makes no Azure write calls and is not part of `make test-ci` or CI.
+
+To update the fallback list after reviewing the report, run
+`go generate -run 'azure_instance_types/gen[.]go' ./cloudprovider/azure`
+with the same Azure login and inspect the resulting change to
+`cloudprovider/azure/azure_instance_types.go`. The `-run` flag skips
+unrelated mock generators. The SKU generator uses the same CLI call
+for both commands.
+
 ## Chart checks
 
 The [oracle directory](../charts/testdata/azure-compatibility/README.md)
