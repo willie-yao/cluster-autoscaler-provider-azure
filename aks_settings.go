@@ -60,8 +60,8 @@ func decodeAKSSettings(data []byte) (aksSettings, error) {
 		if group.MaxSize < group.MinSize {
 			return aksSettings{}, fmt.Errorf("invalid node group %q: max size must be at least min size", group.Name)
 		}
-		if group.ScaleDownPolicy != "Delete" {
-			return aksSettings{}, fmt.Errorf("invalid node group %q: scaleDownPolicy %q is not supported; use Delete", group.Name, group.ScaleDownPolicy)
+		if group.ScaleDownPolicy != "Delete" && group.ScaleDownPolicy != "Deallocate" {
+			return aksSettings{}, fmt.Errorf("invalid node group %q: scaleDownPolicy %q is not supported; use Delete or Deallocate", group.Name, group.ScaleDownPolicy)
 		}
 	}
 	return settings, nil

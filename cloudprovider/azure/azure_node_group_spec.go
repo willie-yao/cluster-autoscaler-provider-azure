@@ -26,6 +26,7 @@ import (
 
 type azureNodeGroupSpec struct {
 	*dynamic.NodeGroupSpec
+	policy string
 	labels map[string]string
 	taints string
 }
@@ -37,18 +38,18 @@ func parseAzureNodeGroupSpec(value string, scaleToZeroSupported bool) (azureNode
 		if err != nil {
 			return azureNodeGroupSpec{}, err
 		}
-		return azureNodeGroupSpec{NodeGroupSpec: spec}, nil
+		return azureNodeGroupSpec{NodeGroupSpec: spec, policy: "Delete"}, nil
 	}
 
-	if parts[2] != "Delete" {
-		return azureNodeGroupSpec{}, fmt.Errorf("invalid scale down policy %q in node group spec %q: only Delete is supported; Deallocate needs core support", parts[2], value)
+	if parts[2] != "Delete" && parts[2] != "Deallocate" {
+		return azureNodeGroupSpec{}, fmt.Errorf("invalid scale down policy %q in node group spec %q: want Delete or Deallocate", parts[2], value)
 	}
 	spec, err := dynamic.SpecFromString(parts[0]+":"+parts[1]+":"+parts[3], scaleToZeroSupported)
 	if err != nil {
 		return azureNodeGroupSpec{}, fmt.Errorf("invalid node group spec %q: %w", value, err)
 	}
 
-	result := azureNodeGroupSpec{NodeGroupSpec: spec}
+	result := azureNodeGroupSpec{NodeGroupSpec: spec, policy: parts[2]}
 	if len(parts) == 5 {
 		labelsAndTaints := strings.SplitN(parts[4], "|", 2)
 		if err := json.Unmarshal([]byte(labelsAndTaints[0]), &result.labels); err != nil {

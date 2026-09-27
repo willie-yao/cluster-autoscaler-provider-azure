@@ -169,23 +169,51 @@ func CreateAzureManager(configReader io.Reader, discoveryOpts cloudprovider.Node
 	return createAzureManagerInternal(configReader, discoveryOpts, nil)
 }
 
+type unsupportedDeallocateError struct {
+	name string
+}
+
+func (e *unsupportedDeallocateError) Error() string {
+	return fmt.Sprintf("Deallocate scale-down is not supported by this build, so node group %q is not autoscaled", e.name)
+}
+
 func (m *AzureManager) fetchExplicitNodeGroups(specs []string) error {
 	changed := false
+	var nodeGroups []cloudprovider.NodeGroup
+	skipped := make(map[string]bool)
 	for _, spec := range specs {
 		nodeGroup, err := m.buildNodeGroupFromSpec(spec)
 		if err != nil {
+			var deallocateErr *unsupportedDeallocateError
+			if errors.As(err, &deallocateErr) {
+				klog.Error(deallocateErr)
+				id := strings.ToLower(deallocateErr.name)
+				skipped[id] = true
+				m.explicitlyConfigured[id] = true
+				continue
+			}
 			return fmt.Errorf("failed to parse node group spec: %v", err)
+		}
+		nodeGroups = append(nodeGroups, nodeGroup)
+	}
+	for _, nodeGroup := range nodeGroups {
+		if skipped[strings.ToLower(nodeGroup.Id())] {
+			continue
 		}
 		if m.RegisterNodeGroup(nodeGroup) {
 			changed = true
 		}
-		m.explicitlyConfigured[nodeGroup.Id()] = true
+		m.explicitlyConfigured[strings.ToLower(nodeGroup.Id())] = true
 	}
 
 	if changed {
 		m.invalidateCache()
 	}
 	return nil
+}
+
+func (m *AzureManager) isExplicitlyConfigured(id string) bool {
+	return m.explicitlyConfigured[id] || m.explicitlyConfigured[strings.ToLower(id)]
 }
 
 // parseSKUAndVMsAgentpoolNameFromSpecName parses the spec name for a mixed-SKU VMs pool.
@@ -213,6 +241,9 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	s, err := parseAzureNodeGroupSpec(spec, scaleToZeroSupported)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
+	}
+	if s.policy == "Deallocate" {
+		return nil, &unsupportedDeallocateError{name: s.Name}
 	}
 
 	// Starting from release 1.30, a cluster may have both VMSS and VMs pools.
@@ -285,10 +316,8 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 	for _, group := range groups {
 		id := group.Id()
 		exists[id] = true
-		if m.explicitlyConfigured[id] {
-			// This NodeGroup was explicitly configured, but would also be
-			// autodiscovered. We want the explicitly configured min and max
-			// nodes to take precedence.
+		if m.isExplicitlyConfigured(id) {
+			// Explicit specs take precedence, including groups skipped for Deallocate.
 			klog.V(3).Infof("Ignoring explicitly configured NodeGroup %s for autodiscovery.", group.Id())
 			continue
 		}
@@ -300,7 +329,7 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 
 	for _, nodeGroup := range m.getNodeGroups() {
 		nodeGroupID := nodeGroup.Id()
-		if !exists[nodeGroupID] && !m.explicitlyConfigured[nodeGroupID] {
+		if !exists[nodeGroupID] && !m.isExplicitlyConfigured(nodeGroupID) {
 			m.UnregisterNodeGroup(nodeGroup)
 			changed = true
 		}
