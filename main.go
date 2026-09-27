@@ -96,7 +96,7 @@ func registerSignalHandlers(autoscaler core.Autoscaler) {
 	}()
 }
 
-func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter, autoscalingOpts config.AutoscalingOptions) {
+func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapshot.DebuggingSnapshotter, autoscalingOpts config.AutoscalingOptions, settings *aksSettingsFetcher) {
 	metrics.RegisterAll(autoscalingOpts.EmitPerNodeGroupMetrics)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -148,6 +148,7 @@ func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapsho
 				default:
 					trigger.Wait(previousRun)
 					previousRun, lastRun = lastRun, time.Now()
+					restartOnAKSSettingsChange(settings, autoscaler)
 					loop.RunAutoscalerOnce(ctx, autoscaler, healthCheck, lastRun, iteration)
 				}
 				iteration++
@@ -160,6 +161,7 @@ func run(healthCheck *metrics.HealthCheck, debuggingSnapshotter debuggingsnapsho
 					// iteration in progress will be interrupted and cleaned up there.
 					return nil
 				case <-time.After(autoscalingOpts.ScanInterval):
+					restartOnAKSSettingsChange(settings, autoscaler)
 					loop.RunAutoscalerOnce(ctx, autoscaler, healthCheck, time.Now(), iteration)
 				}
 				iteration++
@@ -222,7 +224,7 @@ func main() {
 
 	autoscalingFlags := &flags.AutoscalingFlags{}
 	autoscalingFlags.AddFlags(pflag.CommandLine)
-	addAKSCompatibilityFlags(pflag.CommandLine)
+	configPath := addAKSCompatibilityFlags(pflag.CommandLine)
 	logsapi.AddFlags(loggingConfig, pflag.CommandLine)
 	featureGate.AddFlag(pflag.CommandLine)
 	kube_flag.InitFlags()
@@ -230,6 +232,10 @@ func main() {
 	autoscalingOpts, err := autoscalingFlags.Options()
 	if err != nil {
 		klog.Fatalf("Failed to parse flags: %v", err)
+	}
+	settings, err := useAKSSettings(&autoscalingOpts, *configPath)
+	if err != nil {
+		klog.Errorf("Failed to fetch NodeGroups config: %v", err)
 	}
 
 	// The DRA feature controls whether the DRA scheduler plugin is selected in scheduler framework. The local DRA flag controls whether
@@ -278,7 +284,7 @@ func main() {
 	}()
 
 	if !leaderElection.LeaderElect {
-		run(healthCheck, debuggingSnapshotter, autoscalingOpts)
+		run(healthCheck, debuggingSnapshotter, autoscalingOpts, settings)
 	} else {
 		id, err := os.Hostname()
 		if err != nil {
@@ -318,13 +324,32 @@ func main() {
 				OnStartedLeading: func(_ context.Context) {
 					// Since we are committing a suicide after losing
 					// mastership, we can safely ignore the argument.
-					run(healthCheck, debuggingSnapshotter, autoscalingOpts)
+					run(healthCheck, debuggingSnapshotter, autoscalingOpts, settings)
 				},
 				OnStoppedLeading: func() {
 					klog.Fatalf("lost master")
 				},
 			},
 		})
+	}
+}
+
+// restartOnAKSSettingsChange exits the process when the node groups in the
+// settings file change, so the restarted pod builds its node groups again.
+func restartOnAKSSettingsChange(settings *aksSettingsFetcher, autoscaler core.Autoscaler) {
+	if settings == nil {
+		return
+	}
+	nodeGroups, changed, err := settings.fetchIfChanged()
+	if err != nil {
+		klog.Errorf("Failed to fetch updated NodeGroups config: %v", err)
+		return
+	}
+	if changed {
+		klog.V(2).Infof("NodeGroups config changed to %v, restarting", nodeGroups)
+		autoscaler.ExitCleanUp()
+		klog.Flush()
+		os.Exit(0)
 	}
 }
 
