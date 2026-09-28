@@ -10,13 +10,14 @@ These checks do not require Azure credentials or a Kubernetes cluster:
 | `make test-azure` | Race-enabled Azure provider tests |
 | `make test-unit` | Application build, Azure tests and race-enabled root-module tests |
 | `make test-core-integration` | Pinned core's in-memory integration tests with the race detector |
+| `make test-e2e-local` | Nested E2E unit tests with fake clients, compilation and Ginkgo dry-run registration |
 | `make test-ci` | All of the above, except the separately tagged Helm checks |
 | `make test-chart` | Strict Helm lint and six frozen whole-resource comparisons; requires Helm on PATH |
 
 The build step of `test-unit` makes a Linux binary by default, and the tests
 still run on the host platform. The root `go test ./...` does not enter
-nested Go modules. `make test-ci` also tests the pinned core dependency, but
-does not enter the E2E module.
+nested Go modules. `make test-ci` also tests the pinned core dependency and
+enters the E2E module.
 
 For quick regression work:
 
@@ -25,6 +26,9 @@ go test ./cloudprovider/azure -run TestBuildAzureConfigPrecedence -count=1
 go test ./cloudprovider/azure -run TestScaleSetDiscoveryScaleUpAndDelete -count=1
 go test ./version -count=1
 ```
+
+Azure SDK fake-transport tests exercise deserialization and paging without
+claiming any cloud operation occurred.
 
 ## Chart checks
 
@@ -52,7 +56,30 @@ works in a live cluster.
 boilerplate, lint and spelling scripts. None of these workflows provisions an
 Azure acceptance environment.
 
-Live execution is separate from developer checks. Record the test-source
+## Maintained E2Es
+
+The [operator guide](../cloudprovider/azure/test/README.md) is the entry point
+for the explicit prepared-environment JSON contract, optional fixture
+requirements, focused execution and cleanup ownership.
+
+The default `scaleup` suite registers 29 specs: 22 active intents from the
+Azure autoscaler inventory, one public Azure Disk intent and six
+supplements. `CA-003` is disabled
+in the source inventory and is not implemented. Current dry-run
+registration runs neither setup hooks nor live test bodies;
+filtered-out and skipped cases are not passes.
+
+The suite covers CPU/memory demand, placement constraints, PDBs, priority,
+scheduler bypass, synthetic system workloads, synthetic DRA, zero-pool
+template taints and Azure Disk StatefulSet movement on bounded Linux VMSS
+Uniform fixtures. Scope adaptations include
+real expendable demand in `CA-012`, sampled readiness in PDB/priority windows and eight-device,
+main-only DRA growth in `CA-020`. DRA scale-from-zero and AKS deallocate are
+not covered.
+
+Live execution is separate from developer checks. It requires an independently
+prepared disposable fixture, explicit authorization, one controller, bounded
+execution and operator-owned infrastructure cleanup. Record the test-source
 commit, runtime image's source commit and digest, environment and scope for
 each run. Results apply only to those identities and conditions, not to other
 builds or configurations. For source attribution and compatibility scope,

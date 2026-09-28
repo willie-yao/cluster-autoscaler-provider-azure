@@ -68,17 +68,18 @@ Pod's resources and require a separately installed VPA controller and CRDs.
 
 ```sh
 make test-azure                 # Azure provider tests
-make test-ci                    # Root and pinned-core Go checks
+make test-ci                    # Root, pinned-core and local E2E checks
 make test-chart                 # Requires Helm
 ```
 
-Race-enabled tests need a working C toolchain. The Azure E2E module is separate from these local checks;
-live E2Es require separate authorization and a disposable environment.
+Race-enabled tests need a working C toolchain. Local E2E checks compile and dry-run the suite without Azure
+credentials. Live E2Es require separate authorization and a disposable environment.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md),
-[architecture](docs/architecture.md) or [testing](docs/testing.md).
-[Source provenance](docs/provenance.md) records source pins and compatibility
-scope.
+[architecture](docs/architecture.md) and [testing](docs/testing.md).
+The [E2E operator guide](cloudprovider/azure/test/README.md) describes fixture
+ownership and execution. [Source provenance](docs/provenance.md) records source
+pins and compatibility scope.
 
 ## Source and license
 

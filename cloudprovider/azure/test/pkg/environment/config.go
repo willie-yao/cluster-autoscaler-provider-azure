@@ -1,0 +1,362 @@
+/*
+Copyright The Kubernetes Authors.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+// Package environment observes an operator-prepared, disposable Azure cluster.
+package environment
+
+import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+
+	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/util/validation"
+)
+
+const (
+	// RunLabel binds Kubernetes objects and Azure resources to one disposable run.
+	RunLabel = "autoscaler-e2e-run"
+	// MarkerName is the kube-system ConfigMap that the operator creates to
+	// authorize a run. The tests only read it.
+	MarkerName = "autoscaler-e2e-authorization"
+	// MaxVMs is the VM limit, including the control plane, outside the large phase.
+	MaxVMs = 4
+	// MaxVCPUs is the vCPU limit, including the control plane, outside the large phase.
+	MaxVCPUs = 8
+)
+
+var (
+	azureNameRE      = regexp.MustCompile(`^[a-zA-Z0-9_.()-]+$`)
+	subscriptionIDRE = regexp.MustCompile(`^[0-9a-fA-F-]{36}$`)
+)
+
+// Config is the non-secret JSON binding to one prepared environment. The test
+// README describes each field.
+type Config struct {
+	// Kubeconfig, Context and ClusterUID select and identify the cluster.
+	Kubeconfig string `json:"kubeconfig"`
+	Context    string `json:"context"`
+	ClusterUID string `json:"clusterUID"`
+	// RunID, SubscriptionID, ResourceGroup, ControlPlaneID and Location select
+	// the run's Azure resources.
+	RunID          string `json:"runID"`
+	SubscriptionID string `json:"subscriptionID"`
+	ResourceGroup  string `json:"resourceGroup"`
+	ControlPlaneID string `json:"controlPlaneID"`
+	Location       string `json:"location"`
+	// DiscoveryValue and the Autoscaler, Lease and Image fields identify the
+	// one expected controller.
+	DiscoveryValue       string `json:"discoveryValue"`
+	AutoscalerNamespace  string `json:"autoscalerNamespace"`
+	AutoscalerDeployment string `json:"autoscalerDeployment"`
+	AutoscalerContainer  string `json:"autoscalerContainer"`
+	LeaseName            string `json:"leaseName"`
+	ExpectedImage        string `json:"expectedImage"`
+	// MainPool, ZeroPool and the label fields name the default pools and the
+	// Node label that selects them.
+	MainPool  string `json:"mainPool"`
+	ZeroPool  string `json:"zeroPool"`
+	PoolLabel string `json:"poolLabel"`
+	MainLabel string `json:"mainLabel"`
+	ZeroLabel string `json:"zeroLabel"`
+	// DemandCPU is the CPU request that fills one worker, and WorkloadImage
+	// runs every test Pod.
+	DemandCPU        string `json:"demandCPU"`
+	WorkloadImage    string `json:"workloadImage"`
+	DiskStorageClass string `json:"diskStorageClass,omitempty"`
+	// Phase selects an optional fixture. The fields below apply only to the
+	// phase that their names describe.
+	Phase                string `json:"phase,omitempty"`
+	BalancePoolA         string `json:"balancePoolA,omitempty"`
+	BalancePoolB         string `json:"balancePoolB,omitempty"`
+	BalanceLabel         string `json:"balanceLabel,omitempty"`
+	SpotPool             string `json:"spotPool,omitempty"`
+	SpotLabel            string `json:"spotLabel,omitempty"`
+	ScalePool            string `json:"scalePool,omitempty"`
+	ScaleLabel           string `json:"scaleLabel,omitempty"`
+	FailurePool          string `json:"failurePool,omitempty"`
+	FailureLabel         string `json:"failureLabel,omitempty"`
+	MaxNodeProvisionTime string `json:"maxNodeProvisionTime,omitempty"`
+	EvictSpot            bool   `json:"evictSpot,omitempty"`
+	MissingPool          string `json:"missingPool,omitempty"`
+	DeleteMissingPool    bool   `json:"deleteMissingPool,omitempty"`
+	SkipLocalStorage     *bool  `json:"skipLocalStorage,omitempty"`
+}
+
+// PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
+type PoolBounds struct {
+	TagMin, ObservedMin, Max int
+	Label                    string
+}
+
+// Pools returns the bounds of each VMSS that the phase authorizes.
+func (c Config) Pools() map[string]PoolBounds {
+	main := PoolBounds{TagMin: 1, ObservedMin: 1, Max: 2, Label: c.MainLabel}
+	zero := PoolBounds{TagMin: 0, ObservedMin: 0, Max: 1, Label: c.ZeroLabel}
+	if c.Phase == "balance" {
+		main.Max = 1
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.BalancePoolA: {Max: 2, Label: c.BalanceLabel},
+			c.BalancePoolB: {Max: 2, Label: c.BalanceLabel},
+		}
+	}
+	if c.Phase == "minimum" {
+		main.TagMin = 2
+	}
+	if c.Phase == "spot" || c.Phase == "spot-eviction" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.SpotPool: {Max: 1, Label: c.SpotLabel},
+		}
+	}
+	if c.Phase == "cse" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.FailurePool: {Max: 1, Label: c.FailureLabel},
+		}
+	}
+	if c.Phase == "missing-vmss" {
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.MissingPool: {Max: 0},
+		}
+	}
+	if c.Phase == "local-storage" {
+		zero.Max = 0
+		return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
+	}
+	if c.Phase == "large" {
+		main.Max = 1
+		zero.Max = 0
+		return map[string]PoolBounds{
+			c.MainPool: main, c.ZeroPool: zero,
+			c.ScalePool: {Max: 50, Label: c.ScaleLabel},
+		}
+	}
+	return map[string]PoolBounds{c.MainPool: main, c.ZeroPool: zero}
+}
+
+// PoolNames returns the VMSS names that the phase authorizes, which are also
+// the node groups the controller must report.
+func (c Config) PoolNames() []string {
+	names := []string{c.MainPool, c.ZeroPool}
+	if c.Phase == "balance" {
+		names = append(names, c.BalancePoolA, c.BalancePoolB)
+	}
+	if c.Phase == "spot" || c.Phase == "spot-eviction" {
+		names = append(names, c.SpotPool)
+	}
+	if c.Phase == "cse" {
+		names = append(names, c.FailurePool)
+	}
+	if c.Phase == "missing-vmss" {
+		names = append(names, c.MissingPool)
+	}
+	if c.Phase == "large" {
+		names = append(names, c.ScalePool)
+	}
+	return names
+}
+
+// Limits returns the VM and vCPU limits of the phase. Only the large phase
+// has higher limits.
+func (c Config) Limits() (vms, vcpus int) {
+	if c.Phase == "large" {
+		return 55, 60
+	}
+	return MaxVMs, MaxVCPUs
+}
+
+// LoadConfig reads one JSON object from path, rejects unknown fields and
+// validates the result.
+func LoadConfig(path string) (Config, error) {
+	var cfg Config
+	f, err := os.Open(path)
+	if err != nil {
+		return cfg, fmt.Errorf("open environment file: %w", err)
+	}
+	defer f.Close()
+	decoder := json.NewDecoder(f)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&cfg); err != nil {
+		return cfg, fmt.Errorf("decode environment file: %w", err)
+	}
+	if err := decoder.Decode(new(any)); err != io.EOF {
+		return cfg, fmt.Errorf("environment file must contain exactly one JSON object")
+	}
+	return cfg, cfg.Validate()
+}
+
+// Validate returns an error for a missing or malformed field, or for a phase
+// field set outside its phase.
+func (c Config) Validate() error {
+	required := map[string]string{
+		"kubeconfig": c.Kubeconfig, "context": c.Context, "clusterUID": c.ClusterUID,
+		"runID": c.RunID, "subscriptionID": c.SubscriptionID, "resourceGroup": c.ResourceGroup,
+		"controlPlaneID": c.ControlPlaneID,
+		"location":       c.Location, "discoveryValue": c.DiscoveryValue,
+		"autoscalerNamespace": c.AutoscalerNamespace, "autoscalerDeployment": c.AutoscalerDeployment,
+		"autoscalerContainer": c.AutoscalerContainer, "leaseName": c.LeaseName,
+		"expectedImage": c.ExpectedImage, "mainPool": c.MainPool, "zeroPool": c.ZeroPool,
+		"poolLabel": c.PoolLabel, "mainLabel": c.MainLabel, "zeroLabel": c.ZeroLabel,
+		"demandCPU": c.DemandCPU, "workloadImage": c.WorkloadImage,
+	}
+	for name, value := range required {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("%s is required", name)
+		}
+	}
+	if !filepath.IsAbs(c.Kubeconfig) {
+		return fmt.Errorf("kubeconfig must be an absolute, explicit file path")
+	}
+	if len(validation.IsDNS1123Label(c.RunID)) != 0 {
+		return fmt.Errorf("runID must be a DNS label")
+	}
+	if !subscriptionIDRE.MatchString(c.SubscriptionID) {
+		return fmt.Errorf("subscriptionID must be an explicit UUID")
+	}
+	if strings.EqualFold(c.MainPool, c.ZeroPool) || c.MainLabel == c.ZeroLabel {
+		return fmt.Errorf("main and zero pools and their labels must be distinct")
+	}
+	cp := strings.Split(c.ControlPlaneID, "/")
+	if len(cp) != 9 || !strings.EqualFold(cp[1], "subscriptions") ||
+		!strings.EqualFold(cp[2], c.SubscriptionID) || !strings.EqualFold(cp[3], "resourceGroups") ||
+		!strings.EqualFold(cp[5], "providers") || !strings.EqualFold(cp[6], "Microsoft.Compute") ||
+		!strings.EqualFold(cp[7], "virtualMachines") || cp[4] == "" || cp[8] == "" {
+		return fmt.Errorf("controlPlaneID must identify a VM in the selected subscription")
+	}
+	for _, name := range []string{c.ResourceGroup, c.MainPool, c.ZeroPool, c.Location} {
+		if !azureNameRE.MatchString(name) {
+			return fmt.Errorf("invalid Azure resource name %q", name)
+		}
+	}
+	if len(validation.IsQualifiedName(c.PoolLabel)) != 0 {
+		return fmt.Errorf("invalid poolLabel %q", c.PoolLabel)
+	}
+	for field, label := range map[string]string{"mainLabel": c.MainLabel, "zeroLabel": c.ZeroLabel} {
+		if len(validation.IsValidLabelValue(label)) != 0 {
+			return fmt.Errorf("invalid %s %q", field, label)
+		}
+	}
+	cpu, err := resource.ParseQuantity(c.DemandCPU)
+	if err != nil || cpu.MilliValue() <= 0 {
+		return fmt.Errorf("demandCPU must be a positive CPU quantity")
+	}
+	if c.DiskStorageClass != "" && len(validation.IsDNS1123Subdomain(c.DiskStorageClass)) != 0 {
+		return fmt.Errorf("diskStorageClass must be a valid StorageClass name")
+	}
+	switch c.Phase {
+	case "":
+	case "balance":
+		if c.BalancePoolA == "" || c.BalancePoolB == "" || c.BalanceLabel == "" {
+			return fmt.Errorf("balance phase requires two pools and one shared label")
+		}
+		if len(validation.IsValidLabelValue(c.BalanceLabel)) != 0 ||
+			c.BalanceLabel == c.MainLabel || c.BalanceLabel == c.ZeroLabel {
+			return fmt.Errorf("balanceLabel must be a distinct label value")
+		}
+		seen := map[string]bool{}
+		for _, name := range c.PoolNames() {
+			if !azureNameRE.MatchString(name) || seen[strings.ToLower(name)] {
+				return fmt.Errorf("balance pools must have distinct valid Azure resource names")
+			}
+			seen[strings.ToLower(name)] = true
+		}
+	case "no-join", "minimum":
+	case "spot", "spot-eviction":
+		if err := c.validateAdditionalPool(c.SpotPool, c.SpotLabel); err != nil {
+			return fmt.Errorf("spot phase: %w", err)
+		}
+		if (c.Phase == "spot-eviction") != c.EvictSpot {
+			return fmt.Errorf("evictSpot must be enabled only for the spot-eviction phase")
+		}
+	case "cse":
+		if err := c.validateAdditionalPool(c.FailurePool, c.FailureLabel); err != nil {
+			return fmt.Errorf("failed VM phase: %w", err)
+		}
+		if c.MaxNodeProvisionTime != "15m" {
+			return fmt.Errorf("failed VM phase requires maxNodeProvisionTime=15m")
+		}
+	case "missing-vmss":
+		if !c.DeleteMissingPool || c.MissingPool == "" ||
+			!azureNameRE.MatchString(c.MissingPool) ||
+			strings.EqualFold(c.MissingPool, c.MainPool) || strings.EqualFold(c.MissingPool, c.ZeroPool) {
+			return fmt.Errorf("missing-vmss phase requires one distinct pool and explicit deletion permission")
+		}
+	case "local-storage":
+		if c.SkipLocalStorage == nil {
+			return fmt.Errorf("skipLocalStorage must state the controller setting")
+		}
+	case "large":
+		if err := c.validateAdditionalPool(c.ScalePool, c.ScaleLabel); err != nil {
+			return fmt.Errorf("large phase: %w", err)
+		}
+	default:
+		return fmt.Errorf("unknown fixture phase %q", c.Phase)
+	}
+	if c.Phase != "balance" && (c.BalancePoolA != "" || c.BalancePoolB != "" || c.BalanceLabel != "") {
+		return fmt.Errorf("balance pools and label require the balance phase")
+	}
+	if c.Phase != "spot" && c.Phase != "spot-eviction" && (c.SpotPool != "" || c.SpotLabel != "" || c.EvictSpot) {
+		return fmt.Errorf("Spot pool, label and eviction permission require a Spot phase")
+	}
+	if c.Phase != "large" && (c.ScalePool != "" || c.ScaleLabel != "") {
+		return fmt.Errorf("scale pool and label require the large phase")
+	}
+	if c.Phase != "cse" && (c.FailurePool != "" || c.FailureLabel != "" || c.MaxNodeProvisionTime != "") {
+		return fmt.Errorf("failed VM pool and provision time require the cse phase")
+	}
+	if c.Phase != "missing-vmss" && (c.MissingPool != "" || c.DeleteMissingPool) {
+		return fmt.Errorf("missing VMSS pool and deletion permission require the missing-vmss phase")
+	}
+	if c.Phase != "local-storage" && c.SkipLocalStorage != nil {
+		return fmt.Errorf("skipLocalStorage requires the local-storage phase")
+	}
+	return nil
+}
+
+func (c Config) validateAdditionalPool(name, label string) error {
+	if name == "" || label == "" ||
+		!azureNameRE.MatchString(name) ||
+		strings.EqualFold(name, c.MainPool) || strings.EqualFold(name, c.ZeroPool) ||
+		len(validation.IsValidLabelValue(label)) != 0 ||
+		label == c.MainLabel || label == c.ZeroLabel {
+		return fmt.Errorf("optional pool requires a distinct valid name and label")
+	}
+	return nil
+}
+
+func (c Config) resourcePrefix() string {
+	return "/subscriptions/" + c.SubscriptionID + "/resourceGroups/" + c.ResourceGroup
+}
+
+// PoolID returns the Azure resource ID of the VMSS name.
+func (c Config) PoolID(name string) string {
+	return c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachineScaleSets/" + name
+}
+
+func normalizeID(id string) string {
+	return strings.ToLower(strings.TrimPrefix(id, "azure://"))
+}
