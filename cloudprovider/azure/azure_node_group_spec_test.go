@@ -130,6 +130,7 @@ func TestExtendedScaleSetNodeTemplate(t *testing.T) {
 		nodeLabelTagName + "env":      ptr.To("tag"),
 		nodeLabelTagName + "tag-only": ptr.To("tag"),
 		nodeTaintTagName + "from-tag": ptr.To("tag:NoExecute"),
+		legacyPoolNameTag:             ptr.To("pool"),
 	}
 	manager.azureCache.setScaleSet("test-asg", &vmss)
 
@@ -139,10 +140,12 @@ func TestExtendedScaleSetNodeTemplate(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, map[string]string{"env": "prod"}, scaleSet.labels)
 	require.Equal(t, "from-spec=prod:NoSchedule", scaleSet.taints)
+	scaleSet.enableLabelPredictionsOnTemplate = true
 
 	nodeInfo, err := scaleSet.TemplateNodeInfo(context.Background())
 	require.NoError(t, err)
 	require.Equal(t, "prod", nodeInfo.Node().Labels["env"])
+	require.Equal(t, map[string]string{"env": "prod"}, scaleSet.labels, "TemplateNodeInfo must not change the spec labels")
 	require.Empty(t, nodeInfo.Node().Labels["tag-only"])
 	require.Equal(t, []apiv1.Taint{{Key: "from-spec", Value: "prod", Effect: apiv1.TaintEffectNoSchedule}}, nodeInfo.Node().Spec.Taints)
 

@@ -19,6 +19,7 @@ package azure
 import (
 	"context"
 	"fmt"
+	"maps"
 	"math/rand"
 	"net/http"
 	"strings"
@@ -945,7 +946,8 @@ func (scaleSet *ScaleSet) TemplateNodeInfo(ctx context.Context) (*framework.Node
 		return nil, err
 	}
 
-	template, err := buildNodeTemplateFromVMSS(vmss, scaleSet.labels, scaleSet.taints)
+	// The template code adds predicted labels to this map, so pass a copy.
+	template, err := buildNodeTemplateFromVMSS(vmss, maps.Clone(scaleSet.labels), scaleSet.taints)
 	if err != nil {
 		return nil, err
 	}
