@@ -19,6 +19,7 @@ limitations under the License.
 package scalephase_test
 
 import (
+	"maps"
 	"strings"
 	"testing"
 
@@ -62,6 +63,33 @@ func TestDeallocateWorkerIdentity(t *testing.T) {
 			changed.ProvisioningState = "Failed"
 		}
 		check(changed, before.instance.ID, false)
+	}
+}
+
+func TestDeallocateNetworkProbe(t *testing.T) {
+	c := environment.Config{
+		RunID: "test-123", MainLabel: "main", PoolLabel: "acceptance-pool",
+		WorkloadImage: "image@sha256:abc",
+	}
+	e := &environment.Environment{Config: c}
+	probes, service := deallocateNetworkProbe(e, "test-ns")
+	wantLabels := map[string]string{environment.RunLabel: c.RunID, "app": probes.Name}
+	if probes.Name != "deallocate-network" || probes.Namespace != "test-ns" ||
+		*probes.Spec.Replicas != 2 || !maps.Equal(probes.Spec.Selector.MatchLabels, wantLabels) ||
+		!maps.Equal(probes.Spec.Template.Labels, wantLabels) ||
+		probes.Spec.Template.Spec.NodeSelector[c.PoolLabel] != c.MainLabel {
+		t.Fatalf("network probes do not target the run and main pool: %+v", probes)
+	}
+	terms := probes.Spec.Template.Spec.Affinity.PodAntiAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+	if len(terms) != 1 || terms[0].TopologyKey != "kubernetes.io/hostname" ||
+		!maps.Equal(terms[0].LabelSelector.MatchLabels, wantLabels) {
+		t.Fatalf("network probes are not spread across workers: %+v", terms)
+	}
+	if service.Name != probes.Name || service.Namespace != probes.Namespace ||
+		service.Labels[environment.RunLabel] != c.RunID ||
+		!maps.Equal(service.Spec.Selector, wantLabels) ||
+		len(service.Spec.Ports) != 1 || service.Spec.Ports[0].Port != 8080 {
+		t.Fatalf("network Service does not select the probes: %+v", service)
 	}
 }
 

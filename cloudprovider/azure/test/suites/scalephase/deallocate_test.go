@@ -48,6 +48,7 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 	It("AZ-P3-001 parks and starts the same worker for new demand", Label("AZ-P3-001", "deallocate"), func(ctx SpecContext) {
 		f := setup(ctx, "deallocate", "AZ-P3-001")
 		anchor, demand, worker := growDeallocateWorker(ctx, f)
+		Expect(probeDeallocateNetwork(ctx, f)).To(Succeed())
 		tokenBytes := make([]byte, 16)
 		_, err := rand.Read(tokenBytes)
 		Expect(err).NotTo(HaveOccurred())
@@ -483,29 +484,17 @@ func operatorFaultReceipt(ctx context.Context, f *fixture, name string, worker p
 }
 
 func probeDeallocateNetwork(ctx SpecContext, f *fixture) error {
-	c := f.env.Config
-	probes := f.env.Deployment(f.namespace.Name, "deallocate-network", c.MainLabel, "50m", 2)
-	probes.Spec.Template.Spec.Containers[0].Command = []string{"sh", "-c", "mkdir -p /www; hostname >/www/index.html; exec httpd -f -p 8080 -h /www"}
-	probes.Spec.Template.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
-		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
-			TopologyKey: "kubernetes.io/hostname", LabelSelector: probes.Spec.Selector.DeepCopy(),
-		}},
-	}}
+	probes, service := deallocateNetworkProbe(f.env, f.namespace.Name)
 	if err := f.env.K8s.Create(ctx, probes); err != nil {
 		return err
 	}
-	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: "deallocate-network", Namespace: f.namespace.Name,
-		Labels: map[string]string{environment.RunLabel: c.RunID}}, Spec: corev1.ServiceSpec{
-		Selector: probes.Spec.Selector.MatchLabels,
-		Ports:    []corev1.ServicePort{{Port: 8080}},
-	}}
 	if err := f.env.K8s.Create(ctx, service); err != nil {
 		return err
 	}
 	var pods []corev1.Pod
 	Eventually(ctx, func() error {
 		var err error
-		pods, err = f.env.WorkloadState(ctx, f.namespace.Name, probes.Name, c.MainPool, 2, 0)
+		pods, err = f.env.WorkloadState(ctx, f.namespace.Name, probes.Name, f.env.Config.MainPool, 2, 0)
 		if err != nil {
 			return err
 		}
@@ -524,5 +513,43 @@ func probeDeallocateNetwork(ctx SpecContext, f *fixture) error {
 				service.Name+"."+f.namespace.Name+".svc.cluster.local", pod.Name, other.Name)
 		}, 3*time.Minute, pollInterval).Should(Succeed())
 	}
+	if err := f.env.K8s.Delete(ctx, service, client.Preconditions{UID: &service.UID}); err != nil {
+		return err
+	}
+	if err := f.env.K8s.Delete(ctx, probes, client.Preconditions{UID: &probes.UID}); err != nil {
+		return err
+	}
+	Eventually(ctx, func() error {
+		if err := workloadPodsGone(ctx, f, probes); err != nil {
+			return err
+		}
+		for _, object := range []client.Object{service, probes} {
+			err := f.env.K8s.Get(ctx, client.ObjectKeyFromObject(object), object)
+			if !apierrors.IsNotFound(err) {
+				if err != nil {
+					return err
+				}
+				return fmt.Errorf("network probe %s still exists", object.GetName())
+			}
+		}
+		return nil
+	}, 2*time.Minute, pollInterval).Should(Succeed())
 	return nil
+}
+
+func deallocateNetworkProbe(e *environment.Environment, namespace string) (*appsv1.Deployment, *corev1.Service) {
+	c := e.Config
+	probes := e.Deployment(namespace, "deallocate-network", c.MainLabel, "50m", 2)
+	probes.Spec.Template.Spec.Containers[0].Command = []string{"sh", "-c", "mkdir -p /www; hostname >/www/index.html; exec httpd -f -p 8080 -h /www"}
+	probes.Spec.Template.Spec.Affinity = &corev1.Affinity{PodAntiAffinity: &corev1.PodAntiAffinity{
+		RequiredDuringSchedulingIgnoredDuringExecution: []corev1.PodAffinityTerm{{
+			TopologyKey: "kubernetes.io/hostname", LabelSelector: probes.Spec.Selector.DeepCopy(),
+		}},
+	}}
+	service := &corev1.Service{ObjectMeta: metav1.ObjectMeta{Name: probes.Name, Namespace: namespace,
+		Labels: map[string]string{environment.RunLabel: c.RunID}}, Spec: corev1.ServiceSpec{
+		Selector: probes.Spec.Selector.MatchLabels,
+		Ports:    []corev1.ServicePort{{Port: 8080}},
+	}}
+	return probes, service
 }
