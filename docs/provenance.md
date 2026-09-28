@@ -28,9 +28,11 @@ dependency-maintenance tooling is retained.
 
 ## Compatibility scope
 
-The provider follows ordinary upstream Azure Delete-mode behavior and accepts
-the AKS settings and extended node group inputs described in
-[architecture](architecture.md). It does not implement AKS deallocate-mode
+The provider follows ordinary upstream Azure Delete-mode behavior by default
+and accepts the AKS settings and extended node group inputs described in
+[architecture](architecture.md). The optional
+[provider-only deallocate mode](architecture.md#provider-only-deallocate) is a
+local addition. It does not implement AKS deallocate-mode
 behavior or claim full parity with the
 [`Azure/autoscaler` fork](https://github.com/Azure/autoscaler).
 
