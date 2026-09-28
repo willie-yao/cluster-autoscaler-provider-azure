@@ -21,6 +21,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"html/template"
 	"io/ioutil"
 	"os"
@@ -153,12 +154,15 @@ func getAllAzureVirtualMachineTypes() (result map[string]*azure.InstanceType, er
 }
 
 func main() {
+	output := flag.String("output", "azure_instance_types.go", "path for the generated instance types")
+	flag.Parse()
+
 	instanceTypes, err := getAllAzureVirtualMachineTypes()
 	if err != nil {
 		klog.Fatal(err)
 	}
 
-	f, err := os.Create("azure_instance_types.go")
+	f, err := os.Create(*output)
 	if err != nil {
 		klog.Fatal(err)
 	}
