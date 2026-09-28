@@ -1,12 +1,17 @@
-ALL_ARCH ?= amd64 arm64 s390x
 TAG ?= dev
 LDFLAGS ?= -s
 GOOS ?= linux
 GOARCH ?= $(shell go env GOARCH)
 IMAGE ?= cluster-autoscaler-azure
 
-VERSION_PKG := k8s.io/autoscaler/cluster-autoscaler/version
-# Explicit VERSION overrides are used verbatim.
+# VERSION is the cluster-autoscaler version baked into the binary via -ldflags.
+#   1. Exact git tag pointing at HEAD, with the "cluster-autoscaler-" prefix stripped.
+#   2. The current commit SHA.
+#   3. The literal string "dev" (for builds outside a git checkout).
+# A "-dirty" suffix is appended when the git working tree has uncommitted
+# changes (cases 1 and 2 only).
+# Override with `make VERSION=<value> ...` to force a specific value; an
+# externally provided VERSION is used verbatim, with no "-dirty" suffix.
 ifeq ($(origin VERSION),undefined)
   VERSION := $(shell git describe --exact-match --tags 2>/dev/null | sed -e 's|^cluster-autoscaler-||')
   ifeq ($(strip $(VERSION)),)
@@ -18,10 +23,12 @@ ifeq ($(origin VERSION),undefined)
     VERSION := $(VERSION)$(shell git diff --no-ext-diff --quiet --exit-code 2>/dev/null || echo -dirty)
   endif
 endif
+
+VERSION_PKG := k8s.io/autoscaler/cluster-autoscaler/version
 VERSION_LDFLAG := -X $(VERSION_PKG).ClusterAutoscalerVersion=$(VERSION)
 LDFLAGS_VALUE := $(strip $(LDFLAGS) $(VERSION_LDFLAG))
 
-.PHONY: all build build-arch test-azure test-unit test-ci test-chart test-core-integration clean format image
+.PHONY: all build test-azure test-unit test-ci test-chart test-core-integration clean format image
 
 all: build
 
@@ -31,16 +38,16 @@ build-arch-%:
 	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$* go build -o cluster-autoscaler-$* --ldflags="$(LDFLAGS_VALUE)"
 
 test-azure:
-	go test -race ./cloudprovider/azure/...
+	go test -race -vet=all ./cloudprovider/azure/...
 
-test-unit: build test-azure
-	go test -race ./...
+test-unit: build
+	go test -race -vet=all ./...
 
 test-chart:
-	go test -mod=readonly -tags helm ./charts -count=1
+	go test -tags helm ./charts -count=1
 
 test-core-integration:
-	go test -mod=readonly -race sigs.k8s.io/cluster-autoscaler/pkg/test/integration/inmemory -run 'TestStaticAutoscaler_FullLifecycle|TestScaleUp_ResourceLimits' -count=1
+	go test -race sigs.k8s.io/cluster-autoscaler/pkg/test/integration/inmemory -count=1
 
 test-ci: test-unit test-core-integration
 
@@ -51,7 +58,7 @@ format:
 	bash hack/update-gofmt.sh
 
 image:
-	docker build \
+	docker build --pull \
 		--platform=linux/$(GOARCH) \
 		--build-arg "GOARCH=$(GOARCH)" \
 		--build-arg 'LDFLAGS=$(LDFLAGS_VALUE)' \
