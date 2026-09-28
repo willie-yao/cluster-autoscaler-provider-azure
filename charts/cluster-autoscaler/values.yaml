@@ -31,7 +31,7 @@ azureClientID: ""
 # Required for Azure service-principal authentication.
 azureClientSecret: ""
 
-# azureResourceGroup -- Azure resource group that the cluster is located.
+# azureResourceGroup -- Azure resource group that contains the worker node VMSS or VMs. For AKS, this is the node resource group.
 # Required for all Azure authentication methods.
 azureResourceGroup: ""
 

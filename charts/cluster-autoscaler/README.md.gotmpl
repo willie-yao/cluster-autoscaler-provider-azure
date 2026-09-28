@@ -55,9 +55,11 @@ The following parameters are required:
 
 - `image.repository` and `image.tag`
 - `azureSubscriptionID: "your-azure-subscription-id"`
-- `azureResourceGroup: "your-aks-cluster-resource-group-name"`
+- `azureResourceGroup: "your-vmss-resource-group-name"`
 - `azureVMType: "vmss"`
 - Either `autoDiscovery.clusterName` or `autoscalingGroups[0].name=your-vmss,autoscalingGroups[0].maxSize=10,autoscalingGroups[0].minSize=1`
+
+The resource group must be the one that contains the VMSS. For AKS, this is the node resource group, not the cluster resource group.
 
 For service principal authentication, also set:
 

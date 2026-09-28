@@ -55,9 +55,11 @@ The following parameters are required:
 
 - `image.repository` and `image.tag`
 - `azureSubscriptionID: "your-azure-subscription-id"`
-- `azureResourceGroup: "your-aks-cluster-resource-group-name"`
+- `azureResourceGroup: "your-vmss-resource-group-name"`
 - `azureVMType: "vmss"`
 - Either `autoDiscovery.clusterName` or `autoscalingGroups[0].name=your-vmss,autoscalingGroups[0].maxSize=10,autoscalingGroups[0].minSize=1`
+
+The resource group must be the one that contains the VMSS. For AKS, this is the node resource group, not the cluster resource group.
 
 For service principal authentication, also set:
 
@@ -183,7 +185,7 @@ vpa:
 | azureClientSecret | string | `""` | Service Principal ClientSecret with contributor permission to Cluster and Node ResourceGroup. Required for Azure service-principal authentication. |
 | azureEnableForceDelete | bool | `false` | Whether to force delete VMs or VMSS instances when scaling down. |
 | azureEnableVMSSEtag | bool | `false` | Whether to send the cached VMSS ETag as an `If-Match` header on capacity updates, so concurrent modifications are rejected (HTTP 412) and retried instead of silently overwritten. |
-| azureResourceGroup | string | `""` | Azure resource group that the cluster is located. Required for all Azure authentication methods. |
+| azureResourceGroup | string | `""` | Azure resource group that contains the worker node VMSS or VMs. For AKS, this is the node resource group. Required for all Azure authentication methods. |
 | azureSubscriptionID | string | `""` | Azure subscription where the resources are located. Required for all Azure authentication methods. When empty, the autoscaler tries to read it from the Azure Instance Metadata Service. |
 | azureTenantID | string | `""` | Azure tenant where the resources are located. Required for Azure service-principal authentication. |
 | azureUseManagedIdentityExtension | bool | `false` | Whether to use Azure's managed identity extension for credentials. If using MSI, ensure subscription ID, resource group, and azure AKS cluster name are set. You can only use one authentication method at a time, either azureUseWorkloadIdentityExtension or azureUseManagedIdentityExtension should be set. |
