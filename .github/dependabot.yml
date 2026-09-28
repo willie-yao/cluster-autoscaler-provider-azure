@@ -40,6 +40,9 @@ updates:
       - dependency-name: "k8s.io/sample-cli-plugin"
       - dependency-name: "k8s.io/sample-controller"
       - dependency-name: "k8s.io/streaming"
+      # The core and the APIs module follow the Kubernetes version, so update them by hand.
+      - dependency-name: "sigs.k8s.io/cluster-autoscaler"
+      - dependency-name: "k8s.io/autoscaler/cluster-autoscaler/apis"
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
