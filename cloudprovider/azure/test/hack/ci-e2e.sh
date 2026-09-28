@@ -97,7 +97,66 @@ jq -e --arg run "$CLUSTER_NAME" --arg system "$system" --arg main "$main" --arg 
         .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "zero" and .sku.capacity == 0)
 ' <<< "$sets" >/dev/null || fail "AKS VMSS bounds, tags or settings differ from the E2E fixture"
 
-kubectl wait --for=condition=Ready node --all --timeout=15m
+# AKS keeps setting up a new cluster after CAPZ reports it Ready. About 12 to
+# 35 minutes after it creates the pools, it rolls out new kube-system add-on
+# revisions and adds AKSLinuxExtension to each VMSS, which puts the VMSS in
+# Updating while it upgrades the instances. Wait for that work to finish, so
+# that add-on Pods don't return to the drained workers and the strict VMSS
+# checks don't see an AKS upgrade. The checks follow upstream's AllVMSSStable
+# and the provisioning state checks in CAPZ's AKS tests.
+cluster_id=$(mgmt get "managedclusters.containerservice.azure.com/$CLUSTER_NAME" -o json |
+    jq -er '.status.id // empty')
+[[ ${cluster_id,,} == "/subscriptions/${AZURE_SUBSCRIPTION_ID,,}/resourcegroups/"*"/providers/microsoft.containerservice/managedclusters/"* ]] ||
+    fail "Unexpected AKS cluster ID: $cluster_id"
+aks_group=${cluster_id#*/resource[Gg]roups/}
+aks_group=${aks_group%%/*}
+aks_name=${cluster_id##*/}
+aks_settled() {
+    az aks show -g "$aks_group" -n "$aks_name" --subscription "$AZURE_SUBSCRIPTION_ID" -o json | jq -e '
+        .provisioningState == "Succeeded" and
+        (.agentPoolProfiles | length == 3 and all(.[]; .provisioningState == "Succeeded"))
+    ' >/dev/null || { echo "The AKS cluster or an agent pool is not Succeeded"; return 1; }
+    local current set capacity
+    current=$(az vmss list -g "$group" --subscription "$AZURE_SUBSCRIPTION_ID" -o json)
+    jq -e 'length == 3 and all(.[]; .provisioningState == "Succeeded" and
+        any(.virtualMachineProfile.extensionProfile.extensions[]?; .name == "AKSLinuxExtension"))
+    ' <<< "$current" >/dev/null || { echo "A VMSS is not Succeeded or has no AKSLinuxExtension"; return 1; }
+    for set in "$system" "$main" "$zero"; do
+        az vmss list-instances -g "$group" -n "$set" --subscription "$AZURE_SUBSCRIPTION_ID" -o json |
+            jq -e 'all(.[]; .provisioningState == "Succeeded" and .latestModelApplied == true)' >/dev/null ||
+            { echo "VMSS $set has instances that are not on its latest model"; return 1; }
+    done
+    capacity=$(jq '[.[].sku.capacity] | add' <<< "$current")
+    kubectl get nodes -o json | jq -e --argjson capacity "$capacity" '
+        (.items | length) == $capacity and
+        all(.items[]; any(.status.conditions[]; .type == "Ready" and .status == "True"))
+    ' >/dev/null || { echo "The Ready Nodes don't match the VMSS capacity"; return 1; }
+    kubectl -n kube-system get deployments -o json | jq -e '
+        all(.items[]; (.status.observedGeneration // 0) >= .metadata.generation and
+            (.status.replicas // 0) == .spec.replicas and
+            (.status.updatedReplicas // 0) == .spec.replicas and
+            (.status.availableReplicas // 0) == .spec.replicas)
+    ' >/dev/null || { echo "A kube-system Deployment is still rolling out"; return 1; }
+}
+echo "Waiting for AKS to finish its background setup at $(date -u +%FT%TZ)"
+start=$SECONDS
+passes=0
+reason=
+# Require three passing checks in a row, so that the next step of an AKS
+# upgrade can't start between two checks.
+while true; do
+    if reason=$(aks_settled); then
+        passes=$((passes + 1))
+        (( passes < 3 )) || break
+    else
+        passes=0
+        echo "$(date -u +%T) $reason"
+    fi
+    (( SECONDS - start < 2700 )) || fail "AKS did not finish its background setup within 45 minutes: $reason"
+    sleep 30
+done
+echo "AKS finished its background setup after $((SECONDS - start)) seconds"
+
 kubectl get pods,deployments,daemonsets,statefulsets -A -o json | jq -e '
     all(.items[]; all((if .kind == "Pod" then .spec.containers else .spec.template.spec.containers end)[];
         (.name | contains("cluster-autoscaler") | not) and
