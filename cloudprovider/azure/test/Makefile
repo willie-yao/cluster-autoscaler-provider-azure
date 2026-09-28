@@ -8,6 +8,7 @@ CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME?=cluster-autoscaler
 # TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scaleup).
 TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
+PROW_TEST_TIMEOUT?=4h
 ENVIRONMENT?=
 
 # Compute the selected suite path.
@@ -15,14 +16,18 @@ SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/
 FOCUS?=
 LABEL_FILTER?=
 ARTIFACTS?=_artifacts
+IMAGE?=$(REGISTRY)/cluster-autoscaler-azure
+TAG?=
 
 # --------------------------------------------------------------------------
 # Operator-prepared E2E and legacy AKS development targets
 # --------------------------------------------------------------------------
-# Current E2E workflow:
-#   Prepare the VMSS Uniform fixture described in README.md separately, then pass
+# Current E2E workflows:
+#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml,
+#   then test-e2e deploys CAS and writes an AKS-mode binding.
+#   Manual: prepare the VMSS Uniform fixture described in README.md separately, then pass
 #   ENVIRONMENT=/absolute/path/to/environment.json to e2etests.
-#   Legacy AKS targets do not prepare or validate this fixture.
+#   Legacy AKS targets do not prepare or validate either fixture.
 
 .PHONY: help
 help: ## Display help
@@ -47,6 +52,18 @@ deploy-local-dev: ## Legacy: watch and redeploy CAS with the AKS Skaffold config
 	cd $(CAS_ROOT) && skaffold dev --filename cloudprovider/azure/examples/dev/skaffold.yaml
 
 ##@ Current operator-prepared E2E workflow
+
+.PHONY: build-e2e
+build-e2e: ## Build and push the candidate image for a CAPZ AKS Prow cluster
+	IMAGE="$(IMAGE)" TAG="$(TAG)" bash hack/ci-e2e.sh build
+
+.PHONY: test-e2e
+test-e2e: build-e2e ## Deploy CAS on the CAPZ AKS cluster and run a labeled E2E shard
+	IMAGE="$(IMAGE)" TAG="$(TAG)" ARTIFACTS="$(ARTIFACTS)" \
+		LABEL_FILTER="$(if $(LABEL_FILTER),$(LABEL_FILTER),smoke)" TEST_TIMEOUT="$(PROW_TEST_TIMEOUT)" \
+		CLUSTER_AUTOSCALER_NAMESPACE="$(CLUSTER_AUTOSCALER_NAMESPACE)" \
+		CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME="$(CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME)" \
+		TEST_SUITE="$(TEST_SUITE)" bash hack/ci-e2e.sh test
 
 .PHONY: e2etests
 e2etests: ## Run E2Es on a prepared fixture with CAS deployed (ENVIRONMENT=<JSON binding>)

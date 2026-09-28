@@ -69,6 +69,25 @@ func TestConfigValidate(t *testing.T) {
 		{name: "foreign control plane", change: func(c *Config) {
 			c.ControlPlaneID = "/subscriptions/foreign/resourceGroups/a/providers/Microsoft.Compute/virtualMachines/cp"
 		}},
+		{name: "unknown resource group mode", change: func(c *Config) { c.ResourceGroupMode = "relaxed" }},
+		{name: "System pool without AKS mode", change: func(c *Config) { c.SystemPool = "system" }},
+		{name: "AKS mode with control plane VM", change: func(c *Config) {
+			c.ResourceGroupMode, c.SystemPool = AKSMode, "system"
+		}},
+		{name: "AKS mode without System pool", change: func(c *Config) {
+			c.ResourceGroupMode, c.ControlPlaneID = AKSMode, ""
+		}},
+		{name: "AKS System pool overlaps main", change: func(c *Config) {
+			c.ResourceGroupMode, c.ControlPlaneID, c.SystemPool = AKSMode, "", "MAIN"
+		}},
+		{name: "AKS System pool path injection", change: func(c *Config) {
+			c.ResourceGroupMode, c.ControlPlaneID, c.SystemPool = AKSMode, "", "system/other"
+		}},
+		{name: "AKS mode with phased fixture", change: func(c *Config) {
+			c.ResourceGroupMode, c.ControlPlaneID, c.SystemPool = AKSMode, "", "system"
+			c.Phase, c.SkipLocalStorage = "local-storage", ptr.To(false)
+		}},
+		{name: "default mode without control plane", change: func(c *Config) { c.ControlPlaneID = "" }},
 		{name: "resource path injection", change: func(c *Config) { c.ResourceGroup = "workers/other" }},
 		{name: "nonpositive demand", change: func(c *Config) { c.DemandCPU = "0" }},
 		{name: "invalid disk class", change: func(c *Config) { c.DiskStorageClass = "wrong/class" }},
@@ -136,6 +155,25 @@ func TestConfigValidate(t *testing.T) {
 				t.Fatal("invalid configuration accepted")
 			}
 		})
+	}
+}
+
+func testAKSConfig() Config {
+	c := testConfig()
+	c.ResourceGroupMode, c.ControlPlaneID, c.SystemPool = AKSMode, "", "system"
+	return c
+}
+
+func TestConfigAKSMode(t *testing.T) {
+	c := testAKSConfig()
+	if err := c.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if !c.AKS() || testConfig().AKS() {
+		t.Fatal("AKS mode must be explicit")
+	}
+	if pools := c.Pools(); len(pools) != 2 || len(c.PoolNames()) != 2 {
+		t.Fatalf("AKS mode must authorize only main and zero: %+v", pools)
 	}
 }
 

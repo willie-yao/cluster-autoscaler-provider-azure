@@ -456,6 +456,123 @@ func TestAzureReadAfterMissingPool(t *testing.T) {
 	}
 }
 
+func TestAzureReadAKSMode(t *testing.T) {
+	t.Parallel()
+	for _, tt := range []struct {
+		name            string
+		systemCapacity  int64
+		systemInstances int
+		systemTags      map[string]*string
+		noSystem        bool
+		extraTags       map[string]*string
+		standalone      bool
+		bounds          bool
+		errorText       string
+	}{
+		{name: "System pool replaces the control plane", systemCapacity: 1, systemInstances: 1},
+		{name: "System pool carries discovery tag", systemCapacity: 1,
+			systemTags: map[string]*string{"cluster-autoscaler-name": ptr.To("owned-run")}, errorText: "must be untagged"},
+		{name: "empty System pool", errorText: "keep at least one VM"},
+		{name: "missing System pool", noSystem: true, errorText: "System pool system is missing"},
+		{name: "extra discovered VMSS", systemCapacity: 1, errorText: "unexpected VMSS",
+			extraTags: map[string]*string{RunLabel: ptr.To("owned-run"), "cluster-autoscaler-name": ptr.To("owned-run")}},
+		{name: "extra untagged VMSS", systemCapacity: 1, extraTags: map[string]*string{}, errorText: "unexpected VMSS"},
+		{name: "standalone VM", systemCapacity: 1, standalone: true, errorText: "unexpected standalone VM"},
+		{name: "two System VMs exceed the peak budget", systemCapacity: 2, bounds: true},
+		{name: "System instances above capacity exceed the peak budget", systemCapacity: 1, systemInstances: 2, bounds: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			c := testAKSConfig()
+			setPath := c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachineScaleSets"
+			mainVM := c.PoolID(c.MainPool) + "/virtualMachines/0"
+			sets := armcompute.VirtualMachineScaleSetListResult{}
+			if !tt.noSystem {
+				sets.Value = append(sets.Value, &armcompute.VirtualMachineScaleSet{
+					Name: ptr.To(c.SystemPool), Tags: tt.systemTags,
+					SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(tt.systemCapacity)},
+					Properties: &armcompute.VirtualMachineScaleSetProperties{
+						ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+					},
+				})
+			}
+			for name, bounds := range map[string][3]int64{c.MainPool: {1, 2, 1}, c.ZeroPool: {0, 1, 0}} {
+				sets.Value = append(sets.Value, &armcompute.VirtualMachineScaleSet{
+					Name: ptr.To(name), SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(bounds[2])},
+					Tags: map[string]*string{RunLabel: ptr.To(c.RunID), "cluster-autoscaler-name": ptr.To(c.DiscoveryValue),
+						"min": ptr.To(fmt.Sprint(bounds[0])), "max": ptr.To(fmt.Sprint(bounds[1]))},
+					Properties: &armcompute.VirtualMachineScaleSetProperties{
+						ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+					},
+				})
+			}
+			if tt.extraTags != nil {
+				sets.Value = append(sets.Value, &armcompute.VirtualMachineScaleSet{
+					Name: ptr.To("extra"), Tags: tt.extraTags,
+					SKU: &armcompute.SKU{Name: ptr.To("Standard_D2s_v5"), Capacity: ptr.To(int64(0))},
+					Properties: &armcompute.VirtualMachineScaleSetProperties{
+						ProvisioningState: ptr.To("Succeeded"), Overprovision: ptr.To(false),
+					},
+				})
+			}
+			system := armcompute.VirtualMachineScaleSetVMListResult{Value: []*armcompute.VirtualMachineScaleSetVM{}}
+			for i := 0; i < tt.systemInstances; i++ {
+				system.Value = append(system.Value, &armcompute.VirtualMachineScaleSetVM{
+					ID: ptr.To(fmt.Sprintf("%s/virtualMachines/%d", c.PoolID(c.SystemPool), i)),
+				})
+			}
+			standalone := armcompute.VirtualMachineListResult{}
+			if tt.standalone {
+				standalone.Value = []*armcompute.VirtualMachine{{ID: ptr.To(c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachines/other")}}
+			}
+			// No control plane path is served, so an AKS read must not look for one.
+			responses := map[string]interface{}{
+				setPath: sets,
+				setPath + "/" + c.MainPool + "/virtualMachines": armcompute.VirtualMachineScaleSetVMListResult{
+					Value: []*armcompute.VirtualMachineScaleSetVM{{
+						ID: ptr.To(mainVM), Properties: &armcompute.VirtualMachineScaleSetVMProperties{
+							NetworkProfile: &armcompute.NetworkProfile{NetworkInterfaces: []*armcompute.NetworkInterfaceReference{{
+								ID: ptr.To(mainVM + "/networkInterfaces/nic"),
+							}}},
+						},
+					}},
+				},
+				setPath + "/" + c.ZeroPool + "/virtualMachines":                     armcompute.VirtualMachineScaleSetVMListResult{},
+				setPath + "/" + c.SystemPool + "/virtualMachines":                   system,
+				c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachines": standalone,
+			}
+			factory, err := armcompute.NewClientFactory(c.SubscriptionID, &fake.TokenCredential{}, &arm.ClientOptions{
+				ClientOptions: azcore.ClientOptions{Transport: sdkTransport(func(request *http.Request) (*http.Response, error) {
+					payload, exists := responses[request.URL.Path]
+					if !exists {
+						return nil, fmt.Errorf("unexpected SDK request %s", request.URL.Path)
+					}
+					body, err := json.Marshal(payload)
+					if err != nil {
+						t.Fatal(err)
+					}
+					return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": []string{"application/json"}},
+						Body: io.NopCloser(bytes.NewReader(body)), Request: request}, nil
+				})},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cloud := &azureCloud{config: c, sets: factory.NewVirtualMachineScaleSetsClient(),
+				vms: factory.NewVirtualMachineScaleSetVMsClient(), standaloneVMs: factory.NewVirtualMachinesClient(),
+				cores: map[string]int{"standard_d2s_v5": 2}}
+			snapshot, err := cloud.Read(context.Background())
+			valid := !tt.bounds && tt.errorText == ""
+			if (err == nil) != valid || errors.Is(err, ErrBounds) != tt.bounds ||
+				tt.errorText != "" && !strings.Contains(err.Error(), tt.errorText) {
+				t.Fatalf("AKS read error=%v, want bounds=%t text=%q", err, tt.bounds, tt.errorText)
+			}
+			if valid && (len(snapshot.Pools) != 2 || snapshot.VMs != 2 || snapshot.VCPUs != 4) {
+				t.Fatalf("AKS observation=%+v", snapshot)
+			}
+		})
+	}
+}
+
 func TestCheckPhasePeakEnvelope(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

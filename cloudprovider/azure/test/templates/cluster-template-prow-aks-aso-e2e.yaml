@@ -1,0 +1,365 @@
+# Copyright The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+# This file follows cluster-template-prow-aks-aso-cluster-autoscaler.yaml.
+# It keeps the untagged System pool and replaces the upstream User pools with
+# the two Linux pools that the E2E suite expects: main (1 to 2) and zero
+# (0 to 1). AKS keeps its own autoscaler off for every pool.
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: Cluster
+metadata:
+  name: ${CLUSTER_NAME}
+  namespace: default
+spec:
+  controlPlaneRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: AzureASOManagedControlPlane
+    name: ${CLUSTER_NAME}
+  infrastructureRef:
+    apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+    kind: AzureASOManagedCluster
+    name: ${CLUSTER_NAME}
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: AzureASOManagedControlPlane
+metadata:
+  name: ${CLUSTER_NAME}
+  namespace: default
+spec:
+  resources:
+  - apiVersion: containerservice.azure.com/v1api20240901
+    kind: ManagedCluster
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}
+    spec:
+      dnsPrefix: ${CLUSTER_NAME}
+      identity:
+        type: SystemAssigned
+      kubernetesVersion: "${KUBERNETES_VERSION}"
+      location: ${AZURE_LOCATION}
+      networkProfile:
+        networkPlugin: azure
+      nodeResourceGroup: MC_${CLUSTER_NAME}_${CLUSTER_NAME}_${AZURE_LOCATION}
+      oidcIssuerProfile:
+        enabled: true
+      operatorSpec:
+        configMaps:
+          oidcIssuerProfile:
+            key: issuer
+            name: ${CLUSTER_NAME}-oidc
+      owner:
+        name: ${CLUSTER_NAME}
+      securityProfile:
+        workloadIdentity:
+          enabled: true
+      servicePrincipalProfile:
+        clientId: msi
+      sku:
+        name: Base
+        tier: ${AKS_TIER:=Standard}
+      supportPlan: ${AKS_SUPPORT_PLAN:=KubernetesOfficial}
+      tags:
+        buildProvenance: ${BUILD_PROVENANCE}
+        creationTimestamp: ${TIMESTAMP}
+        jobName: ${JOB_NAME}
+  - apiVersion: managedidentity.azure.com/v1api20230131
+    kind: UserAssignedIdentity
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}
+      namespace: default
+    spec:
+      location: ${AZURE_LOCATION}
+      operatorSpec:
+        configMaps:
+          principalId:
+            key: principal-id
+            name: ${CLUSTER_NAME}-identity
+      owner:
+        name: ${CLUSTER_NAME}
+  - apiVersion: managedidentity.azure.com/v1api20230131
+    kind: FederatedIdentityCredential
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}
+      namespace: default
+    spec:
+      audiences:
+      - api://AzureADTokenExchange
+      issuerFromConfig:
+        key: issuer
+        name: ${CLUSTER_NAME}-oidc
+      owner:
+        name: ${CLUSTER_NAME}
+      subject: system:serviceaccount:${CLUSTER_AUTOSCALER_NAMESPACE:=default}:${CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME:=cluster-autoscaler}
+  - apiVersion: authorization.azure.com/v1api20220401
+    kind: RoleAssignment
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}
+      namespace: default
+    spec:
+      owner:
+        armId: /subscriptions/${AZURE_SUBSCRIPTION_ID}/resourceGroups/MC_${CLUSTER_NAME}_${CLUSTER_NAME}_${AZURE_LOCATION}
+      principalIdFromConfig:
+        key: principal-id
+        name: ${CLUSTER_NAME}-identity
+      roleDefinitionReference:
+        # Contributor
+        armId: /subscriptions/${AZURE_SUBSCRIPTION_ID}/providers/Microsoft.Authorization/roleDefinitions/b24988ac-6180-42a0-ab88-20f7382dd24c
+---
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: AzureASOManagedCluster
+metadata:
+  name: ${CLUSTER_NAME}
+  namespace: default
+spec:
+  resources:
+  - apiVersion: resources.azure.com/v1api20200601
+    kind: ResourceGroup
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}
+    spec:
+      location: ${AZURE_LOCATION}
+      tags:
+        buildProvenance: ${BUILD_PROVENANCE}
+        creationTimestamp: ${TIMESTAMP}
+        jobName: ${JOB_NAME}
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachinePool
+metadata:
+  annotations:
+    cluster.x-k8s.io/replicas-managed-by: cluster-autoscaler
+  name: ${CLUSTER_NAME}-pool0
+  namespace: default
+spec:
+  clusterName: ${CLUSTER_NAME}
+  replicas: 1
+  template:
+    metadata: {}
+    spec:
+      bootstrap:
+        dataSecretName: ""
+      clusterName: ${CLUSTER_NAME}
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+        kind: AzureASOManagedMachinePool
+        name: ${CLUSTER_NAME}-pool0
+---
+# The System pool has no autoscaler tags. It runs the AKS add-ons and the
+# autoscaler itself, like the control plane VM of a self-managed fixture.
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: AzureASOManagedMachinePool
+metadata:
+  name: ${CLUSTER_NAME}-pool0
+  namespace: default
+spec:
+  resources:
+  - apiVersion: containerservice.azure.com/v1api20240901
+    kind: ManagedClustersAgentPool
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}-pool0
+    spec:
+      azureName: pool0
+      mode: System
+      owner:
+        name: ${CLUSTER_NAME}
+      type: VirtualMachineScaleSets
+      vmSize: ${AZURE_AKS_NODE_MACHINE_TYPE:=Standard_D2s_v5}
+      orchestratorVersion: "${KUBERNETES_VERSION}"
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachinePool
+metadata:
+  annotations:
+    cluster.x-k8s.io/replicas-managed-by: cluster-autoscaler
+  name: ${CLUSTER_NAME}-main
+  namespace: default
+spec:
+  clusterName: ${CLUSTER_NAME}
+  replicas: 1
+  template:
+    metadata: {}
+    spec:
+      bootstrap:
+        dataSecretName: ""
+      clusterName: ${CLUSTER_NAME}
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+        kind: AzureASOManagedMachinePool
+        name: ${CLUSTER_NAME}-main
+---
+# maxPods is raised from the Azure CNI default of 30 so that the
+# 100-Pod cases fit on two main nodes.
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: AzureASOManagedMachinePool
+metadata:
+  name: ${CLUSTER_NAME}-main
+  namespace: default
+spec:
+  resources:
+  - apiVersion: containerservice.azure.com/v1api20240901
+    kind: ManagedClustersAgentPool
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}-main
+    spec:
+      azureName: main
+      maxPods: 110
+      mode: User
+      nodeLabels:
+        acceptance-pool: main
+      osType: Linux
+      owner:
+        name: ${CLUSTER_NAME}
+      tags:
+        autoscaler-e2e-run: ${CLUSTER_NAME}
+        cluster-autoscaler-enabled: "true"
+        cluster-autoscaler-name: ${CLUSTER_NAME}
+        k8s.io_cluster-autoscaler_node-template_label_acceptance-pool: main
+        max: "2"
+        min: "1"
+      type: VirtualMachineScaleSets
+      vmSize: ${AZURE_AKS_NODE_MACHINE_TYPE:=Standard_D2s_v5}
+      orchestratorVersion: "${KUBERNETES_VERSION}"
+---
+apiVersion: cluster.x-k8s.io/v1beta1
+kind: MachinePool
+metadata:
+  annotations:
+    cluster.x-k8s.io/replicas-managed-by: cluster-autoscaler
+  name: ${CLUSTER_NAME}-zero
+  namespace: default
+spec:
+  clusterName: ${CLUSTER_NAME}
+  replicas: 0
+  template:
+    metadata: {}
+    spec:
+      bootstrap:
+        dataSecretName: ""
+      clusterName: ${CLUSTER_NAME}
+      infrastructureRef:
+        apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+        kind: AzureASOManagedMachinePool
+        name: ${CLUSTER_NAME}-zero
+---
+# The node-template label tag lets the autoscaler predict the label of a
+# node that does not exist yet. The pool has no taint, because AZ-P1-003
+# runs a Pod without a toleration here.
+apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
+kind: AzureASOManagedMachinePool
+metadata:
+  name: ${CLUSTER_NAME}-zero
+  namespace: default
+spec:
+  resources:
+  - apiVersion: containerservice.azure.com/v1api20240901
+    kind: ManagedClustersAgentPool
+    metadata:
+      annotations:
+        serviceoperator.azure.com/credential-from: ${ASO_CREDENTIAL_SECRET_NAME}
+      name: ${CLUSTER_NAME}-zero
+    spec:
+      azureName: zero
+      maxPods: 110
+      mode: User
+      nodeLabels:
+        acceptance-pool: zero
+      osType: Linux
+      owner:
+        name: ${CLUSTER_NAME}
+      tags:
+        autoscaler-e2e-run: ${CLUSTER_NAME}
+        cluster-autoscaler-enabled: "true"
+        cluster-autoscaler-name: ${CLUSTER_NAME}
+        k8s.io_cluster-autoscaler_node-template_label_acceptance-pool: zero
+        max: "1"
+        min: "0"
+      type: VirtualMachineScaleSets
+      vmSize: ${AZURE_AKS_NODE_MACHINE_TYPE:=Standard_D2s_v5}
+      orchestratorVersion: "${KUBERNETES_VERSION}"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ${ASO_CREDENTIAL_SECRET_NAME}
+  namespace: default
+stringData:
+  AZURE_SUBSCRIPTION_ID: ${AZURE_SUBSCRIPTION_ID}
+  AZURE_TENANT_ID:       ${AZURE_TENANT_ID}
+  AZURE_CLIENT_ID:       ${AZURE_CLIENT_ID_USER_ASSIGNED_IDENTITY}
+  AUTH_MODE:             ${ASO_CREDENTIAL_SECRET_MODE:-workloadidentity}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: capz-${CLUSTER_NAME}
+  namespace: default
+  labels:
+    cluster.x-k8s.io/aggregate-to-capz-manager: "true"
+rules:
+- apiGroups:
+  - authorization.azure.com
+  resources:
+  - roleassignments
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - authorization.azure.com
+  resources:
+  - roleassignments/status
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - managedidentity.azure.com
+  resources:
+  - userassignedidentities
+  - federatedidentitycredentials
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - managedidentity.azure.com
+  resources:
+  - userassignedidentities/status
+  - federatedidentitycredentials/status
+  verbs:
+  - get
+  - list
+  - watch

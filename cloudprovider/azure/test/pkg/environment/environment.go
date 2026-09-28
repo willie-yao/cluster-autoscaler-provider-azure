@@ -428,12 +428,19 @@ func (e *Environment) read(ctx context.Context, observe func(context.Context) (S
 	result.Nodes = nodes.Items
 	_, missingPresent := result.Pools[e.Config.MissingPool]
 	missingDeleted := e.Config.Phase == "missing-vmss" && !missingPresent
-	var controlPlanes int
+	var controlPlanes, systemNodes int
 	for _, node := range nodes.Items {
 		if missingDeleted && len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(e.Config.MissingPool))) != 0 {
 			return result, fmt.Errorf("deleted VMSS still has Kubernetes Node %s", node.Name)
 		}
-		if normalizeID(node.Spec.ProviderID) == normalizeID(e.Config.ControlPlaneID) {
+		if e.Config.AKS() && len(PoolNodes([]corev1.Node{node}, e.Config.PoolID(e.Config.SystemPool))) == 1 {
+			systemNodes++
+			if !Ready(node) {
+				return result, fmt.Errorf("AKS System pool Node %s is not Ready", node.Name)
+			}
+			continue
+		}
+		if !e.Config.AKS() && normalizeID(node.Spec.ProviderID) == normalizeID(e.Config.ControlPlaneID) {
 			controlPlanes++
 			if !Ready(node) {
 				return result, fmt.Errorf("authorized control plane is not Ready")
@@ -448,7 +455,11 @@ func (e *Environment) read(ctx context.Context, observe func(context.Context) (S
 			return result, fmt.Errorf("node %s with provider ID %q belongs to an unexpected cloud resource", node.Name, node.Spec.ProviderID)
 		}
 	}
-	if controlPlanes != 1 {
+	if e.Config.AKS() {
+		if systemNodes == 0 {
+			return result, fmt.Errorf("expected at least one Ready AKS System pool Node")
+		}
+	} else if controlPlanes != 1 {
 		return result, fmt.Errorf("expected exactly one authorized control-plane Node, got %d", controlPlanes)
 	}
 	return result, nil
