@@ -1,9 +1,0 @@
-rbac:
-  extraRules:
-    - apiGroups:
-      - "external.metrics.k8s.io"
-      resources:
-      - "*"
-      verbs:
-      - get
-      - list
