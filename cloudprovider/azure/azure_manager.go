@@ -212,6 +212,7 @@ func (m *AzureManager) fetchExplicitNodeGroups(specs []string) error {
 	return nil
 }
 
+// isExplicitlyConfigured reports whether a node group came from an explicit spec.
 func (m *AzureManager) isExplicitlyConfigured(id string) bool {
 	return m.explicitlyConfigured[id] || m.explicitlyConfigured[strings.ToLower(id)]
 }
@@ -242,7 +243,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
 	}
-	if s.policy == "Deallocate" {
+	if s.policy == scaleDownPolicyDeallocate {
 		return nil, &unsupportedDeallocateError{name: s.Name}
 	}
 
@@ -317,7 +318,9 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 		id := group.Id()
 		exists[id] = true
 		if m.isExplicitlyConfigured(id) {
-			// Explicit specs take precedence, including groups skipped for Deallocate.
+			// This NodeGroup was explicitly configured, but would also be
+			// autodiscovered. We want the explicitly configured min and max
+			// nodes to take precedence. This includes groups skipped for Deallocate.
 			klog.V(3).Infof("Ignoring explicitly configured NodeGroup %s for autodiscovery.", group.Id())
 			continue
 		}

@@ -45,6 +45,9 @@ and exits with status 0 when the node groups change, so the pod can restart
 with the new values. Other settings in the file do not change the node groups.
 If `--config-path` is empty, `--nodes` and auto-discovery work as before.
 Auto-discovery also remains active when it is set alongside `--config-path`.
+The file path comes from the flag. The AKS fork instead always reads
+`/opt/conf/autoscaler/settings.json`, so the two agree when AKS passes that
+standard path.
 
 The flags `--enable-force-delete`, `--enable-dynamic-instance-list` and
 `--enable-detailed-cse-message` are accepted for AKS argument compatibility.

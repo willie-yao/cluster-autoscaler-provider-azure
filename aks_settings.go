@@ -21,10 +21,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"reflect"
+	"slices"
 
 	"k8s.io/apimachinery/pkg/util/yaml"
 	"sigs.k8s.io/cluster-autoscaler/pkg/config"
+)
+
+const (
+	scaleDownPolicyDelete     = "Delete"
+	scaleDownPolicyDeallocate = "Deallocate"
 )
 
 type aksNodeGroup struct {
@@ -49,7 +54,7 @@ func decodeAKSSettings(data []byte) (aksSettings, error) {
 	for i := range settings.NodeGroups {
 		group := &settings.NodeGroups[i]
 		if group.ScaleDownPolicy == "" {
-			group.ScaleDownPolicy = "Delete"
+			group.ScaleDownPolicy = scaleDownPolicyDelete
 		}
 		if group.Name == "" {
 			return aksSettings{}, fmt.Errorf("invalid node group: name must not be blank")
@@ -60,7 +65,7 @@ func decodeAKSSettings(data []byte) (aksSettings, error) {
 		if group.MaxSize < group.MinSize {
 			return aksSettings{}, fmt.Errorf("invalid node group %q: max size must be at least min size", group.Name)
 		}
-		if group.ScaleDownPolicy != "Delete" && group.ScaleDownPolicy != "Deallocate" {
+		if group.ScaleDownPolicy != scaleDownPolicyDelete && group.ScaleDownPolicy != scaleDownPolicyDeallocate {
 			return aksSettings{}, fmt.Errorf("invalid node group %q: scaleDownPolicy %q is not supported; use Delete or Deallocate", group.Name, group.ScaleDownPolicy)
 		}
 	}
@@ -85,17 +90,18 @@ func (s aksSettings) nodeGroupSpecs() ([]string, error) {
 }
 
 type aksSettingsFetcher struct {
-	path     string
-	previous aksSettings
+	path string
+	// previous holds the node group specs from the last successful read.
+	previous []string
 }
 
 func newAKSSettingsFetcher(path string) *aksSettingsFetcher {
-	return &aksSettingsFetcher{
-		path:     path,
-		previous: aksSettings{NodeGroups: []aksNodeGroup{}},
-	}
+	return &aksSettingsFetcher{path: path}
 }
 
+// fetchIfChanged reads the settings file and returns its node group specs and
+// true when they differ from the last successful read. It returns nil and
+// false when they are unchanged or the file can't be used.
 func (f *aksSettingsFetcher) fetchIfChanged() ([]string, bool, error) {
 	data, err := os.ReadFile(f.path)
 	if err != nil {
@@ -105,18 +111,22 @@ func (f *aksSettingsFetcher) fetchIfChanged() ([]string, bool, error) {
 	if err != nil {
 		return nil, false, fmt.Errorf("failed to load settings file %q: %w", f.path, err)
 	}
-	if reflect.DeepEqual(f.previous, settings) {
-		return nil, false, nil
-	}
-
 	specs, err := settings.nodeGroupSpecs()
 	if err != nil {
 		return nil, false, err
 	}
-	f.previous = settings
+	if slices.Equal(f.previous, specs) {
+		return nil, false, nil
+	}
+	f.previous = specs
 	return specs, true, nil
 }
 
+// useAKSSettings replaces the --nodes groups in opts with the groups from the
+// settings file at path, and returns a fetcher that watches the file for
+// changes. An empty path leaves opts unchanged and returns a nil fetcher.
+// The fetcher is returned even when the first read fails, so a later fix to
+// the file still restarts the pod.
 func useAKSSettings(opts *config.AutoscalingOptions, path string) (*aksSettingsFetcher, error) {
 	if path == "" {
 		return nil, nil

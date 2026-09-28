@@ -224,7 +224,7 @@ func main() {
 
 	autoscalingFlags := &flags.AutoscalingFlags{}
 	autoscalingFlags.AddFlags(pflag.CommandLine)
-	addAKSCompatibilityFlags(pflag.CommandLine)
+	configPath := addAKSCompatibilityFlags(pflag.CommandLine)
 	logsapi.AddFlags(loggingConfig, pflag.CommandLine)
 	featureGate.AddFlag(pflag.CommandLine)
 	kube_flag.InitFlags()
@@ -233,11 +233,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to parse flags: %v", err)
 	}
-	configPath, err := pflag.CommandLine.GetString("config-path")
-	if err != nil {
-		klog.Fatalf("Failed to parse config-path: %v", err)
-	}
-	settings, err := useAKSSettings(&autoscalingOpts, configPath)
+	settings, err := useAKSSettings(&autoscalingOpts, *configPath)
 	if err != nil {
 		klog.Errorf("Failed to fetch NodeGroups config: %v", err)
 	}
@@ -338,6 +334,8 @@ func main() {
 	}
 }
 
+// restartOnAKSSettingsChange exits the process when the node groups in the
+// settings file change, so the restarted pod builds its node groups again.
 func restartOnAKSSettingsChange(settings *aksSettingsFetcher, autoscaler core.Autoscaler) {
 	if settings == nil {
 		return
@@ -348,18 +346,21 @@ func restartOnAKSSettingsChange(settings *aksSettingsFetcher, autoscaler core.Au
 		return
 	}
 	if changed {
-		klog.V(3).Infof("NodeGroups config changed to %v, restarting", nodeGroups)
+		klog.V(2).Infof("NodeGroups config changed to %v, restarting", nodeGroups)
 		autoscaler.ExitCleanUp()
 		klog.Flush()
 		os.Exit(0)
 	}
 }
 
-func addAKSCompatibilityFlags(fs *pflag.FlagSet) {
-	fs.String("config-path", "", "Path to the mounted AKS settings file. Empty uses --nodes and node group auto-discovery.")
+// addAKSCompatibilityFlags adds the flags that AKS passes to its autoscaler build.
+// It returns the value of --config-path; the other flags have no effect.
+func addAKSCompatibilityFlags(fs *pflag.FlagSet) *string {
+	configPath := fs.String("config-path", "", "Path to the mounted AKS settings file. Empty uses --nodes and node group auto-discovery.")
 	fs.Bool("enable-force-delete", false, "No effect. Accepted for AKS argument compatibility.")
 	fs.Bool("enable-dynamic-instance-list", false, "No effect. Accepted for AKS argument compatibility.")
 	fs.Bool("enable-detailed-cse-message", false, "No effect. Accepted for AKS argument compatibility.")
+	return configPath
 }
 
 func leaderElectionConfiguration() componentbaseconfig.LeaderElectionConfiguration {

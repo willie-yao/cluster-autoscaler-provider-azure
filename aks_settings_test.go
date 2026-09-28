@@ -179,6 +179,10 @@ func TestAKSSettingsFetcher(t *testing.T) {
 	if specs, changed, err := fetcher.fetchIfChanged(); err != nil || changed || len(specs) != 0 {
 		t.Fatalf("empty groups returned %q, changed %t, error %v", specs, changed, err)
 	}
+	writeAKSSettings(t, path, `{}`)
+	if specs, changed, err := fetcher.fetchIfChanged(); err != nil || changed || len(specs) != 0 {
+		t.Fatalf("missing groups returned %q, changed %t, error %v", specs, changed, err)
+	}
 
 	base := `{"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5}]}`
 	writeAKSSettings(t, path, base)
@@ -192,6 +196,10 @@ func TestAKSSettingsFetcher(t *testing.T) {
 	writeAKSSettings(t, path, `{"autoScalerProfile":{"scan-interval":"15s"},"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5}]}`)
 	if _, changed, err := fetcher.fetchIfChanged(); err != nil || changed {
 		t.Fatalf("profile-only change returned changed %t, error %v", changed, err)
+	}
+	writeAKSSettings(t, path, `{"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5,"labels":{}}]}`)
+	if _, changed, err := fetcher.fetchIfChanged(); err != nil || changed {
+		t.Fatalf("empty labels returned changed %t, error %v", changed, err)
 	}
 
 	updated := `{"nodeGroups":[{"name":"pool","minSize":1,"maxSize":5,"labels":{"env":"prod"}}]}`
