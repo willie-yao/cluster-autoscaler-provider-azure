@@ -117,6 +117,7 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 	poolCores := map[string]int{}
 	bounds := c.Pools()
 	balanceTags := map[string]map[string]*string{}
+	systemVMs, systemCores := 0, 0
 	pager := a.sets.NewListPager(c.ResourceGroup, nil)
 	for pager.More() {
 		page, err := pager.NextPage(ctx)
@@ -142,6 +143,38 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 				return result, fmt.Errorf("incomplete VMSS observation")
 			}
 			name := *set.Name
+			if c.AKS() && strings.EqualFold(name, c.SystemPool) {
+				// AKS system add-ons run here, so the System pool takes the control plane's place in the budget.
+				if _, tagged := set.Tags["cluster-autoscaler-name"]; tagged || *set.SKU.Capacity < 1 {
+					return result, fmt.Errorf("AKS System pool %s must be untagged for discovery and keep at least one VM", name)
+				}
+				cores := a.cores[strings.ToLower(ptr.Deref(set.SKU.Name, ""))]
+				if cores == 0 {
+					return result, fmt.Errorf("no core count for AKS System pool SKU")
+				}
+				instances := map[string]struct{}{}
+				systemPager := a.vms.NewListPager(c.ResourceGroup, name, nil)
+				for systemPager.More() {
+					page, err := systemPager.NextPage(ctx)
+					if err != nil {
+						return result, azureError("list AKS System pool instances", err)
+					}
+					for _, vm := range page.Value {
+						if vm != nil && vm.ID != nil {
+							instances[normalizeID(*vm.ID)] = struct{}{}
+						}
+					}
+				}
+				n := max(int(*set.SKU.Capacity), len(instances))
+				systemVMs += n
+				systemCores += n * cores
+				result.VMs += n
+				result.VCPUs += n * cores
+				if err := result.CheckBounds(c); err != nil {
+					return result, err
+				}
+				continue
+			}
 			limit, ok := bounds[name]
 			if !ok {
 				return result, fmt.Errorf("unexpected VMSS %s in dedicated worker resource group", name)
@@ -291,25 +324,42 @@ func (a *azureCloud) read(ctx context.Context, missing bool) (Snapshot, error) {
 			return result, azureError("list worker resource group VMs", err)
 		}
 		for _, vm := range page.Value {
-			if vm == nil || !strings.EqualFold(ptr.Deref(vm.ID, ""), c.ControlPlaneID) {
+			if vm == nil || c.AKS() || !strings.EqualFold(ptr.Deref(vm.ID, ""), c.ControlPlaneID) {
 				return result, fmt.Errorf("unexpected standalone VM in worker resource group")
 			}
 		}
 	}
-	cpParts := strings.Split(c.ControlPlaneID, "/")
-	cp, err := a.standaloneVMs.Get(ctx, cpParts[4], cpParts[8], nil)
-	if err != nil {
-		return result, azureError("read authorized control plane", err)
+	cores := systemCores
+	if c.AKS() {
+		if systemVMs == 0 {
+			return result, fmt.Errorf("AKS System pool %s is missing", c.SystemPool)
+		}
+		maxVMs, maxVCPUs := c.Limits()
+		peakVMs, peakVCPUs := result.VMs, result.VCPUs
+		for name, pool := range result.Pools {
+			headroom := bounds[name].Max - max(pool.Capacity, len(pool.Instances))
+			peakVMs += headroom
+			peakVCPUs += headroom * poolCores[name]
+		}
+		if peakVMs > maxVMs || peakVCPUs > maxVCPUs {
+			return result, fmt.Errorf("%w: AKS System pool and authorized pool peaks exceed the fixture budget", ErrBounds)
+		}
+	} else {
+		cpParts := strings.Split(c.ControlPlaneID, "/")
+		cp, err := a.standaloneVMs.Get(ctx, cpParts[4], cpParts[8], nil)
+		if err != nil {
+			return result, azureError("read authorized control plane", err)
+		}
+		if ptr.Deref(cp.Tags[RunLabel], "") != c.RunID || cp.Properties == nil || cp.Properties.HardwareProfile == nil {
+			return result, fmt.Errorf("control plane ownership or hardware evidence missing")
+		}
+		cores = a.cores[strings.ToLower(string(ptr.Deref(cp.Properties.HardwareProfile.VMSize, "")))]
+		if cores == 0 {
+			return result, fmt.Errorf("no core count for control plane SKU")
+		}
+		result.VMs++
+		result.VCPUs += cores
 	}
-	if ptr.Deref(cp.Tags[RunLabel], "") != c.RunID || cp.Properties == nil || cp.Properties.HardwareProfile == nil {
-		return result, fmt.Errorf("control plane ownership or hardware evidence missing")
-	}
-	cores := a.cores[strings.ToLower(string(ptr.Deref(cp.Properties.HardwareProfile.VMSize, "")))]
-	if cores == 0 {
-		return result, fmt.Errorf("no core count for control plane SKU")
-	}
-	result.VMs++
-	result.VCPUs += cores
 	if c.Phase == "balance" {
 		for _, size := range poolCores {
 			if MaxVMs*size > MaxVCPUs {

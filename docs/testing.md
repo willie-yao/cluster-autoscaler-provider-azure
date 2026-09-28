@@ -59,8 +59,11 @@ Azure acceptance environment.
 ## Maintained E2Es
 
 The [operator guide](../cloudprovider/azure/test/README.md) is the entry point
-for the explicit prepared-environment JSON contract, optional fixture
-requirements, focused execution and cleanup ownership.
+for the CAPZ Prow path on AKS, the explicit prepared-environment JSON
+contract, optional fixture requirements, focused execution and cleanup
+ownership. In Prow, CAPZ creates an AKS cluster through ASO and
+`make test-e2e` runs 23 of the 29 default specs in six shards. The other six
+need setup that the Prow path doesn't do yet, so it doesn't run them.
 
 The default `scaleup` suite registers 29 specs: 22 active intents from the
 Azure autoscaler inventory, one public Azure Disk intent and six

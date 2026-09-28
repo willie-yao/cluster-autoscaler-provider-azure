@@ -6,8 +6,15 @@ deploy Cluster Autoscaler, change cloud resources directly, or destroy
 infrastructure. The operator retains responsibility for setup,
 single-controller ownership, budget monitoring and cleanup.
 
+The main path is the CAPZ Prow job on AKS. CAPZ creates an AKS
+cluster through ASO, as the upstream `kubernetes/autoscaler` Azure job does,
+and [hack/ci-e2e.sh](hack/ci-e2e.sh) deploys the autoscaler and runs one shard of
+the default specs. See [CAPZ Prow jobs](#capz-prow-jobs).
+
 The default fixture is Linux VMSS Uniform with main min/max `1/2`,
-zero min/max `0/1`, and one control plane outside both groups. The ceiling is
+zero min/max `0/1`, and one control plane outside both groups. The CAPZ Prow
+jobs use the same two pools on AKS, where a one-node AKS System pool takes the
+place of the control plane. The ceiling for both is
 four VMs and eight vCPUs, counted using Azure instances, requested capacity and
 SKU core counts. This fixture limitation is not a provider support restriction:
 standard pools, Flex and VMs-pool need their own qualified fixtures and
@@ -41,9 +48,132 @@ dry-run Ginkgo registration without running setup hooks or test bodies.
 They do not authenticate to Azure or contact Kubernetes. Ordinary PR CI runs
 the same target through `make test-ci`. Compilation is not live E2E evidence.
 
+## CAPZ Prow jobs
+
+The Prow jobs follow the upstream `pull-cluster-autoscaler-e2e-azure-master`
+job. The job runs CAPZ `release-1.27` `scripts/ci-entrypoint.sh`, which
+creates an AKS cluster through CAPZ's ASO types from
+[templates/cluster-template-prow-aks-aso-e2e.yaml](templates/cluster-template-prow-aks-aso-e2e.yaml).
+That template is a copy of the upstream
+[templates/cluster-template-prow-aks-aso-cluster-autoscaler.yaml](templates/cluster-template-prow-aks-aso-cluster-autoscaler.yaml),
+which stays unchanged, with the node pools changed to the shape the suite
+expects:
+
+- `pool0` is the System pool with one node and no autoscaler tags. It runs
+  the AKS add-ons and the autoscaler, so it takes the place of the control
+  plane VM in the VMSS fixture.
+- `main` is a Linux User pool that starts with one node and has `min` and
+  `max` tags of `1` and `2`.
+- `zero` is a Linux User pool that starts empty and has `min` and `max`
+  tags of `0` and `1`.
+
+Both User pools carry the upstream discovery tags, the run tag, the
+`acceptance-pool` node label and the node-template tag for that label. AKS's
+own autoscaler stays off. Every MachinePool has the upstream
+`cluster.x-k8s.io/replicas-managed-by: cluster-autoscaler` annotation, so CAPZ
+doesn't reset a pool after the autoscaler scales it. The User pools set
+`maxPods: 110`, because the Azure CNI default of 30 Pods per node can't fit
+the 100-Pod cases on two nodes. Set `ADDITIONAL_ASO_CRDS` to
+`authorization.azure.com/*;managedidentity.azure.com/*` as the upstream job
+does, and set `KUBERNETES_VERSION` to a version that AKS offers in the job's
+region. Keep one fresh cluster per job and let the CAPZ entrypoint clean it up.
+
+From this directory, the command after CAPZ cluster creation is:
+
+```sh
+make test-e2e TAG="$(git rev-parse --short HEAD)" \
+  REGISTRY="$REGISTRY" LABEL_FILTER=smoke ARTIFACTS="$ARTIFACTS"
+```
+
+`IMAGE=<registry>/<repository>` can replace `REGISTRY`, and it must not
+include a tag. `build-e2e` uses the root `image` target with `GOARCH=amd64`
+and pushes `IMAGE:TAG`. `test-e2e` then runs [hack/ci-e2e.sh](hack/ci-e2e.sh),
+which takes these steps:
+
+1. It reads the node resource group from the ASO `ManagedCluster` and the
+   client ID from the ASO `UserAssignedIdentity` in the CAPZ management
+   cluster, as the upstream Makefile does.
+2. It finds the three VMSS in the node resource group by their
+   `aks-managed-poolName` tag and checks their tags and sizes. It fails if
+   the AKS autoscaler is on for any pool, or if a cluster autoscaler already
+   runs in the cluster.
+3. It drains the User pool nodes once, so that AKS add-on replicas move to
+   the System pool, and then it uncordons them.
+4. It creates the authorization marker and the run's two PriorityClasses.
+5. It installs one controller from this repository's chart with the upstream
+   values: the `cluster-autoscaler` release in the `default` namespace,
+   workload identity and `autoDiscovery.clusterName`. It pins the Pod to the
+   System pool. It also replaces the discovery flag and the Secret references
+   for `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` with the literal values
+   that the suite checks.
+6. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
+   runs Ginkgo with the selected label filter. Ginkgo writes
+   `junit.e2e_suite.1.xml` there.
+
+The upstream suite installs the chart from Go in `BeforeSuite`. This suite
+keeps the install in `hack/ci-e2e.sh`, because its Go runner only observes a
+prepared cluster and never installs or changes the controller. The Prow host
+needs Docker, Azure CLI, `kubectl`, `helm`, `jq`, `yq`, Go, Azure credentials,
+registry access and the two CAPZ kubeconfig files. `test-e2e` defaults to
+`smoke` if no filter is passed. The `e2etests` target still takes an
+operator-prepared binding without deploying anything.
+
+In AKS mode, the runner accepts the node resource group that AKS shares with
+its load balancer, network security group and other resources. It checks only
+the VMSS in that group, which must be exactly the named System, main and zero
+VMSS. The System pool must not carry the `cluster-autoscaler-name` tag, and
+its VMs count toward the four-VM and eight-vCPU budget in place of the control
+plane VM. The main and zero pools must have the run, discovery, `min` and `max`
+tags. Any other VMSS, a standalone VM, or a Node outside these three pools fails
+the read. The binding names the System VMSS in `systemPool` and omits
+`controlPlaneID`. Omit `resourceGroupMode` for the strict operator fixture
+described below.
+
+No default case depends on the control plane VM, so no default case skips in
+AKS mode. Six of them still need preparation that Prow doesn't do, as the
+shard list below shows.
+
+The presubmit runs `smoke` (`AZ-P1-001` to `AZ-P1-003`), three cases. The two
+scaling cases can each take up to 50 and 40 minutes, so an hour is a target,
+not a guaranteed bound. The periodic jobs run shards A to F on AKS with these
+label filters. Shard A is the same three-case smoke filter. Each shard uses a
+fresh AKS cluster, `TEST_SUITE=scaleup`, and
+the same five-hour Prow timeout. The case timeouts sum to 97 to 180 minutes
+per shard, and the remaining time is for cluster setup and cleanup.
+
+| Shard | Label filter | Cases |
+| --- | --- | ---: |
+| A | `AZ-P1-001 || AZ-P1-002 || AZ-P1-003` | 3 |
+| B | `AZ-P1-004 || AZ-001 || CA-001 || CA-002` | 4 |
+| C | `CA-004 || CA-005 || CA-006 || CA-007` | 4 |
+| D | `CA-008 || CA-009 || CA-010` | 3 |
+| E | `CA-011 || CA-012 || CA-013 || CA-014` | 4 |
+| F | `CA-015 || CA-016 || CA-017 || CA-018 || CA-019` | 5 |
+
+Prow runs only these six shards, which cover 23 of the 29 default cases. The
+other six cases need preparation that the AKS template and `test-e2e` don't
+do yet, so the Prow path doesn't run them. Their filters are:
+
+| Shard | Label filter | Cases | Preparation |
+| --- | --- | ---: | --- |
+| G | `AZ-SUP-ETAG` | 1 | ETag-enabled controller and marker |
+| H | `AZ-P1-005` | 1 | Tainted zero pool |
+| I | `AZ-P1-006` | 1 | Azure Disk CSI, StorageClass and marker |
+| J | `CA-020 || CA-021 || CA-022` | 3 | Synthetic DRA driver and marker |
+
+Together, the ten filters cover all 29 default cases. Do not add G to J to
+Prow until their CAPZ preparation exists and each has passed a live check.
+The AKS template's zero pool has no taint, because `AZ-P1-003` runs a Pod
+without a toleration in that pool. The `Slow`
+label marks longer cases, and the upstream `Feature:ClusterSizeAutoscalingScaleUp`
+and `Feature:ClusterSizeAutoscalingScaleDown` labels mark the matching `CA-`
+cases. The proposed job YAML is
+kept outside the repo until the repo owner, Prow org, registry and CI image are
+chosen.
+
 ## Current and legacy workflows
 
-For the current suite, prepare the fixture and deploy Cluster Autoscaler
+Outside Prow, prepare the fixture and deploy Cluster Autoscaler
 separately according to the [operator contract](#operator-contract), then run
 [focused cases](#focused-execution) with `ENVIRONMENT` pointing to the
 [JSON binding](environment.example.json).
@@ -67,11 +197,13 @@ binding, not from those legacy environment-variable checks.
 
 Use a fresh cluster, explicit kubeconfig/context, one controller managing only
 the intended pools, and an exact candidate image. Keep non-DaemonSet system
-workloads on the control plane. Disable VMSS overprovisioning. Both scale sets
+workloads on the control plane, or on the System pool in AKS mode. Disable VMSS overprovisioning. Both scale sets
 and the control-plane VM must have the `autoscaler-e2e-run=<runID>` Azure tag.
 The dedicated worker resource group may contain only the two selected VMSS,
 and optionally the named control-plane VM. Other infrastructure is not deleted
-or inventoried by these tests.
+or inventoried by these tests. The AKS mode described under
+[CAPZ Prow jobs](#capz-prow-jobs) uses the AKS System pool instead of the
+control plane VM.
 
 Both VMSS must have `cluster-autoscaler-name=<discoveryValue>`, and `min`/`max`
 tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:

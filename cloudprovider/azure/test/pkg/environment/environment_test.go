@@ -452,6 +452,40 @@ func (f fakeCloud) NICExists(context.Context, string) (bool, error) {
 	return f.exists, f.err
 }
 
+func TestEnvironmentReadAKSSystemPool(t *testing.T) {
+	t.Parallel()
+	c := testAKSConfig()
+	ready := corev1.NodeStatus{Conditions: []corev1.NodeCondition{{Type: corev1.NodeReady, Status: corev1.ConditionTrue}}}
+	system := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "system-0"},
+		Spec: corev1.NodeSpec{ProviderID: "azure://" + c.PoolID(c.SystemPool) + "/virtualMachines/0"}, Status: ready}
+	unready := *system.DeepCopy()
+	unready.Status.Conditions[0].Status = corev1.ConditionFalse
+	vm := corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "vm"},
+		Spec: corev1.NodeSpec{ProviderID: "azure://" + c.resourcePrefix() + "/providers/Microsoft.Compute/virtualMachines/cp"}, Status: ready}
+	for _, tt := range []struct {
+		name  string
+		nodes []corev1.Node
+		valid bool
+	}{
+		{name: "System pool Node replaces the control plane", nodes: []corev1.Node{system}, valid: true},
+		{name: "System pool Node not Ready", nodes: []corev1.Node{unready}},
+		{name: "no System pool Node"},
+		{name: "Node without provider ID", nodes: []corev1.Node{system, {ObjectMeta: metav1.ObjectMeta{Name: "pending"}, Status: ready}}},
+		{name: "standalone VM Node", nodes: []corev1.Node{system, vm}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			builder := fake.NewClientBuilder().WithObjects(ptr.To(testNode(c)))
+			for i := range tt.nodes {
+				builder = builder.WithObjects(&tt.nodes[i])
+			}
+			e := &Environment{Config: c, K8s: builder.Build(), Cloud: fakeCloud{snapshot: testSnapshot(c)}}
+			if _, err := e.Read(context.Background()); (err == nil) != tt.valid {
+				t.Fatalf("AKS Node read error=%v, valid=%t", err, tt.valid)
+			}
+		})
+	}
+}
+
 func TestEnvironmentDeleted(t *testing.T) {
 	t.Parallel()
 	for _, tt := range []struct {

@@ -40,6 +40,8 @@ const (
 	MaxVMs = 4
 	// MaxVCPUs is the vCPU limit, including the control plane, outside the large phase.
 	MaxVCPUs = 8
+	// AKSMode binds an AKS node resource group with an untagged System pool.
+	AKSMode = "aks"
 )
 
 var (
@@ -61,6 +63,10 @@ type Config struct {
 	ResourceGroup  string `json:"resourceGroup"`
 	ControlPlaneID string `json:"controlPlaneID"`
 	Location       string `json:"location"`
+	// ResourceGroupMode is empty for the self-managed layout or "aks". AKS mode
+	// replaces ControlPlaneID with SystemPool, the AKS System pool VMSS.
+	ResourceGroupMode string `json:"resourceGroupMode,omitempty"`
+	SystemPool        string `json:"systemPool,omitempty"`
 	// DiscoveryValue and the Autoscaler, Lease and Image fields identify the
 	// one expected controller.
 	DiscoveryValue       string `json:"discoveryValue"`
@@ -215,13 +221,15 @@ func (c Config) Validate() error {
 	required := map[string]string{
 		"kubeconfig": c.Kubeconfig, "context": c.Context, "clusterUID": c.ClusterUID,
 		"runID": c.RunID, "subscriptionID": c.SubscriptionID, "resourceGroup": c.ResourceGroup,
-		"controlPlaneID": c.ControlPlaneID,
-		"location":       c.Location, "discoveryValue": c.DiscoveryValue,
+		"location": c.Location, "discoveryValue": c.DiscoveryValue,
 		"autoscalerNamespace": c.AutoscalerNamespace, "autoscalerDeployment": c.AutoscalerDeployment,
 		"autoscalerContainer": c.AutoscalerContainer, "leaseName": c.LeaseName,
 		"expectedImage": c.ExpectedImage, "mainPool": c.MainPool, "zeroPool": c.ZeroPool,
 		"poolLabel": c.PoolLabel, "mainLabel": c.MainLabel, "zeroLabel": c.ZeroLabel,
 		"demandCPU": c.DemandCPU, "workloadImage": c.WorkloadImage,
+	}
+	if !c.AKS() {
+		required["controlPlaneID"] = c.ControlPlaneID
 	}
 	for name, value := range required {
 		if strings.TrimSpace(value) == "" {
@@ -240,12 +248,31 @@ func (c Config) Validate() error {
 	if strings.EqualFold(c.MainPool, c.ZeroPool) || c.MainLabel == c.ZeroLabel {
 		return fmt.Errorf("main and zero pools and their labels must be distinct")
 	}
-	cp := strings.Split(c.ControlPlaneID, "/")
-	if len(cp) != 9 || !strings.EqualFold(cp[1], "subscriptions") ||
-		!strings.EqualFold(cp[2], c.SubscriptionID) || !strings.EqualFold(cp[3], "resourceGroups") ||
-		!strings.EqualFold(cp[5], "providers") || !strings.EqualFold(cp[6], "Microsoft.Compute") ||
-		!strings.EqualFold(cp[7], "virtualMachines") || cp[4] == "" || cp[8] == "" {
-		return fmt.Errorf("controlPlaneID must identify a VM in the selected subscription")
+	switch c.ResourceGroupMode {
+	case "":
+		cp := strings.Split(c.ControlPlaneID, "/")
+		if len(cp) != 9 || !strings.EqualFold(cp[1], "subscriptions") ||
+			!strings.EqualFold(cp[2], c.SubscriptionID) || !strings.EqualFold(cp[3], "resourceGroups") ||
+			!strings.EqualFold(cp[5], "providers") || !strings.EqualFold(cp[6], "Microsoft.Compute") ||
+			!strings.EqualFold(cp[7], "virtualMachines") || cp[4] == "" || cp[8] == "" {
+			return fmt.Errorf("controlPlaneID must identify a VM in the selected subscription")
+		}
+		if c.SystemPool != "" {
+			return fmt.Errorf("systemPool requires the %s resource group mode", AKSMode)
+		}
+	case AKSMode:
+		if c.ControlPlaneID != "" {
+			return fmt.Errorf("%s mode has no control plane VM; bind the System pool instead", AKSMode)
+		}
+		if c.SystemPool == "" || !azureNameRE.MatchString(c.SystemPool) ||
+			strings.EqualFold(c.SystemPool, c.MainPool) || strings.EqualFold(c.SystemPool, c.ZeroPool) {
+			return fmt.Errorf("%s mode requires a distinct, valid systemPool", AKSMode)
+		}
+		if c.Phase != "" {
+			return fmt.Errorf("phased fixtures need custom self-managed VMSS and aren't supported in %s mode", AKSMode)
+		}
+	default:
+		return fmt.Errorf("unknown resource group mode %q", c.ResourceGroupMode)
 	}
 	for _, name := range []string{c.ResourceGroup, c.MainPool, c.ZeroPool, c.Location} {
 		if !azureNameRE.MatchString(name) {
@@ -350,6 +377,11 @@ func (c Config) validateAdditionalPool(name, label string) error {
 
 func (c Config) resourcePrefix() string {
 	return "/subscriptions/" + c.SubscriptionID + "/resourceGroups/" + c.ResourceGroup
+}
+
+// AKS reports whether the binding names an AKS System pool instead of a control plane VM.
+func (c Config) AKS() bool {
+	return c.ResourceGroupMode == AKSMode
 }
 
 // PoolID returns the Azure resource ID of the VMSS name.
