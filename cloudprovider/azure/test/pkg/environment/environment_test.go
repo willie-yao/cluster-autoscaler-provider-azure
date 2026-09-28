@@ -343,6 +343,9 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 		{name: "wrong failed VM flag", phase: "cse", flag: "other"},
 		{name: "Spot five-second refresh", phase: "spot-eviction", value: "5", valid: true},
 		{name: "Spot stale refresh", phase: "spot-eviction", value: "30"},
+		{name: "deallocate per-pool route", phase: "deallocate", value: "false", valid: true},
+		{name: "deallocate global route", phase: "deallocate-failed", value: "true"},
+		{name: "deallocate global setting unpinned", phase: "deallocate"},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			c := testConfig()
@@ -356,6 +359,11 @@ func TestCheckPhaseControllerEnv(t *testing.T) {
 			if tt.phase == "spot-eviction" {
 				variables = append(variables, corev1.EnvVar{
 					Name: "AZURE_GET_VMSS_SIZE_REFRESH_PERIOD", Value: tt.value,
+				})
+			}
+			if tt.value != "" && (tt.phase == "deallocate" || tt.phase == "deallocate-failed") {
+				variables = append(variables, corev1.EnvVar{
+					Name: "AZURE_PROVIDER_ONLY_DEALLOCATE", Value: tt.value,
 				})
 			}
 			if err := checkPhaseControllerEnv(variables, c); (err == nil) != tt.valid {

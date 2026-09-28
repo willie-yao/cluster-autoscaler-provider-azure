@@ -427,10 +427,12 @@ may grow C while B is being deallocated, so allow physical main
 capacity up to three for this case. The control plane plus three
 D2s_v5 workers reach the four-VM, eight-vCPU cap. No other VM may
 be created. Use zone 1, Uniform, Regular priority, managed full OS
-disks, no `aks-managed-*` tags, and `providerOnlyDeallocate: false` in
-the cloud config. The single controller needs both
+disks and no `aks-managed-*` tags. The single controller needs both
 `--node-group-auto-discovery=label:cluster-autoscaler-name=<discoveryValue>`
-and exactly one `--nodes=1:2:Deallocate:<mainPool>`. Use
+and exactly one `--nodes=1:2:Deallocate:<mainPool>`. It also needs exactly
+one literal `AZURE_PROVIDER_ONLY_DEALLOCATE=false` environment variable. The
+variable overrides the cloud config, so the runner can check that parking
+comes from the `Deallocate` spec and not from the global setting. Use
 `--max-nodes-total=4`, `--v=3`, the bounded scale-down flags above
 and, for `AZ-P3-002`, `--max-node-provision-time=15m`.
 Set `allow-deallocate-fixture: AZ-P3-001` or
@@ -644,7 +646,7 @@ test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
 public source, and six supplemental cases bring the default suite to 29
-registered specs. Nine phased cases bring the full module to 38
+registered specs. Eleven phased cases bring the full module to 40
 registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |

@@ -261,6 +261,9 @@ func checkPhaseControllerEnv(variables []corev1.EnvVar, c Config) error {
 		required["AZURE_ENABLE_DETAILED_CSE_MESSAGE"] = "false"
 	case "spot-eviction":
 		required["AZURE_GET_VMSS_SIZE_REFRESH_PERIOD"] = "5"
+	case "deallocate", "deallocate-failed":
+		// The variable overrides the cloud config, so parking must come from the per-pool spec.
+		required["AZURE_PROVIDER_ONLY_DEALLOCATE"] = "false"
 	}
 	for name, expected := range required {
 		count := 0

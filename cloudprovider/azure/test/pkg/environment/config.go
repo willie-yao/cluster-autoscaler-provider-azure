@@ -82,11 +82,12 @@ type Config struct {
 	DeallocateHold       string `json:"deallocateHold,omitempty"`
 }
 
-// PoolBounds keeps each phase's allowed Azure capacity separate from its tag minimum.
+// PoolBounds keeps each phase's allowed Azure capacity separate from its
+// discovery tag bounds. A zero TagMax means the tag maximum equals Max.
 type PoolBounds struct {
-	TagMin, ObservedMin, Max int
-	TagMax                   int
-	Label                    string
+	TagMin, TagMax   int
+	ObservedMin, Max int
+	Label            string
 }
 
 // Pools lists the scale sets authorized for the selected phase.

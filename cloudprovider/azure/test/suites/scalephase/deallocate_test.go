@@ -39,6 +39,13 @@ import (
 	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure/test/pkg/environment"
 )
 
+// The provider logs these at V(3) with the VM resource ID when it waits for a
+// Start or for the cleanup of a VM that never registered.
+const (
+	startLogPrefix               = "start("
+	syntheticDeallocateLogPrefix = "synthetic deallocate("
+)
+
 type parkedWorker struct {
 	instance environment.Instance
 	node     corev1.Node
@@ -93,20 +100,15 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			if newNode.UID == "" || newNode.UID == worker.node.UID ||
 				newNode.Status.NodeInfo.BootID == "" || newNode.Status.NodeInfo.BootID == worker.node.Status.NodeInfo.BootID ||
 				newNode.Spec.PodCIDR == "" || !environment.Ready(newNode) {
-				return fmt.Errorf("waiting for the retained VM to register a new Ready Node and PodCIDR after Start")
+				return fmt.Errorf("waiting for the retained VM to register a new Ready Node with a PodCIDR after Start: "+
+					"node %q UID %q boot ID %q PodCIDR %q ready %t",
+					newNode.Name, newNode.UID, newNode.Status.NodeInfo.BootID, newNode.Spec.PodCIDR, environment.Ready(newNode))
 			}
 			_, err = f.env.WorkloadState(ctx, f.namespace.Name, demand.Name, f.env.Config.MainPool, 1, 0)
 			return err
 		}, 20*time.Minute, pollInterval).Should(Succeed())
 		Eventually(ctx, func() error {
-			logs, err := f.env.ReadControllerLogsSince(ctx, started)
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(strings.ToLower(logs), "start("+worker.instance.ID+")") {
-				return fmt.Errorf("no provider Start recorded for retained VM %s", worker.instance.ID)
-			}
-			return nil
+			return controllerLogged(ctx, f, started, startLogPrefix, worker.instance.ID)
 		}, 2*time.Minute, pollInterval).Should(Succeed())
 		runDeallocateMarker(ctx, f, newNode, token, false)
 		Expect(probeDeallocateNetwork(ctx, f)).To(Succeed())
@@ -144,14 +146,7 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 		Expect(setDeallocateDemand(ctx, f, demand, 1)).To(Succeed())
 		var faultBootID string
 		Eventually(ctx, func() error {
-			logs, err := f.env.ReadControllerLogsSince(ctx, started)
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(strings.ToLower(logs), "start("+worker.instance.ID+")") {
-				return fmt.Errorf("waiting for provider Start of the parked VM")
-			}
-			return nil
+			return controllerLogged(ctx, f, started, startLogPrefix, worker.instance.ID)
 		}, 15*time.Minute, pollInterval).Should(Succeed())
 		Eventually(ctx, func() error {
 			var receipt corev1.ConfigMap
@@ -211,14 +206,7 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 			if state != "deallocated" {
 				return fmt.Errorf("waiting for failed registration cleanup to deallocate VM, got %s", state)
 			}
-			logs, err := f.env.ReadControllerLogsSince(ctx, started)
-			if err != nil {
-				return err
-			}
-			if !strings.Contains(strings.ToLower(logs), "synthetic deallocate("+worker.instance.ID+")") {
-				return fmt.Errorf("core has not triggered synthetic Deallocate for the same VM")
-			}
-			return nil
+			return controllerLogged(ctx, f, started, syntheticDeallocateLogPrefix, worker.instance.ID)
 		}, 30*time.Minute, pollInterval).Should(Succeed())
 		AddReportEntry("failed-registration-retained", map[string]string{
 			"instanceID": worker.instance.ID, "vmID": worker.instance.VMID,
@@ -229,6 +217,19 @@ var _ = Describe("Provider-only deallocation", Serial, func() {
 		})
 	}, NodeTimeout(95*time.Minute))
 })
+
+// controllerLogged checks that the controller logged prefix with resourceID since the given time.
+func controllerLogged(ctx context.Context, f *fixture, since time.Time, prefix, resourceID string) error {
+	logs, err := f.env.ReadControllerLogsSince(ctx, since)
+	if err != nil {
+		return err
+	}
+	want := strings.ToLower(prefix + resourceID + ")")
+	if !strings.Contains(strings.ToLower(logs), want) {
+		return fmt.Errorf("controller logs since %s do not contain %q", since.Format(time.RFC3339), want)
+	}
+	return nil
+}
 
 func deallocateHold(c environment.Config) (time.Duration, error) {
 	if c.DeallocateHold == "" {
@@ -342,9 +343,10 @@ func parkedStateFromSnapshot(ctx context.Context, f *fixture, worker parkedWorke
 		return err
 	}
 	pool := snapshot.Pools[c.MainPool]
-	if pool.Capacity != 2 || len(pool.Instances) != 2 ||
-		len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.MainPool))) != 1 {
-		return fmt.Errorf("waiting for one Ready worker and one retained VM")
+	nodes := len(environment.PoolNodes(snapshot.Nodes, c.PoolID(c.MainPool)))
+	if pool.Capacity != 2 || len(pool.Instances) != 2 || nodes != 1 {
+		return fmt.Errorf("waiting for one Ready worker and one retained VM: capacity %d, instances %d, nodes %d",
+			pool.Capacity, len(pool.Instances), nodes)
 	}
 	var oldNode corev1.Node
 	err := f.env.K8s.Get(ctx, client.ObjectKey{Name: worker.node.Name}, &oldNode)
