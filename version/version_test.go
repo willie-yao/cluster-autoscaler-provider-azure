@@ -20,11 +20,15 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
 
 func TestMakefileVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Makefile recipe needs a POSIX shell")
+	}
 	makefile, err := filepath.Abs("../Makefile")
 	if err != nil {
 		t.Fatal(err)
@@ -56,8 +60,8 @@ func TestMakefileVersion(t *testing.T) {
 		{name: "dirty SHA", dirty: true},
 		{name: "clean tag", tag: "cluster-autoscaler-v1.37.0"},
 		{name: "dirty tag", tag: "cluster-autoscaler-v1.37.0", dirty: true},
-		{name: "staged only matches upstream", staged: true},
-		{name: "untracked only matches upstream", untracked: true},
+		{name: "staged only is not dirty", staged: true},
+		{name: "untracked only is not dirty", untracked: true},
 		{name: "command-line override", dirty: true, override: "operator-version"},
 		{name: "environment override", dirty: true, override: "operator-version", env: true},
 		{name: "outside Git", noGit: true},
@@ -76,7 +80,7 @@ func TestMakefileVersion(t *testing.T) {
 			}
 			write := func(name, content string) {
 				t.Helper()
-				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0600); err != nil {
+				if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
 					t.Fatal(err)
 				}
 			}

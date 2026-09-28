@@ -39,7 +39,7 @@ func TestCloudProviderAzureConsts(t *testing.T) {
 // ratelimit.CloudProviderRateLimitConfig from pkg/azclient/policy/ratelimit
 // with an Entries map for per-client configuration.
 
-func TestBuildAzureConfigMigrationPrecedence(t *testing.T) {
+func TestBuildAzureConfigPrecedence(t *testing.T) {
 	originalEnv := saveAndClearEnv()
 	t.Cleanup(func() { loadEnv(originalEnv) })
 

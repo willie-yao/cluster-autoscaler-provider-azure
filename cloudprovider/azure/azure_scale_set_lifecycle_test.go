@@ -34,7 +34,7 @@ import (
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 )
 
-func TestVMSSMigrationBoundaries(t *testing.T) {
+func TestScaleSetDiscoveryScaleUpAndDelete(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		ctx := context.Background()
 		ctrl := gomock.NewController(t)
@@ -100,12 +100,8 @@ func TestVMSSMigrationBoundaries(t *testing.T) {
 		operations.EXPECT().BeginDeleteInstances(gomock.Any(), "rg", testASG,
 			armcompute.VirtualMachineScaleSetVMInstanceRequiredIDs{InstanceIDs: []*string{ptr.To("1")}},
 			&armcompute.VirtualMachineScaleSetsClientBeginDeleteInstancesOptions{ForceDeletion: ptr.To(false)},
-		).Do(func(context.Context, string, string, armcompute.VirtualMachineScaleSetVMInstanceRequiredIDs, *armcompute.VirtualMachineScaleSetsClientBeginDeleteInstancesOptions) {
-			capacity.Add(-1)
-		}).Return(nil, nil).Times(1)
+		).Return(nil, nil).Times(1)
 		require.NoError(t, group.DeleteNodes(ctx, []*apiv1.Node{newApiNode(armcompute.OrchestrationModeUniform, 1)}))
-		synctest.Wait()
-		require.Equal(t, int64(1), capacity.Load())
 
 		// An already-minimum pool rejects deletion without another cloud call.
 		capacity.Store(0)

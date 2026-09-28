@@ -21,8 +21,8 @@ does not enter the E2E module.
 For quick regression work:
 
 ```sh
-go test ./cloudprovider/azure -run TestBuildAzureConfigMigrationPrecedence -count=1
-go test ./cloudprovider/azure -run TestVMSSMigrationBoundaries -count=1
+go test ./cloudprovider/azure -run TestBuildAzureConfigPrecedence -count=1
+go test ./cloudprovider/azure -run TestScaleSetDiscoveryScaleUpAndDelete -count=1
 go test ./version -count=1
 ```
 

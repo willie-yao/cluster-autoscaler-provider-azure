@@ -50,7 +50,7 @@ dependency pins.
 default, file, legacy-field and environment precedence, including conflicting
 authentication choices.
 
-[`azure_migration_test.go`](../cloudprovider/azure/azure_migration_test.go)
+[`azure_scale_set_lifecycle_test.go`](../cloudprovider/azure/azure_scale_set_lifecycle_test.go)
 exercises real provider methods with mocked Azure clients. It checks tagged
 discovery, zero-size templates, bounded growth and the selected non-force
 Delete request. Mock success is not proof of physical deletion.
