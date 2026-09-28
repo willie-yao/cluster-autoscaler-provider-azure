@@ -128,11 +128,12 @@ disk stay for a later Start. The VM counts as deleting until the deallocation
 finishes. `ForceDeleteNodes` skips the minimum size check but still
 deallocates.
 
-**Inventory.** The provider reads power states from the scale set's instance
-cache. The cache is read again after its TTL, when its size differs from the
-VMSS capacity, after each finished power operation, and before each park,
-Start or cleanup. Until the cache shows an accepted operation, the provider
-keeps its expected power state by VM ID.
+**Inventory.** `Nodes`, `TargetSize` and `HasInstance` read power states from
+the scale set's instance cache. The cache is read again after its TTL, when its
+size differs from the VMSS capacity, and after each finished power operation.
+A park, Start, cleanup or receipt recovery lists the VMs again first. Until
+Azure shows an accepted operation, the provider keeps its expected power state
+by VM ID.
 
 **Node deletion.** Deleting the old Node lets the unchanged core see the
 returning VM as a new registration, with the usual node startup and readiness

@@ -651,7 +651,7 @@ func checkParkingSize(t *testing.T, group *ScaleSet, want int) {
 
 func checkParkingCounts(t *testing.T, group *ScaleSet, physical, active, parked, returning int) {
 	t.Helper()
-	vms, parkedByID, _, err := group.parkingInventory(true)
+	vms, parkedByID, _, err := group.parkingInventory(context.Background(), true)
 	require.NoError(t, err)
 	require.Len(t, vms, physical)
 	actualParked := 0
@@ -917,7 +917,7 @@ func TestProviderOnlyDeallocateBusyGroupDefersReceiptRecovery(t *testing.T) {
 	require.Empty(t, world.history())
 }
 
-func TestProviderOnlyDeallocateReceiptRecoveryDeadline(t *testing.T) {
+func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) {
 	ctx := t.Context()
 	client := fake.NewClientset()
 	ctrl := gomock.NewController(t)
@@ -966,9 +966,21 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadline(t *testing.T) {
 	vmClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil).AnyTimes()
 	instanceClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
 	inventoryCalls := 0
+	var firstDeadline time.Time
+	deadlineTestActive := false
 	instanceClient.EXPECT().ListVMInstanceView(gomock.Any(), "rg", gomock.Any()).DoAndReturn(
-		func(_ context.Context, _, name string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
+		func(callCtx context.Context, _, name string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
+			if !deadlineTestActive {
+				return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
+			}
 			inventoryCalls++
+			if inventoryCalls == 1 {
+				var found bool
+				firstDeadline, found = callCtx.Deadline()
+				require.True(t, found)
+				<-callCtx.Done()
+				return nil, callCtx.Err()
+			}
 			return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
 		},
 	).AnyTimes()
@@ -995,12 +1007,16 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadline(t *testing.T) {
 		manager.RegisterNodeGroup(group)
 	}
 	require.NoError(t, manager.forceRefresh())
-	inventoryCalls = 0
 
-	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
-	err = manager.reconcileProviderOnlyDeleteReceiptsWithContext(expiredCtx)
+	deadlineTestActive = true
+	deadlineCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	expectedDeadline, found := deadlineCtx.Deadline()
+	require.True(t, found)
+	err = manager.reconcileProviderOnlyDeleteReceiptsWithContext(deadlineCtx)
 	cancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, 1, inventoryCalls, "an expired reconciliation must not start another inventory request")
+	require.True(t, firstDeadline.Equal(expectedDeadline), "inventory must inherit the remaining reconciliation deadline")
 	for _, name := range poolNames {
 		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
 		require.NoError(t, err)
@@ -1009,7 +1025,7 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadline(t *testing.T) {
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Second)
 	defer retryCancel()
 	require.NoError(t, manager.reconcileProviderOnlyDeleteReceiptsWithContext(retryCtx))
-	require.Zero(t, inventoryCalls, "recovery must read the cached VM inventory")
+	require.Equal(t, 3, inventoryCalls)
 	for _, name := range poolNames {
 		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
 		require.True(t, apierrors.IsNotFound(err))
@@ -1194,7 +1210,7 @@ func TestProviderOnlyDeallocateRejectedStartRecovery(t *testing.T) {
 		require.Nil(t, request.Body)
 
 		checkParkingSize(t, group, 1)
-		vms, parked, _, err := group.parkingInventory(true)
+		vms, parked, _, err := group.parkingInventory(context.Background(), true)
 		require.NoError(t, err)
 		require.Len(t, vms, 2)
 		require.False(t, parked["0"])
@@ -2150,6 +2166,15 @@ func TestProviderOnlyDeallocateParkReleasesGroupLock(t *testing.T) {
 		require.ErrorContains(t, group.DeleteNodes(ctx, []*apiv1.Node{nodes[0]}), "would fall below minimum")
 		require.NoError(t, group.IncreaseSize(ctx, 1), "scale-up must not wait for the running park")
 		require.Equal(t, []string{"deallocate:1", "grow:3"}, world.history())
+		world.mu.Lock()
+		lists := world.inventoryLists
+		world.mu.Unlock()
+		require.NoError(t, provider.Refresh(ctx))
+		_, err = client.CoreV1().Nodes().Get(ctx, nodes[1].Name, metav1.GetOptions{})
+		require.NoError(t, err, "recovery must leave the running park's Node alone")
+		world.mu.Lock()
+		require.Equal(t, lists, world.inventoryLists, "recovery must not list VMs for a running park")
+		world.mu.Unlock()
 
 		close(power.release)
 		require.NoError(t, <-parked)
@@ -2187,4 +2212,24 @@ func TestProviderOnlyDeallocateRefreshIgnoresRecoveryFailure(t *testing.T) {
 		return true, nil, apierrors.NewServiceUnavailable("injected Node LIST failure")
 	})
 	require.NoError(t, provider.Refresh(t.Context()))
+}
+
+func TestProviderOnlyDeallocateReceiptRecoveryReadsFreshPowerState(t *testing.T) {
+	ctx := t.Context()
+	client := fake.NewClientset()
+	world := &parkingWorld{states: []string{vmPowerStateDeallocated}}
+	node := parkingNode(0, "old", true)
+	addParkingReceipt(t, node, world.vms()[0])
+	_, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+	require.NoError(t, err)
+	provider, _ := newParkingProvider(t, world, client, 0, 1, true)
+
+	// The VM starts again while the cache still shows it deallocated.
+	world.mu.Lock()
+	world.states[0] = vmPowerStateRunning
+	world.mu.Unlock()
+	require.NoError(t, provider.Refresh(ctx))
+	current, err := client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+	require.NoError(t, err, "recovery must not delete the Node of a running VM")
+	require.Contains(t, current.Annotations, providerOnlyDeleteReceiptAnnotation)
 }

@@ -957,7 +957,7 @@ func TestProviderOnlyDeallocateSyntheticCleanupObserverOwnership(t *testing.T) {
 	group.setPowerOverride(vmID, false)
 	oldToken := group.setSyntheticDeallocating(vmID)
 
-	_, _, _, err := group.parkingInventory(true)
+	_, _, _, err := group.parkingInventory(context.Background(), true)
 	require.NoError(t, err)
 	require.Empty(t, slowStartSyntheticDeallocating(group))
 	group.setPowerOverride(vmID, false)
@@ -1030,7 +1030,7 @@ func slowStartTargetSize(t *testing.T, group *ScaleSet) int {
 
 func providerOnlyAccounting(t *testing.T, group *ScaleSet) (map[string]bool, map[string]bool) {
 	t.Helper()
-	_, parked, deallocating, err := group.parkingInventory(false)
+	_, parked, deallocating, err := group.parkingInventory(context.Background(), false)
 	require.NoError(t, err)
 	return parked, deallocating
 }
