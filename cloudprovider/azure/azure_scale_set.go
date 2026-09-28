@@ -103,13 +103,26 @@ type ScaleSet struct {
 
 	enableLabelPredictionsOnTemplate bool
 
-	parkMutex  sync.Mutex
+	// parkMutex serializes the provider-only checks and submissions that park,
+	// start and clean up VMs. It isn't held while an operation runs.
+	parkMutex sync.Mutex
+	// powerMutex protects powerOverrides, syntheticDeallocating,
+	// nextSyntheticDeallocation and parking. When both are held, instanceMutex
+	// is taken first.
 	powerMutex sync.Mutex
-	// powerOverrides bridge accepted operations by VMID until instance view catches up.
+	// powerOverrides holds, by VM ID, the power state of an accepted operation
+	// until the instance view shows it. True means parked.
 	powerOverrides map[string]bool
-	// syntheticDeallocating keeps accepted synthetic cleanup active-charged but out of incoming capacity.
+	// syntheticDeallocating holds, by VM ID, the accepted cleanups of VMs that
+	// never registered. They count as deallocating until they finish.
 	syntheticDeallocating     map[string]uint64
 	nextSyntheticDeallocation uint64
+	// parking holds, by VM ID, the accepted parks whose Node isn't deleted yet.
+	// They count as deallocating.
+	parking map[string]bool
+	// parkingVMs holds the VMs from the last instance cache refresh in
+	// provider-only mode. instanceMutex protects it.
+	parkingVMs []*armcompute.VirtualMachineScaleSetVM
 }
 
 // NewScaleSet creates a new NewScaleSet.
@@ -456,10 +469,7 @@ func (scaleSet *ScaleSet) AtomicIncreaseSize(ctx context.Context, delta int) err
 func (scaleSet *ScaleSet) GetScaleSetVms() ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	ctx, cancel := getContextWithTimeout(vmssContextTimeout)
 	defer cancel()
-	return scaleSet.getScaleSetVms(ctx)
-}
 
-func (scaleSet *ScaleSet) getScaleSetVms(ctx context.Context) ([]*armcompute.VirtualMachineScaleSetVM, error) {
 	vmList, err := scaleSet.manager.azClient.virtualMachineScaleSetVMsClient.ListVMInstanceView(ctx, scaleSet.manager.config.ResourceGroup,
 		scaleSet.Name)
 
@@ -1115,6 +1125,9 @@ func (scaleSet *ScaleSet) buildScaleSetCacheForUniform() error {
 	}
 
 	scaleSet.instanceCache = instances
+	if scaleSet.providerOnlyDeallocate() {
+		scaleSet.parkingVMs = vms
+	}
 	scaleSet.lastInstanceRefresh = lastRefresh
 
 	return nil

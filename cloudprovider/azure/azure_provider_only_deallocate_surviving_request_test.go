@@ -341,7 +341,7 @@ func TestProviderOnlyDeallocateSurvivingRequestAccounting(t *testing.T) {
 			}, world.history())
 		}
 
-		require.Equal(t, 6*time.Minute+37*time.Second, time.Now().Sub(initialStarted.at))
+		require.Equal(t, 6*time.Minute+37*time.Second, time.Since(initialStarted.at))
 		time.Sleep(time.Nanosecond)
 		require.True(t, time.Now().Before(requestTime.Add(slowStartMaxNodeProvisionTime)))
 		require.False(t, autoscaler.ClusterStateRegistry.BackoffStatusForNodeGroup(ctx, group, time.Now()).IsBackedOff)
@@ -375,7 +375,7 @@ func TestProviderOnlyDeallocateSurvivingRequestAccounting(t *testing.T) {
 			"surviving request checkpoint: initial request accepted 2 at 0s, A failed and cleanup was accepted at %s, post-backoff incoming=%d at %s",
 			failureLoop.at.Sub(initialStarted.at),
 			upcoming[group.Id()],
-			time.Now().Sub(initialStarted.at),
+			time.Since(initialStarted.at),
 		)
 
 		cAccepted := advanceSlowStartLoop(t, driver, 0, 8)

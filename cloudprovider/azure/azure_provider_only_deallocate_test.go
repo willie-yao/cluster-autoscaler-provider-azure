@@ -34,6 +34,7 @@ import (
 	azruntime "github.com/Azure/azure-sdk-for-go/sdk/azcore/runtime"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/Azure/go-autorest/autorest/azure"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
 	apiv1 "k8s.io/api/core/v1"
@@ -49,6 +50,7 @@ import (
 	clienttesting "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/policy/retryrepectthrottled"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient/mock_virtualmachineclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetclient/mock_virtualmachinescalesetclient"
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetvmclient/mock_virtualmachinescalesetvmclient"
@@ -77,6 +79,8 @@ type parkingWorld struct {
 	failStop     bool
 	startPolled  chan struct{}
 	finishStart  chan struct{}
+	// inventoryLists counts ListVMInstanceView calls.
+	inventoryLists int
 }
 
 func (w *parkingWorld) record(event string) {
@@ -96,7 +100,9 @@ type parkingPowerTransport struct {
 	world            *parkingWorld
 	requests         []*http.Request
 	rejectDeallocate bool
-	failDeallocate   int
+	// rejectStatus is the rejection status code; zero means 400.
+	rejectStatus   int
+	failDeallocate int
 }
 
 type retainedCleanupTransport struct {
@@ -238,8 +244,12 @@ func (t *parkingPowerTransport) Do(request *http.Request) (*http.Response, error
 	t.mu.Unlock()
 	if action == "deallocate" && t.rejectDeallocate {
 		t.world.record("deallocate-rejected:" + id)
+		status := t.rejectStatus
+		if status == 0 {
+			status = http.StatusBadRequest
+		}
 		return &http.Response{
-			StatusCode: http.StatusBadRequest,
+			StatusCode: status,
 			Header:     http.Header{"Content-Type": []string{"application/json"}},
 			Body: io.NopCloser(strings.NewReader(
 				`{"error":{"code":"InvalidParameter","message":"Deallocate rejected before acceptance."}}`,
@@ -436,6 +446,9 @@ func newParkingProvider(t *testing.T, w *parkingWorld, client *fake.Clientset, m
 	vmClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil).AnyTimes()
 	instanceClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
 	instanceClient.EXPECT().ListVMInstanceView(gomock.Any(), "rg", "pool").DoAndReturn(func(context.Context, string, string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
+		w.mu.Lock()
+		w.inventoryLists++
+		w.mu.Unlock()
 		return w.vms(), nil
 	}).AnyTimes()
 	resizeClient := NewMockVMSSDeleteClient(ctrl)
@@ -638,7 +651,7 @@ func checkParkingSize(t *testing.T, group *ScaleSet, want int) {
 
 func checkParkingCounts(t *testing.T, group *ScaleSet, physical, active, parked, returning int) {
 	t.Helper()
-	vms, parkedByID, _, err := group.parkingInventory()
+	vms, parkedByID, _, err := group.parkingInventory(true)
 	require.NoError(t, err)
 	require.Len(t, vms, physical)
 	actualParked := 0
@@ -696,16 +709,21 @@ func TestProviderOnlyDeallocateStockLoop(t *testing.T) {
 			if action.GetSubresource() != "eviction" {
 				return false, nil, nil
 			}
+			// The core calls reactors from its own goroutines, so they use assert, not require.
 			eviction := action.(clienttesting.CreateAction).GetObject().(*policyv1beta1.Eviction)
 			budget, err := client.Tracker().Get(policyv1.SchemeGroupVersion.WithResource("poddisruptionbudgets"), movable.Namespace, "budget")
-			require.NoError(t, err)
+			if !assert.NoError(t, err) {
+				return true, nil, err
+			}
 			if budget.(*policyv1.PodDisruptionBudget).Status.DisruptionsAllowed == 0 {
 				return true, nil, apierrors.NewTooManyRequests("PDB blocks eviction", 1)
 			}
 			current, err := client.Tracker().Get(apiv1.SchemeGroupVersion.WithResource("nodes"), "", "node-1")
-			require.NoError(t, err)
-			require.True(t, current.(*apiv1.Node).Spec.Unschedulable)
-			require.True(t, taints.HasToBeDeletedTaint(current.(*apiv1.Node)))
+			if !assert.NoError(t, err) {
+				return true, nil, err
+			}
+			assert.True(t, current.(*apiv1.Node).Spec.Unschedulable)
+			assert.True(t, taints.HasToBeDeletedTaint(current.(*apiv1.Node)))
 			world.record("evict:" + eviction.Name)
 			return true, &metav1.Status{Status: "Success"}, client.Tracker().Delete(apiv1.SchemeGroupVersion.WithResource("pods"), action.GetNamespace(), eviction.Name)
 		})
@@ -718,9 +736,11 @@ func TestProviderOnlyDeallocateStockLoop(t *testing.T) {
 			}
 			node := obj.(*apiv1.Node)
 			preconditions := a.GetDeleteOptions().Preconditions
-			require.NotNil(t, preconditions)
-			require.Equal(t, node.UID, *preconditions.UID)
-			require.Equal(t, vmPowerStateDeallocated, *world.vms()[1].Properties.InstanceView.Statuses[0].Code)
+			if !assert.NotNil(t, preconditions) || !assert.NotNil(t, preconditions.UID) {
+				return true, nil, errors.New("node delete without a UID precondition")
+			}
+			assert.Equal(t, node.UID, *preconditions.UID)
+			assert.Equal(t, vmPowerStateDeallocated, *world.vms()[1].Properties.InstanceView.Statuses[0].Code)
 			deleteCalls++
 			world.record(fmt.Sprintf("delete:%s:attempt-%d", node.Name, deleteCalls))
 			if deleteCalls == 1 {
@@ -897,7 +917,7 @@ func TestProviderOnlyDeallocateBusyGroupDefersReceiptRecovery(t *testing.T) {
 	require.Empty(t, world.history())
 }
 
-func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) {
+func TestProviderOnlyDeallocateReceiptRecoveryDeadline(t *testing.T) {
 	ctx := t.Context()
 	client := fake.NewClientset()
 	ctrl := gomock.NewController(t)
@@ -946,21 +966,9 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) 
 	vmClient.EXPECT().List(gomock.Any(), "rg").Return(nil, nil).AnyTimes()
 	instanceClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
 	inventoryCalls := 0
-	var firstDeadline time.Time
-	deadlineTestActive := false
 	instanceClient.EXPECT().ListVMInstanceView(gomock.Any(), "rg", gomock.Any()).DoAndReturn(
-		func(callCtx context.Context, _, name string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
-			if !deadlineTestActive {
-				return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
-			}
+		func(_ context.Context, _, name string) ([]*armcompute.VirtualMachineScaleSetVM, error) {
 			inventoryCalls++
-			if inventoryCalls == 1 {
-				var found bool
-				firstDeadline, found = callCtx.Deadline()
-				require.True(t, found)
-				<-callCtx.Done()
-				return nil, callCtx.Err()
-			}
 			return []*armcompute.VirtualMachineScaleSetVM{vmByName[name]}, nil
 		},
 	).AnyTimes()
@@ -987,16 +995,12 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) 
 		manager.RegisterNodeGroup(group)
 	}
 	require.NoError(t, manager.forceRefresh())
+	inventoryCalls = 0
 
-	deadlineTestActive = true
-	deadlineCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
-	expectedDeadline, found := deadlineCtx.Deadline()
-	require.True(t, found)
-	err = manager.reconcileProviderOnlyDeleteReceiptsWithContext(deadlineCtx)
+	expiredCtx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	err = manager.reconcileProviderOnlyDeleteReceiptsWithContext(expiredCtx)
 	cancel()
 	require.ErrorIs(t, err, context.DeadlineExceeded)
-	require.Equal(t, 1, inventoryCalls, "an expired reconciliation must not start another inventory request")
-	require.True(t, firstDeadline.Equal(expectedDeadline), "inventory must inherit the remaining reconciliation deadline")
 	for _, name := range poolNames {
 		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
 		require.NoError(t, err)
@@ -1005,7 +1009,7 @@ func TestProviderOnlyDeallocateReceiptRecoveryDeadlinePropagation(t *testing.T) 
 	retryCtx, retryCancel := context.WithTimeout(context.Background(), time.Second)
 	defer retryCancel()
 	require.NoError(t, manager.reconcileProviderOnlyDeleteReceiptsWithContext(retryCtx))
-	require.Equal(t, 3, inventoryCalls)
+	require.Zero(t, inventoryCalls, "recovery must read the cached VM inventory")
 	for _, name := range poolNames {
 		_, err := client.CoreV1().Nodes().Get(ctx, "node-"+name, metav1.GetOptions{})
 		require.True(t, apierrors.IsNotFound(err))
@@ -1190,7 +1194,7 @@ func TestProviderOnlyDeallocateRejectedStartRecovery(t *testing.T) {
 		require.Nil(t, request.Body)
 
 		checkParkingSize(t, group, 1)
-		vms, parked, _, err := group.parkingInventory()
+		vms, parked, _, err := group.parkingInventory(true)
 		require.NoError(t, err)
 		require.Len(t, vms, 2)
 		require.False(t, parked["0"])
@@ -1326,7 +1330,7 @@ func TestProviderOnlyDeallocateTransientNodeDeleteInterruption(t *testing.T) {
 			subject := nodes[2]
 
 			err = group.DeleteNodes(ctx, []*apiv1.Node{subject})
-			require.ErrorContains(t, err, "delete stopped Node node-2")
+			require.ErrorContains(t, err, "delete stopped node node-2")
 			require.Equal(t, metav1.StatusReasonServiceUnavailable, apierrors.ReasonForError(errors.Unwrap(err)))
 			require.Equal(t, map[string]bool{"vm-identity-2": true}, group.powerOverrides)
 			require.Equal(t, []string{
@@ -1516,7 +1520,7 @@ func TestProviderOnlyDeallocateReceiptVMIncarnationMismatch(t *testing.T) {
 	provider, _ := newParkingProvider(t, world, client, 1, 4, true)
 	power := &parkingPowerTransport{world: world}
 	provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
-	require.ErrorContains(t, provider.azureManager.getNodeGroups()[0].DeleteNodes(ctx, []*apiv1.Node{nodes[2]}), "delete stopped Node")
+	require.ErrorContains(t, provider.azureManager.getNodeGroups()[0].DeleteNodes(ctx, []*apiv1.Node{nodes[2]}), "delete stopped node")
 
 	world.mu.Lock()
 	world.vmIDs = map[int]string{2: "replacement-vm-identity-2"}
@@ -1608,6 +1612,26 @@ func TestProviderOnlyDeallocateReceiptBoundaries(t *testing.T) {
 		require.NoError(t, err)
 		require.NotContains(t, current.Annotations, providerOnlyDeleteReceiptAnnotation)
 		require.Equal(t, "preserve", current.Annotations["operator.example/note"])
+		checkParkingCounts(t, group, 1, 1, 0, 0)
+	})
+
+	t.Run("throttled-begin-rejection", func(t *testing.T) {
+		ctx := t.Context()
+		client := fake.NewClientset()
+		node := parkingNode(0, "old", true)
+		_, err := client.CoreV1().Nodes().Create(ctx, node, metav1.CreateOptions{})
+		require.NoError(t, err)
+		world := &parkingWorld{states: []string{vmPowerStateRunning}}
+		provider, group := newParkingProvider(t, world, client, 0, 1, true)
+		power := &parkingPowerTransport{world: world, rejectDeallocate: true, rejectStatus: http.StatusTooManyRequests}
+		provider.azureManager.azClient.vmssPowerClient = newTestVMSSPowerClient(t, power)
+
+		err = group.DeleteNodes(ctx, []*apiv1.Node{node})
+		require.ErrorIs(t, err, retryrepectthrottled.ErrTooManyRequest)
+		require.Len(t, power.history(), 1, "a throttled Begin must not be retried")
+		current, err := client.CoreV1().Nodes().Get(ctx, node.Name, metav1.GetOptions{})
+		require.NoError(t, err)
+		require.NotContains(t, current.Annotations, providerOnlyDeleteReceiptAnnotation)
 		checkParkingCounts(t, group, 1, 1, 0, 0)
 	})
 
@@ -2004,6 +2028,7 @@ func TestProviderOnlyDeallocateFailedFreshVM(t *testing.T) {
 				world.states[0] = power
 				world.provisioning = map[int]string{0: VMProvisioningStateFailed}
 				world.mu.Unlock()
+				group.invalidateInstanceCache()
 				checkParkingSize(t, group, 1)
 				instances, err := group.Nodes(ctx)
 				require.NoError(t, err)
@@ -2022,4 +2047,144 @@ func TestProviderOnlyDeallocateFailedFreshVM(t *testing.T) {
 			})
 		})
 	}
+}
+
+func TestIsDefiniteDeallocateRejection(t *testing.T) {
+	for status, want := range map[int]bool{
+		http.StatusBadRequest:          true,
+		http.StatusNotFound:            true,
+		http.StatusTooManyRequests:     true,
+		http.StatusRequestTimeout:      false,
+		http.StatusConflict:            false,
+		http.StatusInternalServerError: false,
+	} {
+		assert.Equal(t, want, isDefiniteDeallocateRejection(&azcore.ResponseError{StatusCode: status}), "status %d", status)
+	}
+	assert.True(t, isDefiniteDeallocateRejection(fmt.Errorf("deallocate: %w", &retryrepectthrottled.ThrottleError{})))
+	assert.False(t, isDefiniteDeallocateRejection(errors.New("transport failure")))
+}
+
+func TestProviderOnlyDeallocateLoopReadsCachedInventory(t *testing.T) {
+	infra := integration.SetupInfrastructure(t)
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		defer synctestutils.TearDown(cancel)
+		client := infra.Fakes.KubeClient
+		world := &parkingWorld{states: []string{
+			vmPowerStateRunning, vmPowerStateRunning, vmPowerStateRunning, vmPowerStateDeallocated,
+		}}
+		provider, group := newParkingProvider(t, world, client, 1, 4, true)
+		for i := range 3 {
+			_, err := client.CoreV1().Nodes().Create(ctx, parkingNode(i, fmt.Sprintf("uid-%d", i), true), metav1.CreateOptions{})
+			require.NoError(t, err)
+			busy := catest.BuildScheduledTestPod(fmt.Sprintf("busy-%d", i), 2500, 100, fmt.Sprintf("node-%d", i))
+			_, err = client.CoreV1().Pods(busy.Namespace).Create(ctx, busy, metav1.CreateOptions{})
+			require.NoError(t, err)
+		}
+		inventoryLists := func() int {
+			world.mu.Lock()
+			defer world.mu.Unlock()
+			return world.inventoryLists
+		}
+		autoscaler := parkingAutoscaler(t, ctx, infra, provider)
+		before := inventoryLists()
+
+		// Each loop calls HasInstance for every Node, plus Nodes and TargetSize.
+		synctestutils.MustRunOnceAfter(t, autoscaler, time.Second)
+		synctestutils.MustRunOnceAfter(t, autoscaler, 10*time.Second)
+		checkParkingSize(t, group, 3)
+		require.Equal(t, before, inventoryLists(), "loops within the cache TTL must not list VMs")
+
+		synctestutils.MustRunOnceAfter(t, autoscaler, defaultVmssInstancesRefreshPeriod)
+		require.Equal(t, before+1, inventoryLists(), "an expired cache is read once")
+		require.Empty(t, world.history())
+	})
+}
+
+type blockingParkClient struct {
+	*parkingWorld
+	accepted chan struct{}
+	release  chan struct{}
+}
+
+func (c *blockingParkClient) BeginDeallocate(_ context.Context, _, _, id string, _ *armcompute.VirtualMachineScaleSetVMsClientBeginDeallocateOptions) (*azruntime.Poller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse], error) {
+	c.record("deallocate:" + id)
+	close(c.accepted)
+	return newParkingPoller[armcompute.VirtualMachineScaleSetVMsClientDeallocateResponse](func() error {
+		<-c.release
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		i, _ := strconv.Atoi(id)
+		c.states[i] = vmPowerStateDeallocated
+		return nil
+	})
+}
+
+func TestProviderOnlyDeallocateParkReleasesGroupLock(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx := context.Background()
+		client := fake.NewClientset()
+		world := &parkingWorld{states: []string{vmPowerStateRunning, vmPowerStateRunning}}
+		nodes := make([]*apiv1.Node, 2)
+		for i := range nodes {
+			node, err := client.CoreV1().Nodes().Create(ctx, parkingNode(i, fmt.Sprintf("uid-%d", i), true), metav1.CreateOptions{})
+			require.NoError(t, err)
+			nodes[i] = node
+		}
+		provider, group := newParkingProvider(t, world, client, 1, 3, true)
+		power := &blockingParkClient{parkingWorld: world, accepted: make(chan struct{}), release: make(chan struct{})}
+		provider.azureManager.azClient.vmssPowerClient = power
+		parked := make(chan error, 1)
+		go func() {
+			parked <- group.DeleteNodes(ctx, []*apiv1.Node{nodes[1]})
+		}()
+		<-power.accepted
+		synctest.Wait()
+
+		// The running park counts as deallocating for the target and the minimum.
+		checkParkingSize(t, group, 1)
+		instances, err := group.Nodes(ctx)
+		require.NoError(t, err)
+		require.Len(t, instances, 2)
+		require.Equal(t, cloudprovider.InstanceDeleting, instances[1].Status.State)
+		require.ErrorContains(t, group.DeleteNodes(ctx, []*apiv1.Node{nodes[0]}), "would fall below minimum")
+		require.NoError(t, group.IncreaseSize(ctx, 1), "scale-up must not wait for the running park")
+		require.Equal(t, []string{"deallocate:1", "grow:3"}, world.history())
+
+		close(power.release)
+		require.NoError(t, <-parked)
+		_, err = client.CoreV1().Nodes().Get(ctx, nodes[1].Name, metav1.GetOptions{})
+		require.True(t, apierrors.IsNotFound(err))
+		checkParkingCounts(t, group, 3, 2, 1, 0)
+	})
+}
+
+func TestProviderOnlyGroupSkipsMissingScaleSet(t *testing.T) {
+	world := &parkingWorld{states: []string{vmPowerStateRunning}}
+	provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 1, true)
+	ghost, err := NewScaleSet(&dynamic.NodeGroupSpec{Name: "ghost", MinSize: 0, MaxSize: 1}, provider.azureManager, 0, false)
+	require.NoError(t, err)
+	provider.azureManager.RegisterNodeGroup(ghost)
+
+	unowned := parkingNode(0, "unowned", true)
+	unowned.Spec.ProviderID = strings.Replace(unowned.Spec.ProviderID, "/pool/", "/other-pool/", 1)
+	found, err := provider.NodeGroupForNode(t.Context(), unowned)
+	require.NoError(t, err)
+	require.Nil(t, found)
+	found, err = provider.NodeGroupForNode(t.Context(), parkingNode(0, "owned", true))
+	require.NoError(t, err)
+	require.Same(t, group, found)
+	has, err := provider.HasInstance(t.Context(), parkingNode(0, "owned", true))
+	require.NoError(t, err)
+	require.True(t, has)
+}
+
+func TestProviderOnlyDeallocateRefreshIgnoresRecoveryFailure(t *testing.T) {
+	client := fake.NewClientset()
+	world := &parkingWorld{states: []string{vmPowerStateRunning}}
+	provider, _ := newParkingProvider(t, world, client, 0, 1, true)
+	client.PrependReactor("list", "nodes", func(clienttesting.Action) (bool, runtime.Object, error) {
+		return true, nil, apierrors.NewServiceUnavailable("injected Node LIST failure")
+	})
+	require.NoError(t, provider.Refresh(t.Context()))
 }

@@ -19,12 +19,15 @@ package azure
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v7"
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/resources/armresources"
 	"github.com/stretchr/testify/assert"
@@ -934,32 +937,41 @@ func TestCreateAzureManagerRetriesDeallocateInventory(t *testing.T) {
 	originalEnv := saveAndClearEnv()
 	t.Cleanup(func() { loadEnv(originalEnv) })
 
-	ctrl := gomock.NewController(t)
-	vmssClient := mock_virtualmachinescalesetclient.NewMockInterface(ctrl)
-	vmClient := mock_virtualmachineclient.NewMockInterface(ctrl)
-	vmssVMClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
-	vmss := (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss()
-	vmss.Name = ptr.To("pool")
-	gomock.InOrder(
-		vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return(nil, fmt.Errorf("temporary VMSS list failure")),
-		vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachineScaleSet{vmss}, nil).AnyTimes(),
-	)
-	vmClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachine{}, nil).AnyTimes()
-	vmssVMClient.EXPECT().ListVMInstanceView(gomock.Any(), "fakeId", "pool").Return([]*armcompute.VirtualMachineScaleSetVM{}, nil).AnyTimes()
-	client := &azClient{
-		virtualMachineScaleSetsClient:   vmssClient,
-		virtualMachinesClient:           vmClient,
-		virtualMachineScaleSetVMsClient: vmssVMClient,
-	}
-	opts := cloudprovider.NodeGroupDiscoveryOptions{NodeGroupSpecs: []string{"1:2:Deallocate:pool"}}
-	manager, err := createAzureManagerInternal(strings.NewReader(validAzureCfg), opts, client)
-	if err != nil {
-		t.Fatal(err)
-	}
-	groups := manager.getNodeGroups()
-	if len(groups) != 1 || !groups[0].(*ScaleSet).providerOnlyDeallocate() {
-		t.Fatalf("initial inventory failure skipped eligible group: %v", groups)
-	}
+	// The 2 minute retry backoff runs on the fake synctest clock.
+	synctest.Test(t, func(t *testing.T) {
+		ctrl := gomock.NewController(t)
+		vmssClient := mock_virtualmachinescalesetclient.NewMockInterface(ctrl)
+		vmClient := mock_virtualmachineclient.NewMockInterface(ctrl)
+		vmssVMClient := mock_virtualmachinescalesetvmclient.NewMockInterface(ctrl)
+		vmss := (&parkingWorld{states: []string{vmPowerStateRunning}}).vmss()
+		vmss.Name = ptr.To("pool")
+		gomock.InOrder(
+			// newAzureCache logs and ignores this failure.
+			vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return(nil, fmt.Errorf("temporary VMSS list failure")),
+			vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return(nil, &azcore.ResponseError{StatusCode: http.StatusTooManyRequests}),
+			vmssClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachineScaleSet{vmss}, nil).AnyTimes(),
+		)
+		vmClient.EXPECT().List(gomock.Any(), "fakeId").Return([]*armcompute.VirtualMachine{}, nil).AnyTimes()
+		vmssVMClient.EXPECT().ListVMInstanceView(gomock.Any(), "fakeId", "pool").Return([]*armcompute.VirtualMachineScaleSetVM{}, nil).AnyTimes()
+		client := &azClient{
+			virtualMachineScaleSetsClient:   vmssClient,
+			virtualMachinesClient:           vmClient,
+			virtualMachineScaleSetVMsClient: vmssVMClient,
+		}
+		opts := cloudprovider.NodeGroupDiscoveryOptions{NodeGroupSpecs: []string{"1:2:Deallocate:pool"}}
+		started := time.Now()
+		manager, err := createAzureManagerInternal(strings.NewReader(validAzureCfg), opts, client)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if waited := time.Since(started); waited < 2*time.Minute {
+			t.Fatalf("throttled inventory load returned after %v, without a retry", waited)
+		}
+		groups := manager.getNodeGroups()
+		if len(groups) != 1 || !groups[0].(*ScaleSet).providerOnlyDeallocate() {
+			t.Fatalf("retried inventory load skipped eligible group: %v", groups)
+		}
+	})
 }
 
 func TestFetchExplicitNodeGroupsIneligibleDeallocate(t *testing.T) {

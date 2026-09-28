@@ -117,11 +117,12 @@ func TestProviderOnlyHasInstanceManagedStates(t *testing.T) {
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
 			world := &parkingWorld{states: []string{vmPowerStateRunning}}
-			provider, _ := newParkingProvider(t, world, fake.NewClientset(), 0, 1, true)
+			provider, group := newParkingProvider(t, world, fake.NewClientset(), 0, 1, true)
 			world.mu.Lock()
 			world.states[0] = tc.powerState
 			world.provisioning = map[int]string{0: tc.provisioning}
 			world.mu.Unlock()
+			group.invalidateInstanceCache()
 
 			exists, err := provider.HasInstance(t.Context(), parkingNode(tc.instanceID, "managed", true))
 

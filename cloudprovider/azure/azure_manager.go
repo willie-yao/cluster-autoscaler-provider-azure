@@ -257,7 +257,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	// Therefore, we cannot solely rely on the VMType to determine the node group type.
 	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMsPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
-	if s.policy == "Deallocate" && isVMsPool {
+	if s.policy == scaleDownPolicyDeallocate && isVMsPool {
 		return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("VMs pools are not supported")}
 	}
 	if isVMsPool {
@@ -271,7 +271,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 
 	switch m.config.VMType {
 	case providerazureconsts.VMTypeStandard:
-		if s.policy == "Deallocate" {
+		if s.policy == scaleDownPolicyDeallocate {
 			return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("standard pools are not supported")}
 		}
 		return NewAgentPool(s.NodeGroupSpec, m)
@@ -281,7 +281,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 			return nil, err
 		}
 		scaleSet.labels, scaleSet.taints = s.labels, s.taints
-		if s.policy == "Deallocate" {
+		if s.policy == scaleDownPolicyDeallocate {
 			if err := scaleSet.validateParking(); err != nil {
 				return nil, &unsupportedDeallocateError{name: s.Name, reason: err}
 			}
@@ -302,7 +302,10 @@ func (m *AzureManager) Refresh() error {
 		}
 	}
 	if m.providerOnlyDeallocateEnabled() {
-		return m.reconcileProviderOnlyDeleteReceipts()
+		// Recovery runs again on the next loop, so its errors must not stop this one.
+		if err := m.reconcileProviderOnlyDeleteReceipts(); err != nil {
+			klog.Errorf("Provider-only deletion recovery failed: %v", err)
+		}
 	}
 	return nil
 }
@@ -385,11 +388,7 @@ func (m *AzureManager) UnregisterNodeGroup(nodeGroup cloudprovider.NodeGroup) bo
 // GetNodeGroupForInstance returns the NodeGroup of the given Instance
 func (m *AzureManager) GetNodeGroupForInstance(instance *azureRef) (cloudprovider.NodeGroup, error) {
 	if m.providerOnlyDeallocateEnabled() {
-		group, err := m.providerOnlyGroup(instance.Name)
-		if err != nil {
-			return nil, err
-		}
-		if group != nil && group.providerOnlyDeallocate() {
+		if group := m.providerOnlyGroup(instance.Name); group != nil {
 			return group, nil
 		}
 		if m.config.ProviderOnlyDeallocate {

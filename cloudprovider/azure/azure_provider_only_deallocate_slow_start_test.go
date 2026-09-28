@@ -18,7 +18,6 @@ package azure
 
 import (
 	"context"
-	"flag"
 	"fmt"
 	"io"
 	"net/http"
@@ -36,7 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/kubernetes/fake"
-	"k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 	"sigs.k8s.io/cluster-autoscaler/pkg/core"
 	"sigs.k8s.io/cluster-autoscaler/pkg/loop"
@@ -70,29 +68,6 @@ type slowStartTrace struct {
 	at     time.Time
 	method string
 	path   string
-}
-
-type synchronizedLogBuffer struct {
-	mu      sync.Mutex
-	content strings.Builder
-}
-
-func (b *synchronizedLogBuffer) Write(p []byte) (int, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.content.Write(p)
-}
-
-func (b *synchronizedLogBuffer) reset() {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.content.Reset()
-}
-
-func (b *synchronizedLogBuffer) String() string {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return b.content.String()
 }
 
 type nonterminalStartTransport struct {
@@ -584,8 +559,8 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 				upcoming, _ := fixture.autoscaler.ClusterStateRegistry.GetUpcomingNodes(ctx)
 				require.Equal(t, 1, upcoming[fixture.group.Id()])
 			}
-			require.Equal(t, 11*time.Minute, time.Now().Sub(acceptedAt.at))
-			require.Less(t, time.Now().Sub(acceptedAt.at), slowStartMaxNodeProvisionTime)
+			require.Equal(t, 11*time.Minute, time.Since(acceptedAt.at))
+			require.Less(t, time.Since(acceptedAt.at), slowStartMaxNodeProvisionTime)
 			statusCode, body := slowStartHealthStatus(fixture.health)
 			require.Equal(t, http.StatusOK, statusCode)
 			require.Equal(t, "OK", body)
@@ -641,7 +616,7 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 			t.Logf(
 				"accepted Start timeline: first loop returned at %s, health remained 200 through %s, Azure completed before iteration 13, Node became Ready in iteration 14; Start POSTs=%d polls=%d",
 				time.Duration(0),
-				time.Now().Sub(acceptedAt.at),
+				time.Since(acceptedAt.at),
 				slowStartCountMethod(trace, http.MethodPost),
 				slowStartCountPath(trace, slowStartPollPath),
 			)
@@ -733,7 +708,7 @@ func TestProviderOnlyDeallocateSlowAcceptedStartCharacterization(t *testing.T) {
 
 			t.Logf(
 				"accepted failed Start timeline: terminal failure visible before iteration 2, cleanup retained and parked VM 1, later demand accepted a new Start of the same VM at %s",
-				time.Now().Sub(acceptedAt.at),
+				time.Since(acceptedAt.at),
 			)
 		})
 	})
@@ -869,7 +844,6 @@ func TestProviderOnlyDeallocateAcceptedStartObservationTimeout(t *testing.T) {
 }
 
 func TestProviderOnlyDeallocateForceSyntheticCleanupRetainsVM(t *testing.T) {
-	logs := captureSlowStartLogs(t)
 	synctest.Test(t, func(t *testing.T) {
 		world := &parkingWorld{
 			states:       []string{vmPowerStateRunning, vmPowerStateDeallocated},
@@ -889,13 +863,10 @@ func TestProviderOnlyDeallocateForceSyntheticCleanupRetainsVM(t *testing.T) {
 
 		require.NoError(t, group.ForceDeleteNodes(context.Background(), []*apiv1.Node{synthetic}))
 		<-transport.deallocate
-		pendingTarget, pendingRecord := captureProviderOnlyTargetAccounting(t, logs, group)
-		require.Equal(t, 1, pendingTarget)
-		require.Contains(t, pendingRecord, fmt.Sprintf("nodeGroup=%q", group.Id()))
-		require.Contains(t, pendingRecord, "physicalTarget=2")
-		require.Contains(t, pendingRecord, `parkedByInstanceID={"0":false,"1":false}`)
-		require.Contains(t, pendingRecord, `syntheticDeallocatingByInstanceID={"0":false,"1":true}`)
-		require.Contains(t, pendingRecord, "adjustedTarget=1")
+		parked, deallocating := providerOnlyAccounting(t, group)
+		require.Equal(t, 1, slowStartTargetSize(t, group))
+		require.Equal(t, map[string]bool{"0": false, "1": false}, parked)
+		require.Equal(t, map[string]bool{"0": false, "1": true}, deallocating)
 		require.Equal(t, map[string]bool{beforeVMIDs[1]: true}, slowStartSyntheticDeallocating(group))
 		instances, err := group.Nodes(context.Background())
 		require.NoError(t, err)
@@ -903,23 +874,18 @@ func TestProviderOnlyDeallocateForceSyntheticCleanupRetainsVM(t *testing.T) {
 		require.Equal(t, cloudprovider.InstanceDeleting, instances[1].Status.State)
 		require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
 		require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
-		t.Logf("actual pending provider accounting record: %s", pendingRecord)
 
 		transport.setDeallocateCompletion("Succeeded")
 		<-transport.deallocated
 		synctest.Wait()
 		checkParkingCounts(t, group, 2, 1, 1, 0)
-		parkedTarget, parkedRecord := captureProviderOnlyTargetAccounting(t, logs, group)
-		require.Equal(t, 1, parkedTarget)
-		require.Contains(t, parkedRecord, fmt.Sprintf("nodeGroup=%q", group.Id()))
-		require.Contains(t, parkedRecord, "physicalTarget=2")
-		require.Contains(t, parkedRecord, `parkedByInstanceID={"0":false,"1":true}`)
-		require.Contains(t, parkedRecord, `syntheticDeallocatingByInstanceID={"0":false,"1":false}`)
-		require.Contains(t, parkedRecord, "adjustedTarget=1")
+		parked, deallocating = providerOnlyAccounting(t, group)
+		require.Equal(t, 1, slowStartTargetSize(t, group))
+		require.Equal(t, map[string]bool{"0": false, "1": true}, parked)
+		require.Equal(t, map[string]bool{"0": false, "1": false}, deallocating)
 		require.Equal(t, beforeVMIDs, slowStartWorldVMIDs(world))
 		require.Equal(t, beforeDisks, slowStartWorldDiskIDs(world))
 		require.Equal(t, []string{"deallocate-accepted:1", "deallocate-complete:1"}, world.history())
-		t.Logf("actual parked provider accounting record: %s", parkedRecord)
 	})
 }
 
@@ -991,7 +957,7 @@ func TestProviderOnlyDeallocateSyntheticCleanupObserverOwnership(t *testing.T) {
 	group.setPowerOverride(vmID, false)
 	oldToken := group.setSyntheticDeallocating(vmID)
 
-	_, _, _, err := group.parkingInventory()
+	_, _, _, err := group.parkingInventory(true)
 	require.NoError(t, err)
 	require.Empty(t, slowStartSyntheticDeallocating(group))
 	group.setPowerOverride(vmID, false)
@@ -1062,32 +1028,11 @@ func slowStartTargetSize(t *testing.T, group *ScaleSet) int {
 	return size
 }
 
-func captureSlowStartLogs(t *testing.T) *synchronizedLogBuffer {
+func providerOnlyAccounting(t *testing.T, group *ScaleSet) (map[string]bool, map[string]bool) {
 	t.Helper()
-	state := klog.CaptureState()
-	t.Cleanup(state.Restore)
-	flags := flag.NewFlagSet(t.Name(), flag.ContinueOnError)
-	klog.InitFlags(flags)
-	require.NoError(t, flags.Set("v", "4"))
-	logs := &synchronizedLogBuffer{}
-	klog.LogToStderr(false)
-	klog.SetOutput(logs)
-	return logs
-}
-
-func captureProviderOnlyTargetAccounting(t *testing.T, logs *synchronizedLogBuffer, group *ScaleSet) (int, string) {
-	t.Helper()
-	logs.reset()
-	target := slowStartTargetSize(t, group)
-	klog.Flush()
-	var records []string
-	for _, line := range strings.Split(logs.String(), "\n") {
-		if strings.Contains(line, `"Provider-only target accounting"`) {
-			records = append(records, line)
-		}
-	}
-	require.Len(t, records, 1)
-	return target, records[0]
+	_, parked, deallocating, err := group.parkingInventory(false)
+	require.NoError(t, err)
+	return parked, deallocating
 }
 
 func slowStartRequirePendingPods(

@@ -229,7 +229,7 @@ func newVMSSPowerClient(
 	}
 	options.Cloud = cloudConfig
 	if armConfig != nil && strings.EqualFold(armConfig.Cloud, utils.AzureStackCloudName) && !armConfig.DisableAzureStackCloud {
-		options.ClientOptions.APIVersion = virtualmachinescalesetvmclient.AzureStackCloudAPIVersion
+		options.APIVersion = virtualmachinescalesetvmclient.AzureStackCloudAPIVersion
 	}
 	for _, clientOptionsMutFn := range clientOptionsMutFns {
 		if clientOptionsMutFn != nil {

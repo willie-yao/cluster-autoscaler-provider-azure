@@ -113,6 +113,21 @@ func TestBuildAzureConfigMigrationPrecedence(t *testing.T) {
 			},
 		},
 		{
+			name:   "environment overrides provider-only deallocate file setting",
+			fields: map[string]interface{}{"providerOnlyDeallocate": true},
+			env:    map[string]string{"AZURE_PROVIDER_ONLY_DEALLOCATE": "false"},
+			check: func(t *testing.T, cfg *Config) {
+				assert.False(t, cfg.ProviderOnlyDeallocate)
+			},
+		},
+		{
+			name: "environment enables provider-only deallocate",
+			env:  map[string]string{"AZURE_PROVIDER_ONLY_DEALLOCATE": "true"},
+			check: func(t *testing.T, cfg *Config) {
+				assert.True(t, cfg.ProviderOnlyDeallocate)
+			},
+		},
+		{
 			name: "conflicting authentication is rejected",
 			env:  map[string]string{"ARM_USE_MANAGED_IDENTITY_EXTENSION": "true", "ARM_USE_WORKLOAD_IDENTITY_EXTENSION": "true"},
 			err:  "you can not combine both managed identity and workload identity",

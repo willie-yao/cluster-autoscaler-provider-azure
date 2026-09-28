@@ -118,7 +118,9 @@ type Config struct {
 	// Disabled by default; set to true to opt in.
 	EnableVMSSEtag bool `json:"enableVMSSEtag,omitempty" yaml:"enableVMSSEtag,omitempty"`
 
-	// ProviderOnlyDeallocate parks Uniform VMSS instances and deletes their Node objects.
+	// ProviderOnlyDeallocate deallocates VMSS instances on scale-down, deletes their
+	// Node objects, and starts them again on scale-up, for every VMSS group.
+	// Disabled by default.
 	ProviderOnlyDeallocate bool `json:"providerOnlyDeallocate,omitempty" yaml:"providerOnlyDeallocate,omitempty"`
 }
 
@@ -152,6 +154,7 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 	cfg.StrictCacheUpdates = false
 	cfg.EnableLabelPredictionsOnTemplate = true
 	cfg.EnableVMSSEtag = false
+	cfg.ProviderOnlyDeallocate = false
 
 	// Config file overrides defaults
 	if configReader != nil {
@@ -293,6 +296,9 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 		return nil, err
 	}
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableVMSSEtag, "AZURE_ENABLE_VMSS_ETAG"); err != nil {
+		return nil, err
+	}
+	if _, err = assignBoolFromEnvIfExists(&cfg.ProviderOnlyDeallocate, "AZURE_PROVIDER_ONLY_DEALLOCATE"); err != nil {
 		return nil, err
 	}
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableDynamicInstanceList, "AZURE_ENABLE_DYNAMIC_INSTANCE_LIST"); err != nil {
