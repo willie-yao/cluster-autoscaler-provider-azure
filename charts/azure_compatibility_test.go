@@ -224,7 +224,7 @@ func TestAzureNotes(t *testing.T) {
 			require.Equal(t, tt.wantDeployment, strings.Contains(renderedNotes, "To verify that cluster-autoscaler has started"))
 			if !tt.wantDeployment {
 				require.Contains(t, renderedNotes, "Set autoDiscovery.clusterName or autoscalingGroups[]")
-				require.Contains(t, renderedNotes, "https://github.com/willie-yao/cluster-autoscaler-provider-azure")
+				require.Contains(t, renderedNotes, "See the chart's README.md")
 			}
 		})
 	}

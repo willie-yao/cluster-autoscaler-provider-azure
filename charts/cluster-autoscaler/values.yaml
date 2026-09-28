@@ -6,7 +6,7 @@ affinity: {}
 additionalLabels: {}
 
 autoDiscovery:
-  # autoDiscovery.clusterName enables Azure VMSS auto-discovery.
+  # autoDiscovery.clusterName -- Enable autodiscovery of Azure VMSS tagged with `cluster-autoscaler-enabled=true` and `cluster-autoscaler-name=<clusterName>`.
   clusterName:  # cluster.local
 
 # autoscalingGroups -- For Azure AKS. At least one element is required if not using `autoDiscovery`. For example:
@@ -32,11 +32,11 @@ azureClientID: ""
 azureClientSecret: ""
 
 # azureResourceGroup -- Azure resource group that the cluster is located.
-# Required for Azure service-principal authentication.
+# Required for all Azure authentication methods.
 azureResourceGroup: ""
 
 # azureSubscriptionID -- Azure subscription where the resources are located.
-# Required for Azure service-principal authentication.
+# Required for all Azure authentication methods. When empty, the autoscaler tries to read it from the Azure Instance Metadata Service.
 azureSubscriptionID: ""
 
 # azureTenantID -- Azure tenant where the resources are located.
@@ -101,11 +101,12 @@ envFromSecret: ""
 ## Priorities Expander
 # expanderPriorities -- The expanderPriorities is used if `extraArgs.expander` contains `priority` and expanderPriorities is also set with the priorities.
 # If `extraArgs.expander` contains `priority`, then expanderPriorities is used to define cluster-autoscaler-priority-expander priorities.
-# See the Cluster Autoscaler priority-expander documentation for the required ConfigMap format.
+# See: https://github.com/kubernetes-sigs/cluster-autoscaler/blob/v0.0.0-k8s.v1.37.0/pkg/expander/priority/readme.md
 expanderPriorities: {}
 
 # extraArgs -- Additional container arguments.
-# Run `cluster-autoscaler --help` for the full list of parameters and default values.
+# Refer to https://github.com/kubernetes-sigs/cluster-autoscaler/blob/v0.0.0-k8s.v1.37.0/pkg/FAQ.md#what-are-the-parameters-to-ca for the full list of cluster autoscaler
+# parameters and their default values.
 # Everything after the first _ will be ignored allowing the use of multi-string arguments.
 extraArgs:
   logtostderr: true
@@ -135,7 +136,8 @@ extraArgs:
   # balancing-ignore-label_2: second-label-to-ignore
 
 # customArgs -- Additional custom container arguments.
-# Run `cluster-autoscaler --help` for the full list of parameters and default values.
+# Refer to https://github.com/kubernetes-sigs/cluster-autoscaler/blob/v0.0.0-k8s.v1.37.0/pkg/FAQ.md#what-are-the-parameters-to-ca for the full list of cluster autoscaler
+# parameters and their default values.
 # List of arguments as strings.
 customArgs: []
 
@@ -373,6 +375,7 @@ updateStrategy: {}
   #   maxUnavailable: 0
   # type: RollingUpdate
 
+# vpa -- Configure a VerticalPodAutoscaler for the cluster-autoscaler Deployment.
 vpa:
   # vpa.enabled -- If true, creates a VerticalPodAutoscaler.
   enabled: false

@@ -1,6 +1,6 @@
 apiVersion: v2
 appVersion: 1.35.0
-description: Azure-only Cluster Autoscaler for Kubernetes worker nodes.
+description: Scales Kubernetes worker nodes within Azure autoscaling groups.
 icon: https://github.com/kubernetes/kubernetes/raw/master/logo/logo.png
 name: cluster-autoscaler
 type: application

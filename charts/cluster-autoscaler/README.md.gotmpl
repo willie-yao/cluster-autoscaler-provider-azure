@@ -1,0 +1,174 @@
+{{ template "chart.header" . }}
+
+{{ template "chart.description" . }}
+
+## TL;DR
+
+```console
+# Method 1 - Using Autodiscovery
+$ helm install my-release ./charts/cluster-autoscaler \
+    --set image.repository=<YOUR REGISTRY>/cluster-autoscaler \
+    --set image.tag=<YOUR TAG> \
+    --set 'autoDiscovery.clusterName'=<CLUSTER NAME>
+
+# Method 2 - Specifying groups manually
+$ helm install my-release ./charts/cluster-autoscaler \
+    --set image.repository=<YOUR REGISTRY>/cluster-autoscaler \
+    --set image.tag=<YOUR TAG> \
+    --set "autoscalingGroups[0].name=your-vmss-name" \
+    --set "autoscalingGroups[0].maxSize=10" \
+    --set "autoscalingGroups[0].minSize=1"
+```
+
+## Introduction
+
+This chart bootstraps a cluster-autoscaler deployment on a [Kubernetes](http://kubernetes.io) cluster using the [Helm](https://helm.sh) package manager.
+
+The chart is based on version 9.59.0 of the upstream `cluster-autoscaler` chart, and it supports only Azure. The `cloudProvider` value and the values for other cloud providers are removed.
+
+## Prerequisites
+
+- Helm 3+
+- Kubernetes 1.10+ with RBAC enabled
+- A cluster autoscaler image built from this repository. The default `image.repository` is a placeholder, so you must set `image.repository` and `image.tag`.
+
+## Installing the Chart
+
+**By default, no deployment is created and nothing will autoscale**.
+
+You must provide some minimal configuration, either to specify instance groups or enable auto-discovery. It is not recommended to do both.
+
+Either:
+
+- Set `autoDiscovery.clusterName` **or**
+- Set static node group configurations for one or more node groups using `autoscalingGroups`.
+
+To create a valid configuration, follow the [Azure](#azure) instructions.
+
+### Templating the autoDiscovery.clusterName
+
+The cluster name can be templated in the `autoDiscovery.clusterName` variable. This is useful when the cluster name is dynamically generated based on other values coming from external systems like Argo CD or Flux. This also allows you to use global Helm values to set the cluster name, e.g., `autoDiscovery.clusterName={{`{{ .Values.global.clusterName }}`}}`, so that you don't need to set it in more than 1 location in the values file.
+
+### Azure
+
+The following parameters are required:
+
+- `image.repository` and `image.tag`
+- `azureSubscriptionID: "your-azure-subscription-id"`
+- `azureResourceGroup: "your-aks-cluster-resource-group-name"`
+- `azureVMType: "vmss"`
+- Either `autoDiscovery.clusterName` or `autoscalingGroups[0].name=your-vmss,autoscalingGroups[0].maxSize=10,autoscalingGroups[0].minSize=1`
+
+For service principal authentication, also set:
+
+- `azureClientID: "your-service-principal-app-id"`
+- `azureClientSecret: "your-service-principal-client-secret"`
+- `azureTenantID: "your-azure-tenant-id"`
+
+To use a managed identity instead, set `azureUseManagedIdentityExtension=true`. Set `azureUserAssignedIdentityID` when the VMSS has more than one user assigned identity. To use workload identity, see [Azure - Using azure workload identity](#azure---using-azure-workload-identity).
+
+With `autoDiscovery.clusterName`, the autoscaler manages each VMSS that has the tags `cluster-autoscaler-enabled=true` and `cluster-autoscaler-name=<CLUSTER NAME>`. The `min` and `max` tags on each VMSS set its size limits. See the [Azure provider README](../../cloudprovider/azure/README.md#auto-discovery-setup) for more details.
+
+By default, the chart creates a Secret from the values above. To use an existing Secret instead, set `secretKeyRefNameOverride` to its name. The Secret must have the keys `SubscriptionID`, `ResourceGroup` and `VMType`. It must also have `UserAssignedIdentityID` for a managed identity, or `TenantID`, `ClientID` and `ClientSecret` for service principal authentication.
+
+## Uninstalling the Chart
+
+To uninstall `my-release`:
+
+```console
+$ helm uninstall my-release
+```
+
+The command removes all the Kubernetes components associated with the chart and deletes the release.
+
+> **Tip**: List all releases using `helm list` or start clean with `helm uninstall my-release`
+
+## Additional Configuration
+
+### Azure - Using azure workload identity
+
+You can use the project [Azure workload identity](https://github.com/Azure/azure-workload-identity), to automatically configure the correct setup for your pods to use federated identity with Azure.
+
+You can also set the correct settings yourself instead of relying on this project.
+
+For example the following configuration will configure the Autoscaler to use your federated identity:
+
+```yaml
+azureUseWorkloadIdentityExtension: true
+extraEnv:
+  AZURE_CLIENT_ID: USER ASSIGNED IDENTITY CLIENT ID
+  AZURE_TENANT_ID: USER ASSIGNED IDENTITY TENANT ID
+  AZURE_FEDERATED_TOKEN_FILE: /var/run/secrets/tokens/azure-identity-token
+  AZURE_AUTHORITY_HOST: https://login.microsoftonline.com/
+extraVolumes:
+- name: azure-identity-token
+  projected:
+    defaultMode: 420
+    sources:
+    - serviceAccountToken:
+        audience: api://AzureADTokenExchange
+        expirationSeconds: 3600
+        path: azure-identity-token
+extraVolumeMounts:
+- mountPath: /var/run/secrets/tokens
+  name: azure-identity-token
+  readOnly: true
+```
+
+### Custom arguments
+
+You can use the `customArgs` value to give any argument to cluster autoscaler command.
+
+Typical use case is to give an environment variable as an argument which will be interpolated at execution time.
+
+This is helpful when you need to inject values from configmap or secret.
+
+## Troubleshooting
+
+The chart will succeed even if the container arguments are incorrect. A few minutes after starting `kubectl logs -l "app.kubernetes.io/name=azure-cluster-autoscaler" --tail=50` should loop through something like
+
+```
+polling_autoscaler.go:111] Poll finished
+static_autoscaler.go:97] Starting main loop
+utils.go:435] No pod using affinity / antiaffinity found in cluster, disabling affinity predicate for this loop
+static_autoscaler.go:230] Filtering out schedulables
+```
+
+If not, find a pod that the deployment created and `describe` it, paying close attention to the arguments under `Command`. e.g.:
+
+```
+Containers:
+  cluster-autoscaler:
+    Command:
+      ./cluster-autoscaler
+      --cloud-provider=azure
+# if specifying VMSS groups manually
+      --nodes=1:10:your-vmss-name
+# if using autodiscovery
+      --node-group-auto-discovery=label:cluster-autoscaler-enabled=true,cluster-autoscaler-name=<ClusterName>
+      --v=4
+```
+
+### PodSecurityPolicy
+
+Though enough for the majority of installations, the default PodSecurityPolicy _could_ be too restrictive depending on the specifics of your release. Please make sure to check that the template fits with any customizations made or disable it by setting `rbac.pspEnabled` to `false`.
+
+### VerticalPodAutoscaler
+
+The CA Helm Chart can install a [`VerticalPodAutoscaler`](https://github.com/kubernetes/autoscaler/blob/master/vertical-pod-autoscaler/README.md) object from Chart version `9.27.0`
+onwards for the Cluster Autoscaler Deployment to scale the CA as appropriate, but for that, we
+need to install the VPA to the cluster separately. A VPA can help minimize wasted resources
+when usage spikes periodically or remediate containers that are being OOMKilled.
+
+The following example snippet can be used to install VPA that allows scaling down from the default recommendations of the deployment template:
+
+```yaml
+vpa:
+  enabled: true
+  containerPolicy:
+    minAllowed:
+      cpu: 20m
+      memory: 50Mi
+```
+
+{{ template "chart.valuesSection" . }}

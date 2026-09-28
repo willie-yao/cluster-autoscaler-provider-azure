@@ -184,7 +184,9 @@ spec:
           {{- if or .Values.extraVolumeSecrets .Values.extraVolumeMounts }}
           volumeMounts:
           {{- range $key, $value := .Values.extraVolumeSecrets }}
-{{ printf "- name: %s\n  mountPath: %s\n  readOnly: true" $key (required "Must specify mountPath!" $value.mountPath) | nindent 12 }}
+            - name: {{ $key }}
+              mountPath: {{ required "Must specify mountPath!" $value.mountPath }}
+              readOnly: true
           {{- end }}
           {{- if .Values.extraVolumeMounts }}
             {{- toYaml .Values.extraVolumeMounts | nindent 12 }}

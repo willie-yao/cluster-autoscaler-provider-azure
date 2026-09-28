@@ -10,10 +10,9 @@ To verify that cluster-autoscaler has started, run:
 #### ERROR: Set autoDiscovery.clusterName or autoscalingGroups[]          ####
 ##############################################################################
 
-No Deployment is rendered without a discovery cluster name or an explicit
-autoscaling group. Set autoDiscovery.clusterName to your Azure VMSS discovery
-cluster name, or provide autoscalingGroups[] entries with name, minSize and
-maxSize. See the repository's Azure configuration guidance:
-  https://github.com/willie-yao/cluster-autoscaler-provider-azure
+The deployment and pod will not be created and the installation is not functional.
+Set autoDiscovery.clusterName to the value of the cluster-autoscaler-name tag on
+your VMSS, or add autoscalingGroups[] entries with name, minSize and maxSize.
+See the chart's README.md for the Azure setup steps.
 
 {{- end -}}
