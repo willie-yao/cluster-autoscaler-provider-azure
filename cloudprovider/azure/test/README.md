@@ -97,18 +97,43 @@ which takes these steps:
    `aks-managed-poolName` tag and checks their tags and sizes. It fails if
    the AKS autoscaler is on for any pool, or if a cluster autoscaler already
    runs in the cluster.
-3. It drains the User pool nodes once, so that AKS add-on replicas move to
+3. It waits up to 45 minutes for AKS to finish setting up the cluster, as
+   described below.
+4. It drains the User pool nodes once, so that AKS add-on replicas move to
    the System pool, and then it uncordons them.
-4. It creates the authorization marker and the run's two PriorityClasses.
-5. It installs one controller from this repository's chart with the upstream
+5. It creates the authorization marker and the run's two PriorityClasses.
+6. It installs one controller from this repository's chart with the upstream
    values: the `cluster-autoscaler` release in the `default` namespace,
    workload identity and `autoDiscovery.clusterName`. It pins the Pod to the
    System pool. It also replaces the discovery flag and the Secret references
    for `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` with the literal values
    that the suite checks.
-6. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
+7. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
    runs Ginkgo with the selected label filter. Ginkgo writes
    `junit.e2e_suite.1.xml` there.
+
+AKS keeps changing a new cluster for a while after CAPZ reports it Ready.
+About 12 to 35 minutes after AKS creates the pools, it rolls out new revisions
+of kube-system add-ons, e.g., `konnectivity-agent`, and it adds the
+`AKSLinuxExtension` VM extension to each VMSS. It then upgrades the VMSS
+instances to that model, so each VMSS is `Updating` for about a minute. If the
+tests start before AKS finishes, add-on Pods can land on the drained User pool
+nodes, which fails the worker isolation check, and a VMSS in `Updating` fails
+the idle case. So `hack/ci-e2e.sh` waits until all of the following hold on three
+checks in a row, 30 seconds apart:
+
+- The AKS cluster and its three agent pools are `Succeeded`.
+- The three VMSS are `Succeeded` and have `AKSLinuxExtension` in their model,
+  and every VMSS instance is `Succeeded` and on the latest model.
+- The number of Ready Nodes matches the total VMSS capacity.
+- Every kube-system Deployment has observed its latest generation and has all
+  of its replicas updated and available.
+
+The cluster and agent pool checks follow the provisioning state checks in
+CAPZ's AKS tests. The VMSS state and Node count checks follow upstream's
+`AllVMSSStable`, and the Deployment check is similar to the Pod wait in CAPZ's
+`ci-entrypoint.sh`. If AKS doesn't finish within 45 minutes, the script fails
+and prints the last condition that wasn't met.
 
 The upstream suite installs the chart from Go in `BeforeSuite`. This suite
 keeps the install in `hack/ci-e2e.sh`, because its Go runner only observes a
