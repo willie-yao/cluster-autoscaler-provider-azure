@@ -1,5 +1,5 @@
 REPO_ROOT:=$(shell git rev-parse --show-toplevel)
-CAS_ROOT:=$(REPO_ROOT)/cluster-autoscaler
+CAS_ROOT:=$(REPO_ROOT)
 DEV_DIR:=$(CAS_ROOT)/cloudprovider/azure/examples/dev
 
 BUILD_TAGS=azure

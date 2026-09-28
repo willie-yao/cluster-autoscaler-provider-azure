@@ -10,7 +10,7 @@ This document, and directory are focused on the ability to deploy and test a wor
     - Note: for testing an upstream branch use: `git checkout upstream/<branch-name>`
         - This might require a `git fetch upstream`
 
-5. run `cd cluster-autoscaler/cloudprovider/azure/examples/dev`
+5. run `cd cloudprovider/azure/examples/dev`
 
 6. run `az login`
 

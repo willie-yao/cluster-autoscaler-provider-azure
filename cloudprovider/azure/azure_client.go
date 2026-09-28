@@ -46,8 +46,8 @@ import (
 	"sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachinescalesetvmclient"
 )
 
-//go:generate sh -c "mockgen -source=azure_client.go -package azure -exclude_interfaces DeploymentsClient | cat ../../../hack/boilerplate/boilerplate.go.txt - > azure_mock_agentpool_client.go"
-//go:generate sh -c "mockgen -package=azure sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient Interface | cat ../../../hack/boilerplate/boilerplate.go.txt - > azure_mock_virtualmachine_client_test.go"
+//go:generate sh -c "mockgen -source=azure_client.go -package azure -exclude_interfaces DeploymentsClient | cat ../../hack/boilerplate/boilerplate.go.txt - > azure_mock_agentpool_client.go"
+//go:generate sh -c "mockgen -package=azure sigs.k8s.io/cloud-provider-azure/pkg/azclient/virtualmachineclient Interface | cat ../../hack/boilerplate/boilerplate.go.txt - > azure_mock_virtualmachine_client_test.go"
 
 const (
 	vmsContextTimeout      = 5 * time.Minute
