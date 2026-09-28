@@ -22,7 +22,7 @@ builds node templates and issues scaling operations; configuration and operator
 examples are described in the [provider guide](../cloudprovider/azure/README.md).
 
 Ordinary scale-down uses Azure Delete operations. This source tree does not
-add stopped-VM reuse or AKS deallocate-mode behavior.
+add stopped-VM reuse or the AKS deallocate mode.
 
 ## Module and package boundaries
 
@@ -58,21 +58,20 @@ Delete request. Mock success is not proof of physical deletion.
 [`azure_compatibility_test.go`](../charts/azure_compatibility_test.go) compares
 six complete resource sets with frozen upstream renders. An empty render
 cannot pass because a Deployment is required. The VPA-enabled fixture must
-also contain a VerticalPodAutoscaler. Two asserted expected-side exceptions
-are the managed-identity existing-Secret reference correction and the
-top-level resource `metadata.labels["helm.sh/chart"]` transition from
+also contain a VerticalPodAutoscaler. The test allows two differences, which
+are the managed identity existing Secret correction and the top-level
+`metadata.labels["helm.sh/chart"]` label change from
 `cluster-autoscaler-9.59.0` to `cluster-autoscaler-9.59.1`. Selectors, pod
-labels, other labels and functional fields remain compared without broader
-normalization, as described in the
-[oracle provenance](../charts/testdata/azure-compatibility/README.md).
+labels, other labels and functional fields are still compared, as described
+in the [saved renders README](../charts/testdata/azure-compatibility/README.md).
 
 ## Build metadata
 
 The root [Makefile](../Makefile) shares one linker version setting between
 binary and image builds: exact tag, otherwise SHA, otherwise `dev`. Automatic
 Git versions add `-dirty` for unstaged tracked changes. Staged-only and untracked
-changes do not add it, matching upstream behavior rather than defining a
-stronger source-attestation policy. Explicit `VERSION` is used verbatim.
+changes do not add it, which matches upstream. Explicit `VERSION` is used
+verbatim.
 [`version_test.go`](../version/version_test.go) checks this in isolated Git
 repositories.
 

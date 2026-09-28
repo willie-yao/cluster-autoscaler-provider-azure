@@ -1,14 +1,16 @@
-# Azure chart compatibility oracle
+# Saved upstream chart renders
 
 The `*.upstream.yaml` files are unmodified Helm renders of
 `kubernetes/autoscaler@c85f5afed954f7ecdbfb9091da2202426806d8d8`, from
 `cluster-autoscaler/charts/cluster-autoscaler`. They were produced with Helm
-`v4.0.4`, release `migration`, namespace `kube-system`, and rendering capability
-`1.37.0-rc.1`. This capability is not live Kubernetes acceptance.
+`v4.0.4`, release `migration`, namespace `kube-system`, and
+`--kube-version 1.37.0-rc.1`. The `--kube-version` value only sets the version
+that `helm template` renders for. It does not mean the chart was tested on that
+Kubernetes version.
 
 All credentials are synthetic. `common.yaml` selects Azure and supplies the same
-explicit image to both charts. The repository's placeholder default image is an
-intentional difference, not a release identity.
+explicit image to both charts. The repository's default image is a placeholder,
+which is an intended difference.
 
 | Fixture | Coverage |
 | --- | --- |
@@ -30,11 +32,11 @@ There are two field-level exceptions. Upstream's managed-identity
 The test first asserts upstream's exact value and then expects the corrected
 Secret name. The chart version bump from `9.59.0` to `9.59.1` changes
 `metadata.labels["helm.sh/chart"]` from `cluster-autoscaler-9.59.0` to
-`cluster-autoscaler-9.59.1`. The test asserts the frozen upstream label before
-normalizing only that expected-side resource metadata label; selectors, pod
-labels, and every other resource field remain compared.
+`cluster-autoscaler-9.59.1`. The test checks the saved upstream label and then
+changes only that label in the saved upstream resources. Selectors, pod labels,
+and every other resource field are still compared.
 
-## Audit without updating the oracle
+## Check the saved renders against upstream
 
 From the repository root, with the pinned upstream Git object available:
 
@@ -55,5 +57,5 @@ shasum -a 256 -c charts/testdata/azure-compatibility/SHA256SUMS
 
 The reference directory is temporary and can be removed after inspection. If
 Git does not contain the pin, obtain that exact upstream source separately.
-Do not overwrite the oracles with local chart output or refresh them merely to
-make a compatibility failure pass.
+Do not overwrite the saved renders with local chart output, or refresh them only
+to make a failing comparison pass.

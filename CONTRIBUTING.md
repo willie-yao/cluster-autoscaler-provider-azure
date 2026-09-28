@@ -14,6 +14,11 @@ regression at the closest existing test boundary. Follow nearby Go conventions
 and preserve source attribution and license headers. Use the existing module
 pins unless a dependency change is part of the proposal.
 
+Coding conventions and standards are explained in the official
+[developer docs](https://github.com/kubernetes/community/tree/master/contributors/devel).
+Expect reviewers to request that you avoid common
+[go style mistakes](https://go.dev/wiki/CodeReviewComments) in your PRs.
+
 From the repository root:
 
 ```sh
@@ -23,8 +28,7 @@ make test-chart
 git diff --check
 ```
 
-On macOS, use `make test-ci GOOS=darwin`. Start with a targeted test while
-iterating, then run the applicable checks before requesting review. The
+Start with a targeted test while iterating, then run the applicable checks before requesting review. The
 [testing guide](docs/testing.md) explains which targets enter nested modules.
 A root `go test ./...` does not test nested modules.
 
@@ -35,10 +39,12 @@ with the extracted core.
 
 ## Chart changes
 
-Chart changes must pass `make test-chart`. The frozen upstream YAML is an
-independent oracle, not output to regenerate from the chart under test. Explain
+Chart changes must pass `make test-chart`. The saved upstream renders are the
+expected output, so don't regenerate them from the chart under test. Explain
 intentional compatibility changes and preserve the
 [fixture provenance](charts/testdata/azure-compatibility/README.md).
+If you change `values.yaml` or `README.md.gotmpl`, run
+[helm-docs](https://github.com/norwoodj/helm-docs) to update the chart README.
 Chart/app version changes are separate release decisions; the existing PR
 chart-version check is not waived by a local test pass.
 

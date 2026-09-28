@@ -14,6 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+// Package router registers the Azure cloud provider.
 package router
 
 import (

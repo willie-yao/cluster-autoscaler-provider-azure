@@ -24,12 +24,12 @@ dependency-maintenance tooling is retained.
 ## Compatibility scope
 
 The provider follows ordinary upstream Azure Delete-mode behavior. It does not
-implement AKS deallocate-mode behavior or claim parity with the
+implement the AKS deallocate mode, and it does not try to match the
 [`Azure/autoscaler` fork](https://github.com/Azure/autoscaler).
 
 Azure-only registration, image placeholders and the managed-identity
 existing-Secret correction are intentional differences from the upstream
-application. The [chart oracle](../charts/testdata/azure-compatibility/README.md)
-records the precise packaging comparison and attribution.
+application. The [saved renders README](../charts/testdata/azure-compatibility/README.md)
+records the chart comparison and attribution.
 
 For local checks and validation boundaries, see [testing](testing.md).

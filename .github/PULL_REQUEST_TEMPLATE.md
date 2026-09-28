@@ -1,23 +1,69 @@
-## Summary
+#### What type of PR is this?
 
-<!-- Describe the problem, intended behavior and why this change is needed. -->
+<!--
+Add one of the following kinds:
+/kind bug
+/kind cleanup
+/kind documentation
+/kind feature
 
-## Related issues
+Optionally add one or more of the following kinds if applicable:
+/kind api-change
+/kind deprecation
+/kind failing-test
+/kind flake
+/kind regression
+-->
 
-<!-- Link relevant issues. Use "Fixes #123" only when this PR resolves the issue. -->
+#### What this PR does / why we need it:
 
-## Compatibility and user impact
+#### Which issue(s) this PR fixes:
+<!--
+*Automatically closes linked issue when PR is merged.
+Usage: `Fixes #<issue number>`, or `Fixes (paste link of issue)`.
+_If PR is about `failing-tests or flakes`, please post the related issues/tests in a comment and do not use `Fixes`_*
+-->
+Fixes #
 
-<!-- Note changes to configuration, chart output, APIs or scaling behavior.
-Write "None" if there is no user-facing change. Include any required action. -->
+#### Special notes for your reviewer:
 
-## Validation
+#### Does this PR introduce a user-facing change?
+<!--
+If no, just write "NONE" in the release-note block below.
+If yes, a release note is required:
+Enter your extended release note in the block below. If the PR requires additional action from users switching to the new release, include the string "action required".
 
-<!-- List the checks run and their results, plus untested boundaries.
-For live E2Es, identify test-source and runtime-image checkpoints separately.
-Do not include credentials, private environment bindings or sensitive logs. -->
+For more information on release notes see: https://git.k8s.io/community/contributors/guide/release-notes.md
+-->
+```release-note
 
-## Documentation
+```
 
-<!-- Link updated usage or design docs. Use immutable links for historical
-evidence. Confirm affected fixtures and documentation links remain accurate. -->
+#### Additional documentation e.g., KEPs (Kubernetes Enhancement Proposals), usage docs, etc.:
+
+<!--
+This section can be blank if this pull request does not require a release note.
+
+When adding links which point to resources within git repositories, like
+KEPs or supporting documentation, please reference a specific commit and avoid
+linking directly to the master branch. This ensures that links reference a
+specific point in time, rather than a document that may change over time.
+
+See here for guidance on getting permanent links to files: https://help.github.com/en/articles/getting-permanent-links-to-files
+
+Please use the following format for linking documentation:
+- [KEP]: <link>
+- [Usage]: <link>
+- [Other doc]: <link>
+-->
+```docs
+
+```
+
+#### How was this PR tested?
+
+<!--
+List the checks you ran and their results, and say what you did not test.
+For live E2E runs, give the commit of the test source, and the source commit and digest of the image you ran.
+Do not include credentials, private environment details or sensitive logs.
+-->

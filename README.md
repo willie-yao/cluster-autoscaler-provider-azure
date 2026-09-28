@@ -9,7 +9,7 @@ The executable lives at the repository root and registers only Azure.
 `--cloud-provider` defaults to `azure`. The autoscaling algorithm comes from
 the pinned [extracted core](https://github.com/kubernetes-sigs/cluster-autoscaler);
 this repository owns the application wiring, Azure adapter, chart and tests.
-It does not implement AKS deallocate-mode parity.
+It does not implement the AKS deallocate mode.
 
 ## Build and image configuration
 
@@ -30,9 +30,9 @@ make image IMAGE=cluster-autoscaler-azure TAG=dev
 ```
 
 Set `IMAGE` and `TAG` for the image name you intend to use. Automatic build
-versions use an exact Git tag, otherwise the commit SHA, with upstream's
-`-dirty` suffix for unstaged tracked changes. Explicit `VERSION` overrides are
-used verbatim. See [build metadata](docs/architecture.md#build-metadata).
+versions use an exact Git tag, otherwise the commit SHA, with a `-dirty`
+suffix when tracked files have unstaged changes. Explicit `VERSION` overrides
+are used verbatim. See [build metadata](docs/architecture.md#build-metadata).
 
 Deployment examples use placeholders. Supply an image built from the source
 you intend to run and made available to your cluster.
@@ -67,13 +67,12 @@ Pod's resources and require a separately installed VPA controller and CRDs.
 ## Development
 
 ```sh
-make test-azure                 # Azure unit and boundary tests
-make test-ci                    # Root, local API and pinned-core Go checks
+make test-azure                 # Azure provider tests
+make test-ci                    # Root and pinned-core Go checks
 make test-chart                 # Requires Helm
 ```
 
-On macOS, run `make test-ci GOOS=darwin`. Race-enabled tests need a working C
-toolchain. The Azure E2E module is separate from these local checks;
+Race-enabled tests need a working C toolchain. The Azure E2E module is separate from these local checks;
 live E2Es require separate authorization and a disposable environment.
 
 Start with [CONTRIBUTING.md](CONTRIBUTING.md),
