@@ -53,6 +53,12 @@ namespace=${CLUSTER_AUTOSCALER_NAMESPACE:-default}
 account=${CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME:-cluster-autoscaler}
 [[ $namespace =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ && $account =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
     fail "The autoscaler namespace and service account must be DNS labels"
+# workload uses the template's workload identity. kubelet uses the AKS kubelet
+# identity through IMDS, for subscriptions that don't allow federated
+# credentials; the template then needs no identity resources.
+identity=${CLUSTER_AUTOSCALER_IDENTITY:-workload}
+[[ $identity = workload || $identity = kubelet ]] ||
+    fail "CLUSTER_AUTOSCALER_IDENTITY must be workload or kubelet"
 mkdir -p "$ARTIFACTS"
 artifacts=$(cd "$ARTIFACTS" && pwd)
 management=${MANAGEMENT_KUBECONFIG:-$(dirname "$KUBECONFIG")/${KIND_CLUSTER_NAME:-capz}.kubeconfig}
@@ -64,17 +70,31 @@ management=${MANAGEMENT_KUBECONFIG:-$(dirname "$KUBECONFIG")/${KIND_CLUSTER_NAME
 mgmt() { kubectl --kubeconfig "$management" -n default "$@"; }
 mgmt get cluster "$CLUSTER_NAME" -o json |
     jq -e --arg name "$CLUSTER_NAME" '.metadata.name == $name' >/dev/null
-mgmt wait --for=condition=Ready --timeout=15m \
-    "managedclusters.containerservice.azure.com/$CLUSTER_NAME" \
-    "userassignedidentities.managedidentity.azure.com/$CLUSTER_NAME" \
-    "federatedidentitycredentials.managedidentity.azure.com/$CLUSTER_NAME" \
-    "roleassignments.authorization.azure.com/$CLUSTER_NAME"
+resources=("managedclusters.containerservice.azure.com/$CLUSTER_NAME")
+if [[ $identity = workload ]]; then
+    resources+=("userassignedidentities.managedidentity.azure.com/$CLUSTER_NAME"
+        "federatedidentitycredentials.managedidentity.azure.com/$CLUSTER_NAME"
+        "roleassignments.authorization.azure.com/$CLUSTER_NAME")
+fi
+mgmt wait --for=condition=Ready --timeout=15m "${resources[@]}"
 group=$(mgmt get "managedclusters.containerservice.azure.com/$CLUSTER_NAME" -o json |
     jq -er '.status.nodeResourceGroup // empty')
 [[ ${group,,} = "mc_${CLUSTER_NAME}_${CLUSTER_NAME}_${AZURE_LOCATION,,}" ]] ||
     fail "Unexpected AKS node resource group: $group"
-client_id=$(mgmt get "userassignedidentities.managedidentity.azure.com/$CLUSTER_NAME" -o json |
-    jq -er '.status.clientId // empty')
+if [[ $identity = workload ]]; then
+    client_id=$(mgmt get "userassignedidentities.managedidentity.azure.com/$CLUSTER_NAME" -o json |
+        jq -er '.status.clientId // empty')
+else
+    kubelet=$(mgmt get "managedclusters.containerservice.azure.com/$CLUSTER_NAME" -o json |
+        jq -ec '.status.identityProfile.kubeletidentity | select(.clientId and .objectId)') ||
+        fail "The AKS cluster has no kubelet identity"
+    client_id=$(jq -r .clientId <<< "$kubelet")
+    # Give the kubelet identity the role that the template gives the workload
+    # identity.
+    az role assignment create --assignee-object-id "$(jq -r .objectId <<< "$kubelet")" \
+        --assignee-principal-type ServicePrincipal --role Contributor \
+        --scope "/subscriptions/$AZURE_SUBSCRIPTION_ID/resourceGroups/$group" -o none
+fi
 # Only the taint shard's template gives the zero pool the run taint and its
 # node-template tag. AZ-P1-003 and the other zero-pool cases need neither.
 zero_taint=
@@ -325,7 +345,7 @@ preemptionPolicy: PreemptLowerPriority
 EOF
 done
 
-# Match the upstream Helm values: workload identity and label discovery.
+# Match the upstream Helm values: workload identity by default and label discovery.
 release=cluster-autoscaler
 deployment=$release-azure-cluster-autoscaler
 etag=false
@@ -334,16 +354,9 @@ if [[ $prepare = etag ]]; then
 fi
 tmp_dir=$(mktemp -d)
 trap 'rm -f "$tmp_dir/values.yaml" "$tmp_dir/ca.yaml"; rmdir "$tmp_dir"' EXIT
-cat > "$tmp_dir/values.yaml" <<EOF
-autoDiscovery:
-  clusterName: $CLUSTER_NAME
-azureTenantID: $AZURE_TENANT_ID
-azureSubscriptionID: $AZURE_SUBSCRIPTION_ID
-azureResourceGroup: $group
+if [[ $identity = workload ]]; then
+    cat > "$tmp_dir/values.yaml" <<EOF
 azureUseWorkloadIdentityExtension: true
-azureVMType: vmss
-azureEnableForceDelete: false
-azureEnableVMSSEtag: $etag
 podLabels:
   azure.workload.identity/use: "true"
 rbac:
@@ -352,6 +365,25 @@ rbac:
     annotations:
       azure.workload.identity/tenant-id: $AZURE_TENANT_ID
       azure.workload.identity/client-id: $client_id
+EOF
+else
+    cat > "$tmp_dir/values.yaml" <<EOF
+azureUseManagedIdentityExtension: true
+azureUserAssignedIdentityID: $client_id
+rbac:
+  serviceAccount:
+    name: $account
+EOF
+fi
+cat >> "$tmp_dir/values.yaml" <<EOF
+autoDiscovery:
+  clusterName: $CLUSTER_NAME
+azureTenantID: $AZURE_TENANT_ID
+azureSubscriptionID: $AZURE_SUBSCRIPTION_ID
+azureResourceGroup: $group
+azureVMType: vmss
+azureEnableForceDelete: false
+azureEnableVMSSEtag: $etag
 replicaCount: 1
 image:
   repository: $IMAGE
