@@ -20,5 +20,20 @@
   "zeroLabel": "zero",
   "demandCPU": "1200m",
   "workloadImage": "REPLACE-WITH-PINNED-BUSYBOX-IMAGE",
-  "diskStorageClass": ""
+  "diskStorageClass": "",
+  "phase": "",
+  "balancePoolA": "",
+  "balancePoolB": "",
+  "balanceLabel": "",
+  "spotPool": "",
+  "spotLabel": "",
+  "scalePool": "",
+  "scaleLabel": "",
+  "failurePool": "",
+  "failureLabel": "",
+  "maxNodeProvisionTime": "",
+  "evictSpot": false,
+  "missingPool": "",
+  "deleteMissingPool": false,
+  "skipLocalStorage": null
 }

@@ -11,6 +11,11 @@ cluster through ASO, as the upstream `kubernetes/autoscaler` Azure job does,
 and [hack/ci-e2e.sh](hack/ci-e2e.sh) deploys the autoscaler and runs one shard of
 the default specs. See [CAPZ Prow jobs](#capz-prow-jobs).
 
+The nine phased cases need VMSS that AKS can't build. For them,
+[hack/fixture.sh](hack/fixture.sh) builds the self-managed VMSS fixture, a VMSS
+Uniform cluster with its own control plane VM. See
+[Manual VMSS fixture](#manual-vmss-fixture).
+
 The default fixture is Linux VMSS Uniform with main min/max `1/2`,
 zero min/max `0/1`, and one control plane outside both groups. The CAPZ Prow
 jobs use the same two pools on AKS, where a one-node AKS System pool takes the
@@ -31,6 +36,13 @@ bound breach, but the lower bound is checked only after the list is complete.
 Ordinary read failures and convergence remain retryable in positive waits.
 These sampled guards are not a hard spending interlock: the operator still
 owns independent budget monitoring and cleanup.
+
+Nine additional cases run in `suites/scalephase` with
+`TEST_SUITE=scalephase`. The large-pool case alone has higher limits:
+55 VMs and 60 vCPUs. All other cases remain at four VMs and eight
+vCPUs. The 29 default `scaleup` cases keep their two-pool fixture.
+Do not select a default case while the pools or controller flags are set
+for a phase.
 
 ## Local validation
 
@@ -197,9 +209,26 @@ the read. The binding names the System VMSS in `systemPool` and omits
 `controlPlaneID`. Omit `resourceGroupMode` for the strict operator fixture
 described below.
 
+AKS mode can't bind a `phase`, so the nine phased cases skip when an AKS
+binding selects them. They need custom VMSS that only `fixture.sh` builds,
+and they stay manual on that fixture:
+
+| Case | Phase |
+| --- | --- |
+| `AZ-P1-007` | `balance` |
+| `AZ-P1-008` | `no-join` |
+| `AZ-P1-009` | `minimum` |
+| `AZ-P1-010` | `spot` |
+| `AZ-P1-011` | `large` |
+| `AZ-P1-012` | `cse` |
+| `AZ-P1-013` | `spot-eviction` |
+| `AZ-P1-014` | `missing-vmss` |
+| `AZ-P1-015` | `local-storage` |
+
 No default case depends on the control plane VM, so no default case skips in
 AKS mode. Six of them need extra preparation, which `E2E_PREPARE` selects, as
-the shard list below shows.
+the shard list below shows. The plain `test-e2e` target also rejects
+`TEST_SUITE=scalephase`, so it can't run a phased case against the AKS pools.
 
 The presubmit runs `smoke` (`AZ-P1-001` to `AZ-P1-003`), three cases. The two
 scaling cases can each take up to 50 and 40 minutes, so an hour is a target,
@@ -242,7 +271,9 @@ Without `E2E_PREPARE`, the marker has `allow-kube-system-fixture: CA-011` for
 shard E. The marker for `etag` and `taint` has no fixture key. The `Slow`
 label marks longer cases, and the upstream `Feature:ClusterSizeAutoscalingScaleUp`
 and `Feature:ClusterSizeAutoscalingScaleDown` labels mark the matching `CA-`
-cases. The proposed job YAML is
+cases. The nine `scalephase` filters are `balance`, `no-join`, `minimum`,
+`spot`, `large`, `cse`, `spot-eviction`, `missing-vmss` and `local-storage`.
+Each selects one case on its own `fixture.sh` phase. The proposed job YAML is
 kept outside the repo until the repo owner, Prow org, registry and CI image are
 chosen.
 
@@ -252,6 +283,164 @@ Outside Prow, prepare the fixture and deploy Cluster Autoscaler
 separately according to the [operator contract](#operator-contract), then run
 [focused cases](#focused-execution) with `ENVIRONMENT` pointing to the
 [JSON binding](environment.example.json).
+
+### Manual VMSS fixture
+
+The script [hack/fixture.sh](hack/fixture.sh) builds the self-managed VMSS
+fixture by hand. Use it for the nine phased cases. It can also prepare
+filters G to J outside Prow. The script owns only the named run's
+Azure groups and the Kubernetes cluster it creates. The Go tests still read
+Azure; they do not call the script or gain Azure write access. Copy
+[hack/fixture.env.example](hack/fixture.env.example) to a private path and
+give each run a new `RUN_ID`, `PREFIX` and absolute private directory.
+Set a cleanup deadline no more than 12 hours after the first creation.
+Do not reuse an env file, image tag or cloud group from an earlier run.
+Use literal `KEY=value` lines with no shell expansion or secrets. The
+script rejects unknown keys and does not execute the env file.
+
+The script needs Bash, `az` with the `bastion` extension, `kubectl`, `helm`,
+`jq`, `yq`, `ssh`, `scp`, `ssh-keygen`, `curl`, `lsof`, `nc`, `shasum` and
+`docker`, plus `shellcheck` for local linting. Every command except `down`
+reads the operator's public address from `https://api.ipify.org`. The script
+accepts only `LOCATION=westus2` and `ZONE=1`, and `PREFIX` must be at most 8
+lowercase letters and digits. The control-plane image has
+`kubeadm` and `containerd`; local `kubeadm` is not required. Supply a
+Calico VXLAN v3.32.2 manifest and its SHA-256, the pinned
+cloud-provider-azure 1.36.0 chart archive, and the Azure Disk CSI
+1.36.0 chart archive for the disk case. The Calico manifest must set
+`CALICO_IPV4POOL_VXLAN=Always` and `CALICO_IPV4POOL_IPIP=Never` on the
+`calico-node` container. With `CrossSubnet`, Calico sends traffic between
+workers in the same Azure subnet without VXLAN. Azure cannot route their
+Pod ranges that way. A manifest that uses `CrossSubnet` fails the setup check. Make a
+separate `Always` copy, pin its own SHA-256 in the env file, and keep
+the source manifest unchanged. The script checks the Calico modes and
+digest before installing the manifest. It uses the pinned
+CCM, node manager and DRA images listed below. It stores bootstrap
+tokens, cloud-init, the candidate image archive and kubeconfig only
+under `PRIVATE_DIR`, with restricted permissions. The control-plane VM
+also keeps a copy of `admin.conf`, `azure.json` and `kubeadm-init.yaml` in
+`/home/azureuser`, and the VM is deleted with the infra group. It never reads VMSS
+`customData` back from Azure because GET responses redact it.
+Azure Policy may create a VM extension that cannot take ordinary Azure
+tags. The script checks the extension's tagged parent and removes the
+extension with the infra group.
+Organization policy may also add inbound NSG rules and other resources
+to the run's groups. Set `POLICY_NAME_PREFIX` in the env file to the name
+prefix that the policy uses. The fixture then accepts inbound rules whose
+names start with that prefix, whatever source or ports the policy sets,
+and records their full list in `policy-nsg-rules.json` under the run's
+report directory. It also tags resources with that prefix in the run's
+groups and removes them with the groups. When the prefix is empty, the
+fixture accepts no policy rules or resources. It still requires the
+operator `/32` rule on TCP 22 and 6443. Any other external inbound Allow
+rule fails. VNet internal Allows are permitted. Review the recorded
+policy rules before reporting the run. Run
+`bash cloudprovider/azure/test/hack/fixture_test.sh` to check these
+decisions without contacting Azure.
+
+Use `fixture.sh RUN.env check` before building or writing cloud
+resources. `image` builds and saves the exact candidate image.
+`infra` creates the groups, network, routes, identities, control plane
+and Bastion. Before its first Azure write, it creates a run-specific
+SSH key in the private directory. It checks that key on reruns.
+Start `tunnel ssh` and `tunnel api` in two attached
+terminals, then run `up` to finish Kubernetes, addons, pools and the
+binding. `up`, `infra`, `cluster` and `pools` check existing run
+resources and can be rerun when their own step fails. After worker
+setup, `up` and `pools` start two run-owned Pods and test HTTP between
+their Pod IPs in both directions. A phase setup repeats the check.
+With two Ready workers, the Pods run on different workers. With one
+Ready worker, they run on that worker and the control plane. The
+worker-to-control-plane check does not prove traffic between workers.
+On the default fixture, the Calico mode check covers traffic between
+workers in the same subnet.
+The script removes the probe Pods and namespace after each check,
+including when the check fails. Never run two
+fixture-changing steps at once. A partial Kubernetes bootstrap can
+be diagnosed on the run-owned control plane. Do not reset another
+cluster to retry it. The first SSH contact saves the host key through
+the tag-checked Bastion tunnel. Later contacts reject a changed key.
+
+```sh
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env check
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env image
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env infra
+# In separate attached terminals:
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env tunnel ssh
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env tunnel api
+# Then, from another terminal:
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env up
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env ca-deploy
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env ca-start
+bash cloudprovider/azure/test/hack/fixture.sh /absolute/private/RUN.env watch
+```
+
+Keep `watch` attached during each run. It reads requested and actual
+VMSS sizes, core counts, elapsed cost and the run deadline. The
+controller flags and VMSS limits are separate safety bounds. A
+watch process cannot undo an Azure write, so stop CA and clean up
+if it reports a breach. The script refuses a new case after
+`STOP_NEW_HOURS` or if its estimated cost plus cleanup reserve
+exceeds `RUN_BUDGET_USD` or USD 30 across runs. Write the budget
+values as plain numbers, such as `14` or `2.50`. Set Run A's
+budget to USD 14, with USD 3 reserved for cleanup. For Run B,
+set USD 16, include Run A's recorded estimate as
+`PAST_RUN_COST_USD`, reserve another USD 3 and stop new cases
+after seven hours. Do not treat a case's Ginkgo timeout as
+authorization to run through the cleanup deadline.
+
+Run each case with `fixture.sh RUN.env run CASE-ID`; it writes a
+separate JUnit, JSON and stdout report under `REPORT_DIR`.
+Set a new `RUN_ATTEMPT` name before a permitted retry, so earlier
+evidence remains intact. The `phase` command pauses CA, rejects an
+active test namespace, checks that optional workers and NICs have
+returned to zero, then changes only the owned fixture. Run
+`ca-deploy` after each phase. Use `ca-start` before ordinary phase
+cases. Balance, large and minimum cases start paused: run their
+single case in one terminal and call `signal start` from another
+terminal only after its `start-controller` signal appears.
+The missing-VMSS and Spot eviction cases also publish run-owned
+signals. Call `signal missing` or `signal spot` only after that
+signal; the script checks the exact Azure ID, run tags and target
+state before the write. The Spot eviction case starts CA just
+before its focused runner to avoid losing the idle worker first.
+
+Run A uses `phase default` for the ordinary 23 cases, including
+`CA-011` after the marker is set. Use `phase etag` for
+`AZ-SUP-ETAG`, `phase taint` for `AZ-P1-005`,
+`phase disk` and `disk up` for `AZ-P1-006`, then
+`phase dra` and `dra up` for `CA-020` to `CA-022`.
+These steps keep the existing default E2E specs unchanged.
+The disk step checks the run-owned StorageClass and CSI
+controller; the DRA step checks four devices on the worker.
+Remove those addons with `disk down` and `dra down` after their
+cases. Keep the remaining default tests before the optional
+taint and DRA profiles.
+
+Run B starts from a separate `up` and runs `phase balance`,
+`no-join`, `spot`, `cse`, `spot-eviction`, `missing-vmss`,
+`local-storage-true`, `local-storage-false`, `large` and
+`minimum`. Run `AZ-P1-015` once for each local-storage
+setting. The minimum case runs last because it leaves two
+main workers. `phase large` checks regional and B-series quota
+before creating a B1ms worker, and `signal start` checks quota
+again before scaling toward 50. The worker subnet has room for
+50 VMs and the Pod CIDR remains `192.168.0.0/16`.
+
+After each run, call `down`, even if a case failed. It stops CA,
+deletes only run-owned test namespaces, revokes the cluster's
+bootstrap tokens, removes the three saved role assignments,
+deletes the worker group first and verifies it is absent, then
+deletes and verifies the infra group. It searches for remaining
+run tags and resource names, closes its saved Bastion tunnels
+and checks that their local ports are free, then removes only
+its run-owned private files and image.
+If the Kubernetes API is unavailable, `down` still removes verified
+run-owned Azure groups, then reports that in-cluster cleanup could
+not be checked. A failed namespace cleanup does not keep Azure VMs
+running.
+Keep non-secret reports and the cost estimate in `REPORT_DIR`.
+Start Run B only after Run A's `down` reports verified cleanup.
 
 The following Make targets are retained for a separate legacy AKS development
 workflow. They are not preparation or validation steps for the current
@@ -279,6 +468,10 @@ and optionally the named control-plane VM. Other infrastructure is not deleted
 or inventoried by these tests. The AKS mode described under
 [CAPZ Prow jobs](#capz-prow-jobs) uses the AKS System pool instead of the
 control plane VM.
+The balance phase requires exactly the main, zero and two named
+balance VMSS in that group. Spot, large, failed extension and
+missing-VMSS phases each require main, zero and one named
+optional VMSS. The local-storage phase uses only main and zero.
 
 Both VMSS must have `cluster-autoscaler-name=<discoveryValue>`, and `min`/`max`
 tags matching `1`/`2` and `0`/`1`. The autoscaler must use exactly:
@@ -299,6 +492,7 @@ Every negative observation of no-growth, PDB blocking, workload retention,
 scheduler suppression or the maximum-capacity refusal rechecks the same
 controller Pod, lease, status, image and scope contract. Losing the controller
 or observing stale leadership/status fails that negative window.
+In the balance phase, the controller status must list exactly four groups.
 
 Both the Deployment template and its running autoscaler container must contain
 exactly one literal `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` matching the
@@ -332,6 +526,22 @@ Supply a non-secret JSON file based on [environment.example.json](environment.ex
 The base fields are required, unknown fields fail, and kubeconfig must be absolute.
 Set `diskStorageClass` to the name of the prepared class for `AZ-P1-006`.
 It may be empty for other cases.
+For a phased case, use a separate copy of the binding and set `phase` to
+`balance`, `no-join`, `minimum`, `spot`, `large`, `cse`,
+`spot-eviction`, `missing-vmss` or `local-storage`.
+The balance phase also requires
+`balancePoolA`, `balancePoolB`, and `balanceLabel`. Omit these three fields
+or leave them empty in the other phases. Spot requires `spotPool` and
+`spotLabel`. Large requires `scalePool` and `scaleLabel`. Omit those fields
+or leave them empty outside their phase. A `cse` binding requires `failurePool`, `failureLabel`
+and `maxNodeProvisionTime: "15m"`. A `spot-eviction`
+binding requires the Spot pool fields and `evictSpot: true`.
+A `missing-vmss` binding requires `missingPool` and
+`deleteMissingPool: true`. A `local-storage` binding requires
+`skipLocalStorage` true or false. Each other phase must omit
+those fields. Use an operator-measured `demandCPU` for one Pod per B1ms worker
+in the large phase. A missing phase skips the new cases. A wrong marker
+or controller setting fails the selected case.
 Do not commit the real kubeconfig, credentials, bootstrap material or private
 keys. Azure observations use the existing SDK's `DefaultAzureCredential`.
 Azure errors retain HTTP status/code but omit response bodies that might
@@ -353,7 +563,262 @@ Do not print credential values or change global shell/CI authentication.
 This is an operator-process option, not a requirement to use CLI credentials
 in all environments. It does not change the application's managed identity.
 
-The workload image must provide `sh`, `sleep` and `printf`. Pin its digest. The
+### Phased fixtures
+
+Run phased cases separately on a fresh, owned fixture. Stop the
+single autoscaler before changing pool tags or its Deployment. Wait until
+the old Pod is gone, then check the next phase's pools and flags. The runner
+does not change Azure pools or restart the controller. It creates only
+namespaced test objects and reads Azure and Kubernetes state. Keep one
+control plane and use zone 1. Main and Spot workers use
+`Standard_D2s_v5`. The large phase uses `Standard_B1ms` for its
+own pool. Stop any ordinary phase if it exceeds four actual VMs
+or eight vCPUs. The large phase alone stops above 55 VMs or
+60 vCPUs.
+
+For `AZ-P1-007`, set main to `1/1` and zero to `0/0`. Add two run-tagged
+VMSS named by `balancePoolA` and `balancePoolB` in the worker resource
+group. Give both `min=0`, `max=2`, and matching SKU, image, zone,
+join setup and node-template scheduling tags. Both future Nodes
+must get `<poolLabel>=<balanceLabel>` from their kubelet setup.
+Set the same value on each VMSS tag
+`k8s.io_cluster-autoscaler_node-template_label_<poolLabel>`.
+The controller must discover all four groups and use
+`--balance-similar-node-groups=true`, `--balancing-label=<poolLabel>`,
+`--max-nodes-total=4`, `--parallel-scale-up=false`, `--salvo-scale-up=false`,
+and `--v=1` with text logs. Keep ordinary bounded scale-down settings.
+The configured group maxima exceed four, so also monitor actual VM
+counts independently. Set `allow-balance-fixture: AZ-P1-007` in the
+operator marker. Prepare the Deployment with zero replicas. The case
+creates two unschedulable Pods and then creates `start-controller` in
+its test namespace. Start one controller replica only after that signal.
+The case checks one plan that adds one node to each pool, Ready Pods
+on both Nodes, and physical deletion back to zero. The runner compares
+returned image, zone, SKU and template tags. It cannot compare
+bootstrap data, so both workers joining and becoming Ready provides
+that check. Remove the extra
+VMSS and verify their deletion before the next phase.
+
+For `AZ-P1-008`, set main to `1/2` and zero to `0/1`. The zero VMSS
+must not include the join bootstrap. Give it the operator tag
+`autoscaler-e2e-no-join=<runID>`. Azure GET redacts `customData`,
+so the runner cannot read or verify the VMSS bootstrap content.
+The operator must check the template before starting the case.
+Do not use guest fault injection or RunCommand.
+Set `--max-node-provision-time=3m` on the running controller.
+Set `allow-no-join-fixture: AZ-P1-008` in the marker. The runner
+checks the operator tag, observes the VM in Running state without
+a Kubernetes Node during the provision window, checks the
+`DeleteUnregistered` event for that VM, and verifies its VM
+and NIC are gone. The runner then deletes its Pending workload
+and waits for every captured run-created VM and NIC to be gone
+at zero capacity. A replacement VM while demand remains is
+allowed. Azure may reuse a VMSS instance ID, so the runner
+tracks each VM using Azure's unique `VMID`. The pinned
+Delete-mode core doesn't count long-unregistered VMs as
+upcoming, and it checks for upcoming nodes before it checks
+the scale-up timeout. The scale-up timeout and the
+long-unregistered limit start about 2 seconds apart, so when
+both pass before the same loop, the core records the scale-up
+as a success, sets no backoff, and removes the VM later in
+that loop. This is
+[kubernetes-sigs/cluster-autoscaler#150](https://github.com/kubernetes-sigs/cluster-autoscaler/issues/150).
+This case does not cover backoff.
+
+For `AZ-P1-009`, set main's discovery tags to `min=2`, `max=2`,
+but leave its Azure capacity at one with one Ready worker. Keep zero
+at `0/1`. Prepare `--enforce-node-group-min-size=true` and `--v=1`,
+then stop the controller before the case starts. Set
+`allow-minimum-fixture: AZ-P1-009` in the marker. The case reads
+the below-minimum Azure capacity before it creates `start-controller`
+in its test namespace. Start one controller replica only after that
+signal. The case rejects unrelated Pending Pods and checks the
+controller's minimum-size scale-up plan. It then checks that the first
+worker remains, a second joins and both stay at the tagged minimum.
+Leave both workers in place until the operator's workers-first cleanup.
+
+For `AZ-P1-010`, keep main at `1/2` and zero at `0/0`.
+Create one run-tagged `spotPool` VMSS with `min=0`, `max=1`,
+`Standard_D2s_v5`, zone 1 and a node-template tag for
+`<poolLabel>=<spotLabel>`. Set its VM priority to `Spot`,
+eviction policy to `Delete`, maximum price to `-1`, and
+automatic Spot restore off. The `-1` setting limits the
+price to the on-demand VM price without price-based eviction.
+Capacity eviction can still happen. Use
+`--max-nodes-total=4` on the one controller. Set
+`allow-spot-fixture: AZ-P1-010` in the marker. The runner
+checks Spot settings, then requires one Ready Spot Node and
+one Ready Pod before removing demand. It records the
+VM resource ID, unique Azure VMID, Node UID and NIC IDs.
+It then requires a completed
+autoscaler scale-down event for that Node and physical
+removal of its VM, Node and NIC. A `ScaleDownFailed`
+event on the Spot Node fails the case. A VM replacement,
+a loss of Node readiness while demand remains, or a
+deletion without a matching autoscaler event also fails
+the case. The case is skipped instead only when the Node
+has a `SpotEviction` or `PreemptScheduled` event, which
+shows that Azure evicted the VM. The operator must check
+Azure eviction and resource-health records for the captured
+VM before reporting a pass or a failure. Scheduled eviction
+notices are best effort, so an observed eviction takes
+precedence over the test report. The script's cost
+estimate and `RUN_BUDGET_USD` apply to this phase as to
+the default fixture.
+
+For `AZ-P1-011`, keep main at `1/1` and zero at `0/0`.
+Create one `scalePool` VMSS with `min=0`, `max=50`,
+`Standard_B1ms`, zone 1 and a node-template tag for
+`<poolLabel>=<scaleLabel>`. Start it at one Ready worker
+while CA is paused. Measure that worker's free CPU after
+all addons are running. Set `demandCPU` high enough that
+two test Pods cannot fit together, but low enough that
+one fits. Use `--max-nodes-total=52`,
+`--max-node-provision-time=20m` and
+`--scan-interval=10s`. Set
+`allow-large-fixture: AZ-P1-011` in the marker.
+The runner creates five Pods, observes one Ready and
+four unschedulable, and signals `start-controller` in
+its test namespace. Start one CA replica only after
+the signal. The test adds five Pods per step to 50
+and checks 50 distinct Ready workers and Pods. It
+records their VM, Node and NIC IDs, then removes
+demand and checks physical deletion of
+all 50 VMs, Nodes and NICs as the pool returns to
+zero. The configured peak is 52 VMs and 54 vCPUs,
+within the large-phase cap. Use a worker subnet with
+at least 50 free IP addresses, a Pod CIDR large enough
+for 50 nodes and NAT capacity for image pulls.
+Recheck regional and B-series vCPU quota just before
+this phase. Select `TEST_TIMEOUT=5h` and enforce an
+operator deadline that leaves time for cleanup.
+If the case fails, stop CA and return this pool physically
+to zero before any other fixture change.
+While the large pool runs, the script adds USD 1 per
+hour to its USD 1.25 per hour estimate. For example, ten
+hours with the large pool and the default USD 3 cleanup
+reserve give an estimate of USD 25.50. Set
+`RUN_BUDGET_USD` high enough for this phase. The script
+still stops new cases above USD 30 across runs.
+
+For `AZ-P1-012`, use main `1/2`, zero `0/0` and a
+run-tagged `failurePool` VMSS at `0/1`, with D2s_v5
+in zone 1. Its node-template label is
+`<poolLabel>=<failureLabel>`. Keep the pool's
+join bootstrap absent. Install one unsuppressed
+`Microsoft.Azure.Extensions` `CustomScript`
+extension that exits with a nonzero status.
+The operator must check that the extension has
+no secrets in public settings or logs. Mark the
+VMSS `autoscaler-e2e-failing-extension=<runID>`.
+Run one focused invocation from a physical
+`1/0/0` baseline. Set `maxNodeProvisionTime: "15m"`
+in the binding and use the matching literal
+`--max-node-provision-time=15m` flag. Set the
+literal controller environment variables
+`AZURE_ENABLE_FAST_DELETE_ON_FAILED_PROVISIONING=false`
+and `AZURE_ENABLE_DETAILED_CSE_MESSAGE=false`.
+Also use `--scan-interval=10s`,
+`--max-nodes-total=4` and `--v=3`, and set
+`allow-cse-fixture: AZ-P1-012` in the marker.
+The longer provision time gives CustomScript
+time to fail before CA removes the unregistered
+VM. Azure reported a VM as Succeeded and Running
+while its CustomScript extension instance view
+reported failure. The test requires the same
+run-owned VM to stay in that state across at least
+four separate observations and four logged
+controller scans without a restart or panic.
+It checks unregistered-node deletion, physical
+VM and NIC removal, and independent main-pool
+growth. The reader retries this pool's Updating state
+for up to one minute before reporting an error.
+Other pools still require Succeeded state.
+The provider classifies the VM by its Succeeded
+state, so CA uses the unregistered cleanup path.
+The provider's failed-provisioning and fast-delete
+paths are not exercised. The case leaves fast
+delete off, and it does not test backoff.
+
+For `AZ-P1-013`, keep main `1/2`, zero `0/0`
+and a tagged Spot VMSS with `min=0`,
+`max=1`, initial capacity one and one
+Ready Node. Use the same Spot settings as
+`AZ-P1-010`: Delete eviction, max price `-1`
+and automatic restore off. Set the literal
+controller environment variable
+`AZURE_GET_VMSS_SIZE_REFRESH_PERIOD=5`
+and `--max-nodes-total=4`. Bind
+`evictSpot: true` and set
+`allow-spot-eviction-fixture: AZ-P1-013`
+in the marker. The test creates a Ready Pod
+on the exact Spot VM, records its Azure VMID,
+resource ID and Node UID, and creates
+`evict-spot-vm` in its run-owned namespace.
+Only then may the operator read the signal
+and run `az vmss simulate-eviction` for
+the exact instance ID. Before acting, the
+operator must read the VMSS and VM, verify
+their resource IDs, the VMSS's run ID,
+Spot priority and the VMID against the
+test report, and refuse a mismatch. The
+test does not use Azure write permission.
+It checks a lower VMSS target size, a
+replacement VMID, a new Ready Node and
+Pod, and physical return to zero after
+removing demand. The five-second size
+refresh setting is retained from this
+provider's config but marked deprecated
+there. The case does not prove a new
+nondeprecated refresh path.
+
+For `AZ-P1-014`, keep main `1/2`, zero
+`0/0` and an extra empty VMSS tagged
+`min=0`, `max=0`. Bind its exact name
+as `missingPool`, enable
+`deleteMissingPool: true` and set
+`allow-missing-vmss-fixture: AZ-P1-014`
+in the marker. The controller must first
+report all three groups. The test then
+creates `delete-missing-vmss` in its
+run-owned namespace. Only then may the
+operator read the signal and delete the
+exact empty VMSS. Before deleting it,
+the operator must verify the full Azure
+resource ID, `autoscaler-e2e-run=<runID>`,
+discovery tag, `min=0`, `max=0` and zero
+instances. The test never deletes a VMSS.
+It verifies the surviving main and zero
+groups, a fresh two-group controller status,
+the same Ready controller Pod without
+restarts or a panic, and main growth and
+physical scale-down for its own demand.
+The operator must not recreate the removed
+VMSS during this case.
+
+For `AZ-P1-015`, keep main `1/2` and zero
+`0/0`. Run two separate invocations
+with `phase: local-storage` and explicit
+`skipLocalStorage: true`, then `false`.
+Set `--skip-nodes-with-local-storage`
+to the matching literal value and
+`--max-nodes-total=4`, and keep the
+same run-owned marker
+`allow-local-storage-fixture: AZ-P1-015`.
+Stop and restart the single controller
+between phases after returning to main
+capacity one. The test puts an EmptyDir
+Pod on a newly grown main worker and
+protects the baseline main worker with
+a separate run-owned Pod. With true,
+it checks that the candidate is retained
+for five minutes. With false, it checks
+physical VM, Node and NIC deletion and
+that the Pod restarts on the survivor.
+The EmptyDir contents need not survive.
+
+The workload image must provide `sh`, `sleep`, `printf`, `httpd` and `wget`,
+because the fixture's network probe uses the same image. Pin its digest. The
 test Pods exit on SIGTERM, so deleting them does not wait for the grace
 period. The tests use
 idle containers with scheduling requests rather than consuming the requested
@@ -406,7 +871,9 @@ Public-source cases use their own `AZ-001` or `CA-NNN` label. See the
 The specs also carry the standard Kubernetes E2E labels. `Slow` marks cases
 that run longer than two minutes. `Feature:ClusterSizeAutoscalingScaleUp` and
 `Feature:ClusterSizeAutoscalingScaleDown` mark the matching `CA-` cases, as
-upstream does. `smoke` selects `AZ-P1-001` to `AZ-P1-003`.
+upstream does. `Disruptive` marks `AZ-P1-013` and `AZ-P1-014`, which evict a
+VM or delete a VMSS from outside the cluster. `smoke` selects `AZ-P1-001` to
+`AZ-P1-003`. Each `scalephase` case also has its phase name as a label.
 Public tests spanning three workers
 select only the two owned pools, so `B=1` grows to main/zero `2/1`, still within
 four VMs including the control plane.
@@ -496,6 +963,15 @@ finish deleting before the CSI driver finishes deleting its disks.
 | `AZ-P1-004` | Two protected Pods on separate workers, zero allowed disruptions blocks deletion for five minutes, one allowed disruption permits physical deletion and rescheduling while at least one replica remains Ready at each observation |
 | `AZ-P1-005` | A zero-pool VMSS tag blocks demand without a matching taint toleration for five minutes, then tolerated demand grows the pool and the tainted Node runs the Pod; physical return to zero |
 | `AZ-P1-006` | Main `1 -> 2 -> 1`, two Ready StatefulSet Pods use distinct Azure Disks, one Pod and its disk move to the survivor without losing the file, and VM/Node/NIC deletion is verified |
+| `AZ-P1-007` | One two-node plan splits across two similar zero pools, each grows to one Ready Node and runs a Pod, then both return to zero with physical deletion |
+| `AZ-P1-008` | A Running VM never registers, CA emits `DeleteUnregistered`, and the first and any replacement VMs and NICs are gone after the demand is removed |
+| `AZ-P1-009` | Main starts below its tagged minimum and grows from one to two without Pod demand |
+| `AZ-P1-010` | A VMSS tagged Spot grows from zero for a Ready Pod, then CA scales it down with a Node event and physical VM/Node/NIC deletion; an observed eviction is not a pass |
+| `AZ-P1-011` | A B1ms pool grows in five-node steps to 50 Ready nodes and Pods, then returns physically to zero with all VM/Node/NIC deletions checked |
+| `AZ-P1-012` | A Running VM with a failed CustomScript extension stays present across controller scans without a restart or panic, then is removed as unregistered while main still grows |
+| `AZ-P1-013` | A run-owned simulated Spot eviction lowers the pool target, then a new VM and Ready Pod replace the original before physical return to zero |
+| `AZ-P1-014` | An empty discovered VMSS is removed by the operator; the same controller keeps reporting status and scales main for demand |
+| `AZ-P1-015` | An EmptyDir Pod blocks scale-down with local-storage protection enabled; when disabled, its worker is removed and the Pod reschedules |
 | `AZ-SUP-ETAG` | `AZ-P1-002` semantics with operator-enabled `AZURE_ENABLE_VMSS_ETAG=true`; supplemental retained example, not a scenario at the selected public inventory pin |
 
 Physical deletion requires captured Azure VM instance IDs, their Kubernetes
@@ -516,6 +992,7 @@ test source, not the runtime or Kubernetes support baseline. Of its 23
 registrations, 22 active intents are implemented here. `CA-003` remains
 source-disabled/flaky and is not implemented. One disk case adapts a separate
 public source, and six supplemental cases bring the default suite to 29
+registered specs. Nine phased cases bring the full module to 38
 registered specs. Registration is not execution.
 
 | Cases | Maintained intent | Source file |
@@ -530,6 +1007,15 @@ registered specs. Registration is not execution.
 | `CA-020` through `CA-022` | Synthetic DRA growth, oversized claim refusal, deletion and reallocation | [dra_test.go](suites/scaleup/dra_test.go) |
 | `AZ-P1-005` | Zero-pool template taint blocks demand without a toleration and permits tolerated demand | [zero_taint_test.go](suites/scaleup/zero_taint_test.go) |
 | `AZ-P1-006` | Azure Disk StatefulSet Pods retain claims and data when a worker is deleted | [disk_test.go](suites/scaleup/disk_test.go) |
+| `AZ-P1-007` | Balance two similar zero pools with one two-node plan | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-008` | Delete an unregistered zero-pool VM after a provision timeout | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-009` | Grow a main pool that starts below its tagged minimum | [phase_test.go](suites/scalephase/phase_test.go) |
+| `AZ-P1-010` | Grow and remove a Spot VM without counting an observed eviction as a pass | [spot_test.go](suites/scalephase/spot_test.go) |
+| `AZ-P1-011` | Grow B1ms workers in steps of five to 50, then delete all of them | [large_test.go](suites/scalephase/large_test.go) |
+| `AZ-P1-012` | Observe a Running VM with a failed CustomScript extension across scans, then check physical removal and main growth | [cse_test.go](suites/scalephase/cse_test.go) |
+| `AZ-P1-013` | Replace one exact evicted Spot VM and Pod | [spot_eviction_test.go](suites/scalephase/spot_eviction_test.go) |
+| `AZ-P1-014` | Keep main scaling after an empty discovered VMSS is removed | [missing_vmss_test.go](suites/scalephase/missing_vmss_test.go) |
+| `AZ-P1-015` | Compare local-storage scale-down protection enabled and disabled | [local_storage_test.go](suites/scalephase/local_storage_test.go) |
 
 PDB cases establish placement and disruption allowance before their observation
 windows. Readiness is sampled, not an uninterrupted-availability guarantee.
