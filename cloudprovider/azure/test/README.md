@@ -121,8 +121,9 @@ which takes these steps:
    System pool. It also replaces the discovery flag and the Secret references
    for `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` with the literal values
    that the suite checks.
-8. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
-   runs Ginkgo with the selected label filter. Ginkgo writes
+8. It waits up to 5 minutes for the autoscaler's status ConfigMap to report
+   `Running`, writes a JSON binding with `resourceGroupMode: aks` in
+   `ARTIFACTS` and runs Ginkgo with the selected label filter. Ginkgo writes
    `junit.e2e_suite.1.xml` there.
 
 AKS keeps changing a new cluster for a while after CAPZ reports it Ready.

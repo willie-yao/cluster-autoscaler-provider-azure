@@ -448,6 +448,14 @@ yq eval --inplace '
     fail "Rendered controller has the wrong discovery selector"
 kubectl apply -f "$tmp_dir/ca.yaml"
 kubectl -n "$namespace" rollout status deployment/"$deployment" --timeout=5m
+# The autoscaler writes Running to its status ConfigMap a few seconds after
+# its Pod is Ready, and the suite's first check reads that status.
+deadline=$((SECONDS + 300))
+until kubectl -n "$namespace" get configmap cluster-autoscaler-status -o jsonpath='{.data.status}' 2>/dev/null |
+    yq -e '.autoscalerStatus == "Running"' >/dev/null 2>&1; do
+    (( SECONDS < deadline )) || fail "The autoscaler status ConfigMap did not report Running within 5 minutes"
+    sleep 5
+done
 
 jq -n --arg kubeconfig "$KUBECONFIG" --arg context "$context" --arg uid "$uid" \
     --arg run "$CLUSTER_NAME" --arg sub "$AZURE_SUBSCRIPTION_ID" --arg group "$group" \
