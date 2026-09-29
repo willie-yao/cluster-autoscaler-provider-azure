@@ -166,6 +166,62 @@ if kubectl -n kube-system get configmap autoscaler-e2e-authorization >/dev/null 
     fail "An E2E authorization marker already exists"
 fi
 
+# AKS's metrics-server-vpa sidecar resizes metrics-server when the Node count
+# changes by more than 5%, and the new Pods can land on a drained worker. Keep
+# the current resources for any Node count, as AKS documents under "Manually
+# configure Metrics Server resource usage", and restart it to load the config.
+metrics_request() {
+    kubectl -n kube-system get deployment metrics-server -o json | jq -er --arg resource "$1" '
+        [.spec.template.spec.containers[] | select(.name == "metrics-server") |
+            .resources.requests[$resource] // empty] | if length == 1 then .[0] else empty end'
+}
+metrics_cpu=$(metrics_request cpu) || fail "metrics-server has no CPU request"
+metrics_memory=$(metrics_request memory) || fail "metrics-server has no memory request"
+[[ $metrics_cpu =~ ^[0-9]+m?$ && $metrics_memory =~ ^[0-9]+([KMGT]i|[kMGT])?$ ]] ||
+    fail "Unexpected metrics-server requests: $metrics_cpu, $metrics_memory"
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-server-config
+  namespace: kube-system
+  labels:
+    kubernetes.io/cluster-service: "true"
+    addonmanager.kubernetes.io/mode: EnsureExists
+data:
+  NannyConfiguration: |-
+    apiVersion: nannyconfig/v1alpha1
+    kind: NannyConfiguration
+    baseCPU: "$metrics_cpu"
+    cpuPerNode: 0m
+    baseMemory: "$metrics_memory"
+    memoryPerNode: 0Mi
+EOF
+kubectl -n kube-system rollout restart deployment/metrics-server
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=10m
+generation=$(kubectl -n kube-system get deployment metrics-server -o jsonpath='{.metadata.generation}')
+# The sidecar checks the resources when it starts. Give it time to resize the
+# Deployment if it didn't load the config, then check that nothing changed.
+sleep 60
+metrics=$(kubectl -n kube-system get deployment metrics-server -o json)
+jq -e --argjson generation "$generation" --arg cpu "$metrics_cpu" --arg memory "$metrics_memory" '
+    .metadata.generation == $generation and .status.observedGeneration == $generation and
+    (.status.replicas // 0) == .spec.replicas and (.status.updatedReplicas // 0) == .spec.replicas and
+    (.status.availableReplicas // 0) == .spec.replicas and
+    all(.spec.template.spec.containers[] | select(.name == "metrics-server");
+        .resources.requests.cpu == $cpu and .resources.requests.memory == $memory)
+' <<< "$metrics" >/dev/null || fail "metrics-server did not settle after the resource change"
+selector=$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' <<< "$metrics")
+pods=$(kubectl -n kube-system get pods -l "$selector" -o json |
+    jq -c '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name]')
+jq -e --argjson pods "$pods" '($pods | length) == .spec.replicas' <<< "$metrics" >/dev/null ||
+    fail "metrics-server has old or missing Pods after its restart"
+for pod in $(jq -r '.[]' <<< "$pods"); do
+    log=$(kubectl -n kube-system logs "$pod" -c metrics-server-vpa)
+    grep -qF "cpu: $metrics_cpu, extra_cpu: 0m, memory: $metrics_memory, extra_memory: 0Mi" <<< "$log" ||
+        fail "metrics-server Pod $pod did not load metrics-server-config"
+done
+
 # AKS schedules some add-on replicas on User pools. Move them to the System
 # pool, which takes the place of the fixture's control plane.
 workers=$(kubectl get nodes -l 'kubernetes.azure.com/agentpool in (main,zero)' -o name)

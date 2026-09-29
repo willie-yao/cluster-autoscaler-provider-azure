@@ -99,16 +99,18 @@ which takes these steps:
    runs in the cluster.
 3. It waits up to 45 minutes for AKS to finish setting up the cluster, as
    described below.
-4. It drains the User pool nodes once, so that AKS add-on replicas move to
+4. It stops AKS from resizing metrics-server when the Node count changes, as
+   described below.
+5. It drains the User pool nodes once, so that AKS add-on replicas move to
    the System pool, and then it uncordons them.
-5. It creates the authorization marker and the run's two PriorityClasses.
-6. It installs one controller from this repository's chart with the upstream
+6. It creates the authorization marker and the run's two PriorityClasses.
+7. It installs one controller from this repository's chart with the upstream
    values: the `cluster-autoscaler` release in the `default` namespace,
    workload identity and `autoDiscovery.clusterName`. It pins the Pod to the
    System pool. It also replaces the discovery flag and the Secret references
    for `ARM_SUBSCRIPTION_ID` and `ARM_RESOURCE_GROUP` with the literal values
    that the suite checks.
-7. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
+8. It writes a JSON binding with `resourceGroupMode: aks` in `ARTIFACTS` and
    runs Ginkgo with the selected label filter. Ginkgo writes
    `junit.e2e_suite.1.xml` there.
 
@@ -134,6 +136,19 @@ CAPZ's AKS tests. The VMSS state and Node count checks follow upstream's
 `AllVMSSStable`, and the Deployment check is similar to the Pod wait in CAPZ's
 `ci-entrypoint.sh`. If AKS doesn't finish within 45 minutes, the script fails
 and prints the last condition that wasn't met.
+
+AKS runs metrics-server with a `metrics-server-vpa` sidecar that resizes it
+when the Node count changes by more than 5%. Each resize rolls out new
+metrics-server Pods, and they can land on a drained User pool node when a
+test adds or removes a node, which fails the worker isolation check. Before
+the drain, `hack/ci-e2e.sh` follows AKS's
+[Manually configure Metrics Server resource usage](https://learn.microsoft.com/azure/aks/use-metrics-server-vertical-pod-autoscaler#manually-configure-metrics-server-resource-usage):
+it creates the `kube-system/metrics-server-config` ConfigMap with the current
+metrics-server CPU and memory requests as `baseCPU` and `baseMemory`, and with
+`cpuPerNode: 0m` and `memoryPerNode: 0Mi`, and it restarts metrics-server to
+load it. It then checks that the rollout finished, that the Deployment didn't
+change during the next minute, and that each new sidecar logged the new
+values.
 
 The upstream suite installs the chart from Go in `BeforeSuite`. This suite
 keeps the install in `hack/ci-e2e.sh`, because its Go runner only observes a
