@@ -10,6 +10,8 @@ TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
 PROW_TEST_TIMEOUT?=4h
 ENVIRONMENT?=
+# E2E_PREPARE selects the extra preparation for Prow shards G to J: etag, taint, disk or dra.
+E2E_PREPARE?=
 
 # Compute the selected suite path.
 SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/...,./suites/...)
@@ -23,8 +25,9 @@ TAG?=
 # Operator-prepared E2E and legacy AKS development targets
 # --------------------------------------------------------------------------
 # Current E2E workflows:
-#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml,
-#   then test-e2e deploys CAS and writes an AKS-mode binding.
+#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml
+#   (or its -taint variant for AZ-P1-005), then test-e2e deploys CAS, prepares the shard
+#   selected by E2E_PREPARE and writes an AKS-mode binding.
 #   Manual: prepare the VMSS Uniform fixture described in README.md separately, then pass
 #   ENVIRONMENT=/absolute/path/to/environment.json to e2etests.
 #   Legacy AKS targets do not prepare or validate either fixture.
@@ -63,7 +66,7 @@ test-e2e: build-e2e ## Deploy CAS on the CAPZ AKS cluster and run a labeled E2E 
 		LABEL_FILTER="$(if $(LABEL_FILTER),$(LABEL_FILTER),smoke)" TEST_TIMEOUT="$(PROW_TEST_TIMEOUT)" \
 		CLUSTER_AUTOSCALER_NAMESPACE="$(CLUSTER_AUTOSCALER_NAMESPACE)" \
 		CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME="$(CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME)" \
-		TEST_SUITE="$(TEST_SUITE)" bash hack/ci-e2e.sh test
+		TEST_SUITE="$(TEST_SUITE)" E2E_PREPARE="$(E2E_PREPARE)" bash hack/ci-e2e.sh test
 
 .PHONY: e2etests
 e2etests: ## Run E2Es on a prepared fixture with CAS deployed (ENVIRONMENT=<JSON binding>)

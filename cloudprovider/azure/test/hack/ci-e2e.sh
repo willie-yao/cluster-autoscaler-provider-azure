@@ -39,6 +39,8 @@ for tool in az kubectl helm jq yq; do
 done
 [[ ${TEST_SUITE:-scaleup} = scaleup ]] ||
     fail "The AKS Prow path runs scaleup only; phased cases need custom self-managed VMSS"
+prepare=${E2E_PREPARE:-}
+[[ $prepare =~ ^(etag|disk|dra|taint)?$ ]] || fail "E2E_PREPARE must be empty, etag, disk, dra or taint"
 [[ -n ${LABEL_FILTER:-} ]] || fail "Choose an explicit Ginkgo label filter"
 [[ -n ${CLUSTER_NAME:-} && $CLUSTER_NAME =~ ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$ ]] ||
     fail "CAPZ must export a DNS-safe CLUSTER_NAME"
@@ -73,10 +75,20 @@ group=$(mgmt get "managedclusters.containerservice.azure.com/$CLUSTER_NAME" -o j
     fail "Unexpected AKS node resource group: $group"
 client_id=$(mgmt get "userassignedidentities.managedidentity.azure.com/$CLUSTER_NAME" -o json |
     jq -er '.status.clientId // empty')
-mgmt get managedclustersagentpools.containerservice.azure.com -o json | jq -e --arg run "$CLUSTER_NAME" '
+# Only the taint shard's template gives the zero pool the run taint and its
+# node-template tag. AZ-P1-003 and the other zero-pool cases need neither.
+zero_taint=
+if [[ $prepare = taint ]]; then
+    zero_taint=$CLUSTER_NAME:NoSchedule
+fi
+mgmt get managedclustersagentpools.containerservice.azure.com -o json |
+    jq -e --arg run "$CLUSTER_NAME" --arg taint "$zero_taint" '
     [.items[] | select(.spec.owner.name == $run)] as $pools |
-    ($pools | length) == 3 and all($pools[]; (.status.enableAutoScaling // false) == false)
-' >/dev/null || fail "Expected three AKS agent pools with the AKS autoscaler off"
+    ($pools | length) == 3 and all($pools[]; (.status.enableAutoScaling // false) == false) and
+    any($pools[]; .spec.azureName == "main" and (.status.nodeTaints // []) == []) and
+    any($pools[]; .spec.azureName == "zero" and (.status.nodeTaints // []) ==
+        (if $taint == "" then [] else ["autoscaler-e2e-run=" + $taint] end))
+' >/dev/null || fail "Expected three AKS agent pools with the AKS autoscaler off and the shard's node taints"
 
 sets=$(az vmss list -g "$group" --subscription "$AZURE_SUBSCRIPTION_ID" -o json)
 pool_set() {
@@ -86,15 +98,17 @@ pool_set() {
 system=$(pool_set pool0) || fail "Expected one AKS VMSS for pool0"
 main=$(pool_set main) || fail "Expected one AKS VMSS for main"
 zero=$(pool_set zero) || fail "Expected one AKS VMSS for zero"
-jq -e --arg run "$CLUSTER_NAME" --arg system "$system" --arg main "$main" --arg zero "$zero" '
+jq -e --arg run "$CLUSTER_NAME" --arg system "$system" --arg main "$main" --arg zero "$zero" --arg taint "$zero_taint" '
     length == 3 and
     any(.[]; .name == $system and .tags["cluster-autoscaler-name"] == null and .sku.capacity == 1) and
     all(.[] | select(.name != $system); .tags["autoscaler-e2e-run"] == $run and
         .tags["cluster-autoscaler-name"] == $run and .overprovision == false) and
     any(.[]; .name == $main and .tags.min == "1" and .tags.max == "2" and
-        .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "main" and .sku.capacity == 1) and
+        .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "main" and
+        .tags["k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run"] == null and .sku.capacity == 1) and
     any(.[]; .name == $zero and .tags.min == "0" and .tags.max == "1" and
-        .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "zero" and .sku.capacity == 0)
+        .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "zero" and
+        (.tags["k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run"] // "") == $taint and .sku.capacity == 0)
 ' <<< "$sets" >/dev/null || fail "AKS VMSS bounds, tags or settings differ from the E2E fixture"
 
 # AKS keeps setting up a new cluster after CAPZ reports it Ready. About 12 to
@@ -248,12 +262,53 @@ uid=$(kubectl get namespace kube-system -o jsonpath='{.metadata.uid}')
 context=$(kubectl config current-context)
 [[ -n $uid && -n $context ]] || fail "Workload kubeconfig has no context or cluster UID"
 
+# Prepare only what the selected shard needs. The specs check each marker key
+# and fixture again.
+allow=(--from-literal=allow-kube-system-fixture=CA-011)
+disk_class=
+case $prepare in
+etag|taint) allow=() ;;
+disk)
+    kubectl get csidriver disk.csi.azure.com >/dev/null || fail "AKS has no Azure Disk CSI driver"
+    kubectl -n kube-system rollout status daemonset/csi-azuredisk-node --timeout=8m
+    disk_class=$CLUSTER_NAME-disk
+    cat <<EOF | kubectl apply -f -
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: $disk_class
+  labels:
+    autoscaler-e2e-run: $CLUSTER_NAME
+provisioner: disk.csi.azure.com
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+parameters:
+  skuName: StandardSSD_LRS
+  subscriptionID: $AZURE_SUBSCRIPTION_ID
+  resourceGroup: $group
+  tags: autoscaler-e2e-run=$CLUSTER_NAME
+EOF
+    allow=(--from-literal=allow-disk-fixture=AZ-P1-006)
+    ;;
+dra)
+    sed "s/@RUN_ID@/$CLUSTER_NAME/g" "$here/dra-driver.yaml.in" | kubectl apply -f -
+    kubectl -n kube-system rollout status daemonset/dra-example-driver-kubeletplugin --timeout=6m
+    deadline=$((SECONDS + 225))
+    until kubectl get resourceslices -o json | jq -e '[.items[] | select(.spec.driver == "gpu.example.com" and
+        (.spec.devices | length) == 4)] | length >= 1' >/dev/null; do
+        (( SECONDS < deadline )) || fail "The DRA driver did not publish four devices on the main worker"
+        sleep 5
+    done
+    allow=("--from-literal=allow-dra-fixture=CA-020,CA-021,CA-022")
+    ;;
+esac
+
 kubectl -n kube-system create configmap autoscaler-e2e-authorization \
     --from-literal=run-id="$CLUSTER_NAME" \
     --from-literal=subscription-id="$AZURE_SUBSCRIPTION_ID" \
     --from-literal=resource-group="$group" \
     --from-literal=cluster-uid="$uid" \
-    --from-literal=allow-kube-system-fixture=CA-011
+    "${allow[@]}"
 for item in "expendable:-15" "high:1000"; do
     name=${item%%:*}
     value=${item#*:}
@@ -273,6 +328,10 @@ done
 # Match the upstream Helm values: workload identity and label discovery.
 release=cluster-autoscaler
 deployment=$release-azure-cluster-autoscaler
+etag=false
+if [[ $prepare = etag ]]; then
+    etag=true
+fi
 tmp_dir=$(mktemp -d)
 trap 'rm -f "$tmp_dir/values.yaml" "$tmp_dir/ca.yaml"; rmdir "$tmp_dir"' EXIT
 cat > "$tmp_dir/values.yaml" <<EOF
@@ -284,6 +343,7 @@ azureResourceGroup: $group
 azureUseWorkloadIdentityExtension: true
 azureVMType: vmss
 azureEnableForceDelete: false
+azureEnableVMSSEtag: $etag
 podLabels:
   azure.workload.identity/use: "true"
 rbac:
@@ -355,7 +415,7 @@ jq -n --arg kubeconfig "$KUBECONFIG" --arg context "$context" --arg uid "$uid" \
     --arg run "$CLUSTER_NAME" --arg sub "$AZURE_SUBSCRIPTION_ID" --arg group "$group" \
     --arg system "$system" --arg main "$main" --arg zero "$zero" \
     --arg location "$AZURE_LOCATION" --arg image "$image" \
-    --arg namespace "$namespace" --arg deployment "$deployment" \
+    --arg namespace "$namespace" --arg deployment "$deployment" --arg disk "$disk_class" \
     --arg workload "${WORKLOAD_IMAGE:-busybox@sha256:b7f3d86d6e84fc17718c48bcde1450807faa2d56704205c697b4bd5df7b9e29f}" \
     --arg cpu "${DEMAND_CPU:-1200m}" '
     {kubeconfig:$kubeconfig,context:$context,clusterUID:$uid,runID:$run,
@@ -365,7 +425,7 @@ jq -n --arg kubeconfig "$KUBECONFIG" --arg context "$context" --arg uid "$uid" \
      autoscalerContainer:"azure-cluster-autoscaler",leaseName:"cluster-autoscaler",
      expectedImage:$image,mainPool:$main,zeroPool:$zero,
      poolLabel:"acceptance-pool",mainLabel:"main",zeroLabel:"zero",
-     demandCPU:$cpu,workloadImage:$workload}' > "$artifacts/environment.json"
+     demandCPU:$cpu,workloadImage:$workload,diskStorageClass:$disk}' > "$artifacts/environment.json"
 
 make -C "$module" e2etests ENVIRONMENT="$artifacts/environment.json" ARTIFACTS="$artifacts" \
     LABEL_FILTER="$LABEL_FILTER" TEST_SUITE=scaleup TEST_TIMEOUT="${TEST_TIMEOUT:-3h}"

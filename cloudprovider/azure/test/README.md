@@ -78,12 +78,21 @@ the 100-Pod cases on two nodes. Set `ADDITIONAL_ASO_CRDS` to
 does, and set `KUBERNETES_VERSION` to a version that AKS offers in the job's
 region. Keep one fresh cluster per job and let the CAPZ entrypoint clean it up.
 
+Shard H uses
+[templates/cluster-template-prow-aks-aso-e2e-taint.yaml](templates/cluster-template-prow-aks-aso-e2e-taint.yaml)
+instead, through CAPZ's `CLUSTER_TEMPLATE`. It differs only in the zero pool,
+which has the `autoscaler-e2e-run=<CLUSTER_NAME>:NoSchedule` node taint and
+the matching `k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run`
+tag. The other shards need the untainted zero pool.
+
 From this directory, the command after CAPZ cluster creation is:
 
 ```sh
 make test-e2e TAG="$(git rev-parse --short HEAD)" \
   REGISTRY="$REGISTRY" LABEL_FILTER=smoke ARTIFACTS="$ARTIFACTS"
 ```
+
+Shards G to J also set `E2E_PREPARE`, as the shard table below shows.
 
 `IMAGE=<registry>/<repository>` can replace `REGISTRY`, and it must not
 include a tag. `build-e2e` uses the root `image` target with `GOARCH=amd64`
@@ -94,7 +103,8 @@ which takes these steps:
    client ID from the ASO `UserAssignedIdentity` in the CAPZ management
    cluster, as the upstream Makefile does.
 2. It finds the three VMSS in the node resource group by their
-   `aks-managed-poolName` tag and checks their tags and sizes. It fails if
+   `aks-managed-poolName` tag and checks their tags and sizes, and the zero
+   pool's taint for shard H. It fails if
    the AKS autoscaler is on for any pool, or if a cluster autoscaler already
    runs in the cluster.
 3. It waits up to 45 minutes for AKS to finish setting up the cluster, as
@@ -103,7 +113,8 @@ which takes these steps:
    described below.
 5. It drains the User pool nodes once, so that AKS add-on replicas move to
    the System pool, and then it uncordons them.
-6. It creates the authorization marker and the run's two PriorityClasses.
+6. It prepares the shard that `E2E_PREPARE` selects, then creates the
+   authorization marker and the run's two PriorityClasses.
 7. It installs one controller from this repository's chart with the upstream
    values: the `cluster-autoscaler` release in the `default` namespace,
    workload identity and `autoDiscovery.clusterName`. It pins the Pod to the
@@ -170,41 +181,48 @@ the read. The binding names the System VMSS in `systemPool` and omits
 described below.
 
 No default case depends on the control plane VM, so no default case skips in
-AKS mode. Six of them still need preparation that Prow doesn't do, as the
-shard list below shows.
+AKS mode. Six of them need extra preparation, which `E2E_PREPARE` selects, as
+the shard list below shows.
 
 The presubmit runs `smoke` (`AZ-P1-001` to `AZ-P1-003`), three cases. The two
 scaling cases can each take up to 50 and 40 minutes, so an hour is a target,
-not a guaranteed bound. The periodic jobs run shards A to F on AKS with these
+not a guaranteed bound. The periodic jobs run shards A to J on AKS with these
 label filters. Shard A is the same three-case smoke filter. Each shard uses a
 fresh AKS cluster, `TEST_SUITE=scaleup`, and
-the same five-hour Prow timeout. The case timeouts sum to 97 to 180 minutes
+the same five-hour Prow timeout. The case timeouts sum to 45 to 180 minutes
 per shard, and the remaining time is for cluster setup and cleanup.
-
-| Shard | Label filter | Cases |
-| --- | --- | ---: |
-| A | `AZ-P1-001 || AZ-P1-002 || AZ-P1-003` | 3 |
-| B | `AZ-P1-004 || AZ-001 || CA-001 || CA-002` | 4 |
-| C | `CA-004 || CA-005 || CA-006 || CA-007` | 4 |
-| D | `CA-008 || CA-009 || CA-010` | 3 |
-| E | `CA-011 || CA-012 || CA-013 || CA-014` | 4 |
-| F | `CA-015 || CA-016 || CA-017 || CA-018 || CA-019` | 5 |
-
-Prow runs only these six shards, which cover 23 of the 29 default cases. The
-other six cases need preparation that the AKS template and `test-e2e` don't
-do yet, so the Prow path doesn't run them. Their filters are:
 
 | Shard | Label filter | Cases | Preparation |
 | --- | --- | ---: | --- |
-| G | `AZ-SUP-ETAG` | 1 | ETag-enabled controller and marker |
-| H | `AZ-P1-005` | 1 | Tainted zero pool |
-| I | `AZ-P1-006` | 1 | Azure Disk CSI, StorageClass and marker |
-| J | `CA-020 || CA-021 || CA-022` | 3 | Synthetic DRA driver and marker |
+| A | `AZ-P1-001 || AZ-P1-002 || AZ-P1-003` | 3 | None |
+| B | `AZ-P1-004 || AZ-001 || CA-001 || CA-002` | 4 | None |
+| C | `CA-004 || CA-005 || CA-006 || CA-007` | 4 | None |
+| D | `CA-008 || CA-009 || CA-010` | 3 | None |
+| E | `CA-011 || CA-012 || CA-013 || CA-014` | 4 | None |
+| F | `CA-015 || CA-016 || CA-017 || CA-018 || CA-019` | 5 | None |
+| G | `AZ-SUP-ETAG` | 1 | `E2E_PREPARE=etag` |
+| H | `AZ-P1-005` | 1 | `E2E_PREPARE=taint` and the taint template |
+| I | `AZ-P1-006` | 1 | `E2E_PREPARE=disk` |
+| J | `CA-020 || CA-021 || CA-022` | 3 | `E2E_PREPARE=dra` |
 
-Together, the ten filters cover all 29 default cases. Do not add G to J to
-Prow until their CAPZ preparation exists and each has passed a live check.
-The AKS template's zero pool has no taint, because `AZ-P1-003` runs a Pod
-without a toleration in that pool. The `Slow`
+The ten shards cover all 29 default cases. Once shards G to J have passed a
+live run, Prow runs all 29. Each preparation adds only what its shard's specs
+check:
+
+- `etag` sets the chart's `azureEnableVMSSEtag: true`, so the controller runs
+  with `AZURE_ENABLE_VMSS_ETAG=true`.
+- `taint` checks that the zero pool has the run taint and tag from the taint
+  template.
+- `disk` checks AKS's built-in Azure Disk CSI driver, creates the run-labeled
+  `<CLUSTER_NAME>-disk` StorageClass described under
+  [operator contract](#operator-contract), sets `allow-disk-fixture: AZ-P1-006`
+  in the marker and writes `diskStorageClass` in the binding.
+- `dra` installs [hack/dra-driver.yaml.in](hack/dra-driver.yaml.in) on the
+  main pool, waits for its four devices on the main worker and sets
+  `allow-dra-fixture: CA-020,CA-021,CA-022` in the marker.
+
+Without `E2E_PREPARE`, the marker has `allow-kube-system-fixture: CA-011` for
+shard E. The marker for `etag` and `taint` has no fixture key. The `Slow`
 label marks longer cases, and the upstream `Feature:ClusterSizeAutoscalingScaleUp`
 and `Feature:ClusterSizeAutoscalingScaleDown` labels mark the matching `CA-`
 cases. The proposed job YAML is
@@ -405,6 +423,8 @@ DaemonSet in `kube-system`, container `plugin`, image
 `registry.k8s.io/dra-example-driver/dra-example-driver@sha256:728fbb69b99e335cfef2d1b9a3d695d2f502c58dd04f7f81143089a72e4044e3`, with
 `DRIVER_NAME=gpu.example.com` and `NUM_DEVICES=4`. DeviceClass `gpu` must select
 `device.driver == 'gpu.example.com'`. Both objects must carry the run label.
+[hack/dra-driver.yaml.in](hack/dra-driver.yaml.in) is this profile, with
+`@RUN_ID@` in place of the run ID and the DaemonSet limited to the main pool.
 Set marker data `allow-dra-fixture: CA-020,CA-021,CA-022` only after separately
 qualifying API, kubelet and autoscaler DRA support. ResourceSlices must publish
 four devices per owned worker, with none on the control plane. This does not
@@ -430,6 +450,7 @@ before and during the five-minute blocked-demand window, then checks the taint
 on the new Node. The baseline main worker must remain untainted by this key.
 Run other zero-pool cases on an untainted fixture because their Pods do not
 tolerate this taint. The runner does not change VMSS tags or kubelet settings.
+On AKS, the taint template sets both.
 
 `AZ-P1-006` requires the Azure Disk CSI driver and a StorageClass named by
 `diskStorageClass`. Install the driver before the run, and verify that
