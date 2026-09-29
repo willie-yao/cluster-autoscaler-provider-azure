@@ -141,6 +141,10 @@ checks in a row, 30 seconds apart:
 - The number of Ready Nodes matches the total VMSS capacity.
 - Every kube-system Deployment has observed its latest generation and has all
   of its replicas updated and available.
+- The `konnectivity-agent` Deployment's Pod template has the
+  `checksum/service-account-key` annotation, and that revision has rolled
+  out. In live runs, AKS added it about 25 minutes after creating the pools,
+  which could be after the other checks passed.
 
 The cluster and agent pool checks follow the provisioning state checks in
 CAPZ's AKS tests. The VMSS state and Node count checks follow upstream's

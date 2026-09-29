@@ -171,6 +171,12 @@ aks_settled() {
             (.status.updatedReplicas // 0) == .spec.replicas and
             (.status.availableReplicas // 0) == .spec.replicas)
     ' >/dev/null || { echo "A kube-system Deployment is still rolling out"; return 1; }
+    kubectl -n kube-system get deployment konnectivity-agent -o json | jq -e '
+        .spec.template.metadata.annotations["checksum/service-account-key"] != null and
+        (.status.observedGeneration // 0) >= .metadata.generation and
+        (.status.updatedReplicas // 0) == .spec.replicas and
+        (.status.availableReplicas // 0) == .spec.replicas
+    ' >/dev/null || { echo "konnectivity-agent has not rolled out its service account key revision"; return 1; }
 }
 echo "Waiting for AKS to finish its background setup at $(date -u +%FT%TZ)"
 start=$SECONDS
