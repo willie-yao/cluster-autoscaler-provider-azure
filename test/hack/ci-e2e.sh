@@ -96,12 +96,133 @@ jq -e --arg run "$CLUSTER_NAME" --arg system "$system" --arg main "$main" --arg 
         .tags["k8s.io_cluster-autoscaler_node-template_label_acceptance-pool"] == "zero" and .sku.capacity == 0)
 ' <<< "$sets" >/dev/null || fail "AKS VMSS bounds, tags or settings differ from the E2E fixture"
 
-kubectl wait --for=condition=Ready node --all --timeout=15m
+# AKS keeps setting up a new cluster after CAPZ reports it Ready. About 12 to
+# 35 minutes after it creates the pools, it rolls out new kube-system add-on
+# revisions and adds AKSLinuxExtension to each VMSS, which puts the VMSS in
+# Updating while it upgrades the instances. Wait for that work to finish, so
+# that add-on Pods don't return to the drained workers and the suite's VMSS
+# checks don't see an AKS upgrade. The checks follow upstream's AllVMSSStable
+# and the provisioning state checks in CAPZ's AKS tests.
+cluster_id=$(mgmt get "managedclusters.containerservice.azure.com/$CLUSTER_NAME" -o json |
+    jq -er '.status.id // empty')
+[[ ${cluster_id,,} == "/subscriptions/${AZURE_SUBSCRIPTION_ID,,}/resourcegroups/"*"/providers/microsoft.containerservice/managedclusters/"* ]] ||
+    fail "Unexpected AKS cluster ID: $cluster_id"
+aks_group=${cluster_id#*/resource[Gg]roups/}
+aks_group=${aks_group%%/*}
+aks_name=${cluster_id##*/}
+aks_settled() {
+    az aks show -g "$aks_group" -n "$aks_name" --subscription "$AZURE_SUBSCRIPTION_ID" -o json | jq -e '
+        .provisioningState == "Succeeded" and
+        (.agentPoolProfiles | length == 3 and all(.[]; .provisioningState == "Succeeded"))
+    ' >/dev/null || { echo "The AKS cluster or an agent pool is not Succeeded"; return 1; }
+    local current set capacity
+    current=$(az vmss list -g "$group" --subscription "$AZURE_SUBSCRIPTION_ID" -o json)
+    jq -e 'length == 3 and all(.[]; .provisioningState == "Succeeded" and
+        any(.virtualMachineProfile.extensionProfile.extensions[]?; .name == "AKSLinuxExtension"))
+    ' <<< "$current" >/dev/null || { echo "A VMSS is not Succeeded or has no AKSLinuxExtension"; return 1; }
+    for set in "$system" "$main" "$zero"; do
+        az vmss list-instances -g "$group" -n "$set" --subscription "$AZURE_SUBSCRIPTION_ID" -o json |
+            jq -e 'all(.[]; .provisioningState == "Succeeded" and .latestModelApplied == true)' >/dev/null ||
+            { echo "VMSS $set has instances that are not on its latest model"; return 1; }
+    done
+    capacity=$(jq '[.[].sku.capacity] | add' <<< "$current")
+    kubectl get nodes -o json | jq -e --argjson capacity "$capacity" '
+        (.items | length) == $capacity and
+        all(.items[]; any(.status.conditions[]; .type == "Ready" and .status == "True"))
+    ' >/dev/null || { echo "The Ready Nodes don't match the VMSS capacity"; return 1; }
+    kubectl -n kube-system get deployments -o json | jq -e '
+        all(.items[]; (.status.observedGeneration // 0) >= .metadata.generation and
+            (.status.replicas // 0) == .spec.replicas and
+            (.status.updatedReplicas // 0) == .spec.replicas and
+            (.status.availableReplicas // 0) == .spec.replicas)
+    ' >/dev/null || { echo "A kube-system Deployment is still rolling out"; return 1; }
+    kubectl -n kube-system get deployment konnectivity-agent -o json | jq -e '
+        .spec.template.metadata.annotations["checksum/service-account-key"] != null and
+        (.status.observedGeneration // 0) >= .metadata.generation and
+        (.status.updatedReplicas // 0) == .spec.replicas and
+        (.status.availableReplicas // 0) == .spec.replicas
+    ' >/dev/null || { echo "konnectivity-agent has not rolled out its service account key revision"; return 1; }
+}
+echo "Waiting for AKS to finish its background setup at $(date -u +%FT%TZ)"
+start=$SECONDS
+passes=0
+reason=
+# Require three passing checks in a row, so that the next step of an AKS
+# upgrade can't start between two checks.
+while true; do
+    if reason=$(aks_settled); then
+        passes=$((passes + 1))
+        (( passes < 3 )) || break
+    else
+        passes=0
+        echo "$(date -u +%T) $reason"
+    fi
+    (( SECONDS - start < 2700 )) || fail "AKS did not finish its background setup within 45 minutes: $reason"
+    sleep 30
+done
+echo "AKS finished its background setup after $((SECONDS - start)) seconds"
+
 kubectl get pods,deployments,daemonsets,statefulsets -A -o json | jq -e '
     all(.items[]; all((if .kind == "Pod" then .spec.containers else .spec.template.spec.containers end)[];
         (.name | contains("cluster-autoscaler") | not) and
         (.image | contains("cluster-autoscaler") | not)))
 ' >/dev/null || fail "A cluster autoscaler is already deployed; use a fresh CAPZ cluster"
+
+# AKS's metrics-server-vpa sidecar resizes metrics-server when the Node count
+# changes by more than 5%, and the new Pods can land on a drained worker. Keep
+# the current resources for any Node count, as AKS documents under "Manually
+# configure Metrics Server resource usage", and restart it to load the config.
+metrics_request() {
+    kubectl -n kube-system get deployment metrics-server -o json | jq -er --arg resource "$1" '
+        [.spec.template.spec.containers[] | select(.name == "metrics-server") |
+            .resources.requests[$resource] // empty] | if length == 1 then .[0] else empty end'
+}
+metrics_cpu=$(metrics_request cpu) || fail "metrics-server has no CPU request"
+metrics_memory=$(metrics_request memory) || fail "metrics-server has no memory request"
+[[ $metrics_cpu =~ ^[0-9]+m?$ && $metrics_memory =~ ^[0-9]+([KMGT]i|[kMGT])?$ ]] ||
+    fail "Unexpected metrics-server requests: $metrics_cpu, $metrics_memory"
+cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: metrics-server-config
+  namespace: kube-system
+  labels:
+    kubernetes.io/cluster-service: "true"
+    addonmanager.kubernetes.io/mode: EnsureExists
+data:
+  NannyConfiguration: |-
+    apiVersion: nannyconfig/v1alpha1
+    kind: NannyConfiguration
+    baseCPU: "$metrics_cpu"
+    cpuPerNode: 0m
+    baseMemory: "$metrics_memory"
+    memoryPerNode: 0Mi
+EOF
+kubectl -n kube-system rollout restart deployment/metrics-server
+kubectl -n kube-system rollout status deployment/metrics-server --timeout=10m
+generation=$(kubectl -n kube-system get deployment metrics-server -o jsonpath='{.metadata.generation}')
+# The sidecar checks the resources when it starts. Give it time to resize the
+# Deployment if it didn't load the config, then check that nothing changed.
+sleep 60
+metrics=$(kubectl -n kube-system get deployment metrics-server -o json)
+jq -e --argjson generation "$generation" --arg cpu "$metrics_cpu" --arg memory "$metrics_memory" '
+    .metadata.generation == $generation and .status.observedGeneration == $generation and
+    (.status.replicas // 0) == .spec.replicas and (.status.updatedReplicas // 0) == .spec.replicas and
+    (.status.availableReplicas // 0) == .spec.replicas and
+    all(.spec.template.spec.containers[] | select(.name == "metrics-server");
+        .resources.requests.cpu == $cpu and .resources.requests.memory == $memory)
+' <<< "$metrics" >/dev/null || fail "metrics-server did not settle after the resource change"
+selector=$(jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")' <<< "$metrics")
+pods=$(kubectl -n kube-system get pods -l "$selector" -o json |
+    jq -c '[.items[] | select(.metadata.deletionTimestamp == null) | .metadata.name]')
+jq -e --argjson pods "$pods" '($pods | length) == .spec.replicas' <<< "$metrics" >/dev/null ||
+    fail "metrics-server has old or missing Pods after its restart"
+for pod in $(jq -r '.[]' <<< "$pods"); do
+    log=$(kubectl -n kube-system logs "$pod" -c metrics-server-vpa)
+    grep -qF "cpu: $metrics_cpu, extra_cpu: 0m, memory: $metrics_memory, extra_memory: 0Mi" <<< "$log" ||
+        fail "metrics-server Pod $pod did not load metrics-server-config"
+done
 
 # AKS schedules some add-on replicas on User pools. Move them to the System
 # pool, so that the workers run only test Pods and DaemonSets.
@@ -199,6 +320,14 @@ updateStrategy:
 EOF
 helm upgrade --install "$release" "$repo/charts/cluster-autoscaler" -n "$namespace" \
     -f "$tmp_dir/values.yaml" --wait --timeout 5m
+# The autoscaler writes Running to its status ConfigMap a few seconds after
+# its Pod is Ready, and the suite's first check reads that status.
+deadline=$((SECONDS + 300))
+until kubectl -n "$namespace" get configmap cluster-autoscaler-status -o jsonpath='{.data.status}' 2>/dev/null |
+    grep -x 'autoscalerStatus: Running' >/dev/null; do
+    (( SECONDS < deadline )) || fail "The autoscaler status ConfigMap did not report Running within 5 minutes"
+    sleep 5
+done
 
 jq -n --arg kubeconfig "$KUBECONFIG" --arg run "$CLUSTER_NAME" --arg sub "$AZURE_SUBSCRIPTION_ID" \
     --arg group "$group" --arg main "$main" --arg zero "$zero" --arg image "$image" \
