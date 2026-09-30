@@ -1,0 +1,97 @@
+# Copyright The Kubernetes Authors.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+autoscalerStatus: Running
+clusterWide:
+  health:
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    nodeCounts:
+      longUnregistered: 0
+      registered:
+        notStarted: 0
+        ready: 2
+        suspended: 0
+        total: 2
+        unready:
+          resourceUnready: 0
+          total: 0
+      unregistered: 0
+    status: Healthy
+  scaleDown:
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    status: NoCandidates
+  scaleUp:
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    status: NoActivity
+nodeGroups:
+- health:
+    cloudProviderTarget: 1
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    maxSize: 2
+    minSize: 1
+    nodeCounts:
+      longUnregistered: 0
+      registered:
+        notStarted: 0
+        ready: 1
+        suspended: 0
+        total: 1
+        unready:
+          resourceUnready: 0
+          total: 0
+      unregistered: 0
+    status: Healthy
+  name: main
+  scaleDown:
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    status: NoCandidates
+  scaleUp:
+    backoffInfo: {}
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    status: NoActivity
+- health:
+    cloudProviderTarget: 0
+    lastProbeTime: null
+    lastTransitionTime: null
+    maxSize: 1
+    minSize: 0
+    nodeCounts:
+      longUnregistered: 0
+      registered:
+        notStarted: 0
+        ready: 0
+        suspended: 0
+        total: 0
+        unready:
+          resourceUnready: 0
+          total: 0
+      unregistered: 0
+    status: Healthy
+  name: zero
+  scaleDown:
+    lastProbeTime: "2026-09-16T09:21:08Z"
+    lastTransitionTime: "2026-09-16T09:20:58Z"
+    status: NoCandidates
+  scaleUp:
+    backoffInfo: {}
+    lastProbeTime: null
+    lastTransitionTime: null
+    status: NoActivity
+time: 2026-09-16 09:21:08.356413974 +0000 UTC
