@@ -12,10 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-# This file follows cluster-template-prow-aks-aso-cluster-autoscaler.yaml.
-# It keeps the untagged System pool and replaces the upstream User pools with
-# the two Linux pools that the E2E suite expects: main (1 to 2) and zero
-# (0 to 1). AKS keeps its own autoscaler off for every pool.
+# This file is cluster-template-prow-aks-aso-e2e.yaml with a tainted zero
+# pool for the taint spec. Keep the two files the same everywhere else.
 apiVersion: cluster.x-k8s.io/v1beta1
 kind: Cluster
 metadata:
@@ -267,9 +265,8 @@ spec:
         name: ${CLUSTER_NAME}-zero
 ---
 # The node-template label tag lets the autoscaler predict the label of a
-# node that does not exist yet. The pool has no taint, because the
-# scale-from-zero spec runs a Pod without a toleration here. The taint spec
-# uses the tainted zero pool in cluster-template-prow-aks-aso-e2e-taint.yaml.
+# node that does not exist yet. The taint tag does the same for the run
+# taint that the pool's nodes register with.
 apiVersion: infrastructure.cluster.x-k8s.io/v1alpha1
 kind: AzureASOManagedMachinePool
 metadata:
@@ -289,6 +286,8 @@ spec:
       mode: User
       nodeLabels:
         acceptance-pool: zero
+      nodeTaints:
+      - "autoscaler-e2e-run=${CLUSTER_NAME}:NoSchedule"
       osType: Linux
       owner:
         name: ${CLUSTER_NAME}
@@ -297,6 +296,7 @@ spec:
         cluster-autoscaler-enabled: "true"
         cluster-autoscaler-name: ${CLUSTER_NAME}
         k8s.io_cluster-autoscaler_node-template_label_acceptance-pool: zero
+        k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run: "${CLUSTER_NAME}:NoSchedule"
         max: "1"
         min: "0"
       type: VirtualMachineScaleSets

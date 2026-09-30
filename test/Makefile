@@ -10,6 +10,8 @@ TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
 PROW_TEST_TIMEOUT?=4h
 ENVIRONMENT?=
+# E2E_PREPARE selects the extra preparation of some Prow jobs: etag, taint, disk or dra.
+E2E_PREPARE?=
 
 # Compute the selected suite path.
 SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/...,./suites/...)
@@ -23,8 +25,9 @@ TAG?=
 # E2E and legacy AKS development targets
 # --------------------------------------------------------------------------
 # E2E workflows:
-#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml,
-#   then test-e2e deploys CAS and writes the JSON binding.
+#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml
+#   (or its -taint variant for the taint spec), then test-e2e deploys CAS, prepares what
+#   E2E_PREPARE selects and writes the JSON binding.
 #   Manual: prepare a cluster as README.md describes, then pass
 #   ENVIRONMENT=/absolute/path/to/environment.json to e2etests.
 #   The legacy AKS targets don't prepare a cluster for the suite.
@@ -63,7 +66,7 @@ test-e2e: build-e2e ## Deploy CAS on the CAPZ AKS cluster and run the specs of o
 		LABEL_FILTER="$(if $(LABEL_FILTER),$(LABEL_FILTER),smoke)" TEST_TIMEOUT="$(PROW_TEST_TIMEOUT)" \
 		CLUSTER_AUTOSCALER_NAMESPACE="$(CLUSTER_AUTOSCALER_NAMESPACE)" \
 		CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME="$(CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME)" \
-		TEST_SUITE="$(TEST_SUITE)" bash hack/ci-e2e.sh test
+		TEST_SUITE="$(TEST_SUITE)" E2E_PREPARE="$(E2E_PREPARE)" bash hack/ci-e2e.sh test
 
 .PHONY: e2etests
 e2etests: ## Run E2Es on a prepared cluster with CAS deployed (ENVIRONMENT=<JSON binding>)
