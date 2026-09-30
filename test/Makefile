@@ -8,6 +8,7 @@ CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME?=cluster-autoscaler
 # TEST_SUITE selects a specific test suite directory (e.g., TEST_SUITE=scaleup).
 TEST_SUITE?=scaleup
 TEST_TIMEOUT?=3h
+PROW_TEST_TIMEOUT?=4h
 ENVIRONMENT?=
 
 # Compute the selected suite path.
@@ -15,12 +16,16 @@ SUITE_PATH=$(if $(TEST_SUITE),./suites/$(shell echo $(TEST_SUITE) | tr A-Z a-z)/
 FOCUS?=
 LABEL_FILTER?=
 ARTIFACTS?=_artifacts
+IMAGE?=$(REGISTRY)/cluster-autoscaler-azure
+TAG?=
 
 # --------------------------------------------------------------------------
 # E2E and legacy AKS development targets
 # --------------------------------------------------------------------------
-# E2E workflow:
-#   Prepare a cluster as README.md describes, then pass
+# E2E workflows:
+#   Prow: CAPZ creates an AKS cluster from templates/cluster-template-prow-aks-aso-e2e.yaml,
+#   then test-e2e deploys CAS and writes the JSON binding.
+#   Manual: prepare a cluster as README.md describes, then pass
 #   ENVIRONMENT=/absolute/path/to/environment.json to e2etests.
 #   The legacy AKS targets don't prepare a cluster for the suite.
 
@@ -47,6 +52,18 @@ deploy-local-dev: ## Legacy: watch and redeploy CAS with the AKS Skaffold config
 	cd $(CAS_ROOT) && skaffold dev --filename deploy/dev/skaffold.yaml
 
 ##@ E2E workflow
+
+.PHONY: build-e2e
+build-e2e: ## Build and push the candidate image for a CAPZ AKS Prow cluster
+	IMAGE="$(IMAGE)" TAG="$(TAG)" bash hack/ci-e2e.sh build
+
+.PHONY: test-e2e
+test-e2e: build-e2e ## Deploy CAS on the CAPZ AKS cluster and run the specs of one label filter
+	IMAGE="$(IMAGE)" TAG="$(TAG)" ARTIFACTS="$(ARTIFACTS)" \
+		LABEL_FILTER="$(if $(LABEL_FILTER),$(LABEL_FILTER),smoke)" TEST_TIMEOUT="$(PROW_TEST_TIMEOUT)" \
+		CLUSTER_AUTOSCALER_NAMESPACE="$(CLUSTER_AUTOSCALER_NAMESPACE)" \
+		CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME="$(CLUSTER_AUTOSCALER_SERVICEACCOUNT_NAME)" \
+		TEST_SUITE="$(TEST_SUITE)" bash hack/ci-e2e.sh test
 
 .PHONY: e2etests
 e2etests: ## Run E2Es on a prepared cluster with CAS deployed (ENVIRONMENT=<JSON binding>)

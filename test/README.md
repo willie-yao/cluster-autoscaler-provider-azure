@@ -6,6 +6,11 @@ Kubernetes test workloads, and their Azure calls only read. The runner doesn't
 create infrastructure, deploy the autoscaler or resize a VMSS, so a scale-up
 can pass only if the autoscaler did the work.
 
+The main path is the CAPZ Prow job on AKS. CAPZ creates an AKS cluster
+through ASO, as the upstream `kubernetes/autoscaler` Azure job does, and
+[hack/ci-e2e.sh](hack/ci-e2e.sh) deploys the autoscaler and runs one group of
+the default specs. See [CAPZ Prow jobs](#capz-prow-jobs).
+
 The suite expects two Linux VMSS Uniform pools, `main` with min/max `1/2`
 and `zero` with min/max `0/1`, and runs the autoscaler outside them. Other
 pool types, such as Flex and VMs pools, need their own setup and aren't
@@ -27,6 +32,98 @@ These run the race-enabled unit tests with fake clients, compile the
 setup hooks or test bodies. They don't contact Azure or Kubernetes. Ordinary
 PR CI runs the same target through `make test-ci`. Compilation is not live
 E2E evidence.
+
+## CAPZ Prow jobs
+
+The Prow jobs follow the upstream `pull-cluster-autoscaler-e2e-azure-master`
+job. The job runs CAPZ `release-1.27` `scripts/ci-entrypoint.sh`, which
+creates an AKS cluster through CAPZ's ASO types from
+[templates/cluster-template-prow-aks-aso-e2e.yaml](templates/cluster-template-prow-aks-aso-e2e.yaml).
+That template is a copy of the upstream
+[templates/cluster-template-prow-aks-aso-cluster-autoscaler.yaml](templates/cluster-template-prow-aks-aso-cluster-autoscaler.yaml),
+which stays unchanged, with the node pools changed to the shape the suite
+expects:
+
+- `pool0` is the System pool with one node and no autoscaler tags. It runs
+  the AKS add-ons and the autoscaler.
+- `main` is a Linux User pool that starts with one node and has `min` and
+  `max` tags of `1` and `2`.
+- `zero` is a Linux User pool that starts empty and has `min` and `max`
+  tags of `0` and `1`.
+
+Both User pools carry the upstream discovery tags, the run tag, the
+`acceptance-pool` node label and the node-template tag for that label. AKS's
+own autoscaler stays off. Every MachinePool has the upstream
+`cluster.x-k8s.io/replicas-managed-by: cluster-autoscaler` annotation, so CAPZ
+doesn't reset a pool after the autoscaler scales it. The User pools set
+`maxPods: 110`, because the Azure CNI default of 30 Pods per node can't fit
+the 100-Pod cases on two nodes. Set `ADDITIONAL_ASO_CRDS` to
+`authorization.azure.com/*;managedidentity.azure.com/*` as the upstream job
+does, and set `KUBERNETES_VERSION` to a version that AKS offers in the job's
+region. Keep one fresh cluster per job and let the CAPZ entrypoint clean it up.
+
+From this directory, the command after CAPZ cluster creation is:
+
+```sh
+make test-e2e TAG="$(git rev-parse --short HEAD)" \
+  REGISTRY="$REGISTRY" LABEL_FILTER=smoke ARTIFACTS="$ARTIFACTS"
+```
+
+`IMAGE=<registry>/<repository>` can replace `REGISTRY`, and it must not
+include a tag. `build-e2e` uses the root `image` target with `GOARCH=amd64`
+and pushes `IMAGE:TAG`. `test-e2e` then runs [hack/ci-e2e.sh](hack/ci-e2e.sh),
+which takes these steps:
+
+1. It reads the node resource group from the ASO `ManagedCluster` and the
+   client ID from the ASO `UserAssignedIdentity` in the CAPZ management
+   cluster, as the upstream Makefile does.
+2. It finds the three VMSS in the node resource group by their
+   `aks-managed-poolName` tag and checks their tags and sizes. It fails if
+   the AKS autoscaler is on for any pool.
+3. It waits for every Node to be Ready and fails if a cluster autoscaler
+   already runs in the cluster.
+4. It drains the User pool nodes once, so that AKS add-on replicas move to
+   the System pool, and then it uncordons them.
+5. It creates the run's two PriorityClasses.
+6. It installs one controller from this repository's chart with
+   `helm upgrade --install --wait` and the upstream values: the
+   `cluster-autoscaler` release in the `default` namespace, workload identity
+   and `autoDiscovery.clusterName`. It pins the Pod to the System pool and
+   sets the controller flags that the specs rely on, listed under
+   [Running the suite](#running-the-suite).
+7. It writes the JSON binding in `ARTIFACTS` and runs Ginkgo with the
+   selected label filter. Ginkgo writes `junit.e2e_suite.1.xml` there.
+
+The upstream suite installs the chart from Go in `BeforeSuite`. This suite
+keeps the install in `hack/ci-e2e.sh`, so that the Go runner never installs
+or changes the controller. The Prow host needs Docker, Azure CLI, `kubectl`,
+`helm`, `jq`, Go, Azure credentials, registry access and the two CAPZ
+kubeconfig files. `test-e2e` defaults to `smoke` if no filter is passed.
+
+The presubmit runs the three `smoke` specs: idle discovery, scale-up to the
+node group maximum with deletion, and scale from zero. The two scaling specs
+can each take up to 50 and 40 minutes, so an hour is a target, not a
+guaranteed bound.
+
+The periodic Prow jobs run these label filters on AKS. The `smoke` job is the
+presubmit filter. Each job uses a fresh AKS cluster, `TEST_SUITE=scaleup` and
+the same five-hour Prow timeout. The spec timeouts sum to 45 to 180 minutes
+per job, and the remaining time is for cluster setup and cleanup.
+
+| Prow job | Label filter | Specs |
+| --- | --- | ---: |
+| smoke | `smoke` | 3 |
+| pdb-demand | `pdb \|\| cpu \|\| memory` | 4 |
+| placement | `host-port \|\| anti-affinity \|\| emptydir \|\| scale-down` | 4 |
+| drain | `drain` | 3 |
+| system-priority | `system-pods \|\| (priority && Feature:ClusterSizeAutoscalingScaleUp)` | 4 |
+| priority-scheduler | `scheduler \|\| (priority && Feature:ClusterSizeAutoscalingScaleDown)` | 5 |
+
+These six Prow jobs cover 23 of the 29 default specs. The `etag`, `taint`,
+`disk` and `dra` specs need setup that the Prow path doesn't do yet.
+
+The proposed job YAML is kept outside the repo until the repo owner, Prow
+org, registry and CI image are chosen.
 
 ## Running the suite
 
@@ -55,7 +152,8 @@ The runner checks the following before each spec and during each
 Deletion counts only when the captured VM, its Node and its NICs are all
 gone. A capacity change or an unreadable NIC is not deletion evidence.
 
-The specs rely on these autoscaler settings:
+The specs rely on these autoscaler settings, which `hack/ci-e2e.sh` also
+uses:
 
 - Label discovery that selects only the two pools, ordinary Delete mode and
   leader election with the status ConfigMap.
