@@ -31,7 +31,7 @@ add stopped-VM reuse or the AKS deallocate mode.
 | Root [go.mod](../go.mod) | Application module `github.com/Azure/cluster-autoscaler-provider-azure` and Azure adapter dependencies |
 | [pkg/cloudprovider/azure](../pkg/cloudprovider/azure) | Azure provider, configuration, caches, node groups and Azure-client boundaries |
 | [charts](../charts) | Deployment packaging and frozen render compatibility tests |
-| [test](../test) | Separate E2E Go module, not entered by the root local checks |
+| [test](../test) | Separate Go module for the maintained E2E harness and scenarios |
 
 The root module pins extracted core to
 `sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0`, sourced
@@ -48,7 +48,8 @@ dependency pins.
 
 [`azure_config_test.go`](../pkg/cloudprovider/azure/azure_config_test.go) covers
 default, file, legacy-field and environment precedence, including conflicting
-authentication choices.
+authentication choices. The provider's runtime configuration is not derived
+from the E2E JSON binding.
 
 [`azure_scale_set_lifecycle_test.go`](../pkg/cloudprovider/azure/azure_scale_set_lifecycle_test.go)
 exercises real provider methods with mocked Azure clients. It checks tagged
@@ -64,6 +65,41 @@ are the managed identity existing Secret correction and the top-level
 `cluster-autoscaler-9.59.0` to `cluster-autoscaler-9.59.1`. Selectors, pod
 labels, other labels and functional fields are still compared, as described
 in the [saved renders README](../charts/testdata/azure-compatibility/README.md).
+
+## E2E workload and observation path
+
+```text
+a disposable cluster runs one autoscaler
+  -> test checks the controller and the two pools
+  -> test creates Kubernetes workload demand
+  -> real autoscaler scales workers
+  -> test observes Azure instances, Nodes and workload state
+  -> test removes its workloads and waits for baseline
+  -> the cluster is deleted after the run
+```
+
+[`Config`](../test/pkg/environment/config.go) binds the
+suite to an explicit kubeconfig, run ID, controller image, Azure scope and two
+pools.
+[`Environment`](../test/pkg/environment/environment.go)
+checks that one autoscaler runs the expected image and reports exactly those
+pools.
+
+The [`Cloud` interface](../test/pkg/environment/azure.go)
+has only reads. The harness cannot make a scale-up test pass by directly
+resizing a VMSS. For example, the hostname anti-affinity spec in
+[`public_test.go`](../test/suites/scaleup/public_test.go)
+grows an anti-affinity workload from one to three replicas and requires three
+distinct real workers across the two pools.
+
+Desired capacity, cloud instances and Ready Nodes are separate observations.
+[`observations.go`](../test/pkg/environment/observations.go)
+requires identity and per-pool consistency for stable state. A pool above its
+`max` tag becomes a terminal failure in
+[`readSnapshot`](../test/suites/scaleup/suite_test.go);
+ordinary read failures can retry while waiting for convergence. Negative
+windows also require a fresh healthy controller. Read the
+[E2E guide](../test/README.md) before any live run.
 
 ## Build metadata
 

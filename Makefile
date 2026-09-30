@@ -28,7 +28,7 @@ VERSION_PKG := github.com/Azure/cluster-autoscaler-provider-azure/pkg/version
 VERSION_LDFLAG := -X $(VERSION_PKG).ClusterAutoscalerVersion=$(VERSION)
 LDFLAGS_VALUE := $(strip $(LDFLAGS) $(VERSION_LDFLAG))
 
-.PHONY: all build test-azure test-unit test-ci test-chart test-core-integration clean format image
+.PHONY: all build test-azure test-unit test-ci test-chart test-core-integration test-e2e-local clean format image
 
 all: build
 
@@ -49,7 +49,10 @@ test-chart:
 test-core-integration:
 	go test -race sigs.k8s.io/cluster-autoscaler/pkg/test/integration/inmemory -count=1
 
-test-ci: test-unit test-core-integration
+test-e2e-local:
+	$(MAKE) -C test test-local
+
+test-ci: test-unit test-core-integration test-e2e-local
 
 clean:
 	rm -f cluster-autoscaler-*

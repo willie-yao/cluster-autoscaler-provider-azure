@@ -1,0 +1,18 @@
+{
+  "kubeconfig": "/absolute/path/to/kubeconfig",
+  "runID": "unique-disposable-run",
+  "subscriptionID": "00000000-0000-0000-0000-000000000001",
+  "resourceGroup": "resource-group-of-the-two-vmss",
+  "autoscalerNamespace": "default",
+  "autoscalerDeployment": "cluster-autoscaler-azure-cluster-autoscaler",
+  "autoscalerContainer": "azure-cluster-autoscaler",
+  "expectedImage": "REPLACE-WITH-EXACT-CANDIDATE-IMAGE",
+  "mainPool": "main",
+  "zeroPool": "zero",
+  "poolLabel": "acceptance-pool",
+  "mainLabel": "main",
+  "zeroLabel": "zero",
+  "demandCPU": "1200m",
+  "workloadImage": "REPLACE-WITH-PINNED-BUSYBOX-IMAGE",
+  "diskStorageClass": ""
+}
