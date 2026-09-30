@@ -62,12 +62,21 @@ the 100-Pod cases on two nodes. Set `ADDITIONAL_ASO_CRDS` to
 does, and set `KUBERNETES_VERSION` to a version that AKS offers in the job's
 region. Keep one fresh cluster per job and let the CAPZ entrypoint clean it up.
 
+The `taint` Prow job uses
+[templates/cluster-template-prow-aks-aso-e2e-taint.yaml](templates/cluster-template-prow-aks-aso-e2e-taint.yaml)
+instead, through CAPZ's `CLUSTER_TEMPLATE`. It differs only in the zero pool,
+which has the `autoscaler-e2e-run=<CLUSTER_NAME>:NoSchedule` node taint and
+the matching `k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run`
+tag. The other Prow jobs need the untainted zero pool.
+
 From this directory, the command after CAPZ cluster creation is:
 
 ```sh
 make test-e2e TAG="$(git rev-parse --short HEAD)" \
   REGISTRY="$REGISTRY" LABEL_FILTER=smoke ARTIFACTS="$ARTIFACTS"
 ```
+
+Some Prow jobs also set `E2E_PREPARE`, as the table below shows.
 
 `IMAGE=<registry>/<repository>` can replace `REGISTRY`, and it must not
 include a tag. `build-e2e` uses the root `image` target with `GOARCH=amd64`
@@ -78,8 +87,9 @@ which takes these steps:
    client ID from the ASO `UserAssignedIdentity` in the CAPZ management
    cluster, as the upstream Makefile does.
 2. It finds the three VMSS in the node resource group by their
-   `aks-managed-poolName` tag and checks their tags and sizes. It fails if
-   the AKS autoscaler is on for any pool.
+   `aks-managed-poolName` tag and checks their tags and sizes, and the zero
+   pool's taint for the `taint` job. It fails if the AKS autoscaler is on for
+   any pool.
 3. It waits up to 45 minutes for AKS to finish setting up the cluster, as
    described below, and fails if a cluster autoscaler already runs in the
    cluster.
@@ -87,7 +97,8 @@ which takes these steps:
    described below.
 5. It drains the User pool nodes once, so that AKS add-on replicas move to
    the System pool, and then it uncordons them.
-6. It creates the run's two PriorityClasses.
+6. It prepares what `E2E_PREPARE` selects, then creates the run's two
+   PriorityClasses.
 7. It installs one controller from this repository's chart with
    `helm upgrade --install --wait` and the upstream values: the
    `cluster-autoscaler` release in the `default` namespace, workload identity
@@ -154,17 +165,31 @@ presubmit filter. Each job uses a fresh AKS cluster, `TEST_SUITE=scaleup` and
 the same five-hour Prow timeout. The spec timeouts sum to 45 to 180 minutes
 per job, and the remaining time is for cluster setup and cleanup.
 
-| Prow job | Label filter | Specs |
-| --- | --- | ---: |
-| smoke | `smoke` | 3 |
-| pdb-demand | `pdb \|\| cpu \|\| memory` | 4 |
-| placement | `host-port \|\| anti-affinity \|\| emptydir \|\| scale-down` | 4 |
-| drain | `drain` | 3 |
-| system-priority | `system-pods \|\| (priority && Feature:ClusterSizeAutoscalingScaleUp)` | 4 |
-| priority-scheduler | `scheduler \|\| (priority && Feature:ClusterSizeAutoscalingScaleDown)` | 5 |
+| Prow job | Label filter | Specs | Preparation |
+| --- | --- | ---: | --- |
+| smoke | `smoke` | 3 | None |
+| pdb-demand | `pdb \|\| cpu \|\| memory` | 4 | None |
+| placement | `host-port \|\| anti-affinity \|\| emptydir \|\| scale-down` | 4 | None |
+| drain | `drain` | 3 | None |
+| system-priority | `system-pods \|\| (priority && Feature:ClusterSizeAutoscalingScaleUp)` | 4 | None |
+| priority-scheduler | `scheduler \|\| (priority && Feature:ClusterSizeAutoscalingScaleDown)` | 5 | None |
+| etag | `etag` | 1 | `E2E_PREPARE=etag` |
+| taint | `taint` | 1 | `E2E_PREPARE=taint` and the taint template |
+| disk | `disk` | 1 | `E2E_PREPARE=disk` |
+| dra | `dra` | 3 | `E2E_PREPARE=dra` |
 
-These six Prow jobs cover 23 of the 29 default specs. The `etag`, `taint`,
-`disk` and `dra` specs need setup that the Prow path doesn't do yet.
+The ten Prow jobs cover all 29 default specs. Each preparation adds only what
+its job's specs check:
+
+- `etag` sets the chart's `azureEnableVMSSEtag: true`, so the controller runs
+  with `AZURE_ENABLE_VMSS_ETAG=true`.
+- `taint` checks that the zero pool has the run taint and tag from the taint
+  template.
+- `disk` checks AKS's built-in Azure Disk CSI driver, creates the
+  `<CLUSTER_NAME>-disk` StorageClass and writes `diskStorageClass` in the
+  binding.
+- `dra` installs [hack/dra-driver.yaml.in](hack/dra-driver.yaml.in) on the
+  main pool and waits for its four devices on the main worker.
 
 The proposed job YAML is kept outside the repo until the repo owner, Prow
 org, registry and CI image are chosen.
@@ -220,9 +245,10 @@ Some cases need extra setup:
   `dra-example-driver-kubeletplugin` DaemonSet in `kube-system`, with
   `DRIVER_NAME=gpu.example.com` and `NUM_DEVICES=4`, and a `gpu` DeviceClass
   that selects `device.driver == 'gpu.example.com'`. Each worker must publish
-  four devices, and no other Node may publish any. The DRA scale-up spec
-  needs the main worker to publish its devices before it grows, so it doesn't
-  cover DRA scale-from-zero.
+  four devices, and no other Node may publish any.
+  [hack/dra-driver.yaml.in](hack/dra-driver.yaml.in) installs both on the
+  main pool. The DRA scale-up spec needs the main worker to publish its
+  devices before it grows, so it doesn't cover DRA scale-from-zero.
 - The `taint` spec needs the zero pool tag
   `k8s.io_cluster-autoscaler_node-template_taint_autoscaler-e2e-run=<runID>:NoSchedule`
   and the same taint on the pool's Nodes. Run the other zero-pool specs on an

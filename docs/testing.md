@@ -61,9 +61,9 @@ Azure acceptance environment.
 The [E2E guide](../cloudprovider/azure/test/README.md) is the entry point
 for the CAPZ Prow path on AKS, the JSON binding, the extra setup of some
 cases and focused runs. In Prow, CAPZ creates an AKS cluster through ASO and
-`make test-e2e` runs the label filter of one Prow job. Six Prow jobs cover 23
-of the 29 default specs, and the other six specs need setup that the Prow
-path doesn't do yet.
+`make test-e2e` runs the label filter of one of ten Prow jobs, which together
+cover the 29 default specs. Four of them set `E2E_PREPARE` for ETag, a
+tainted zero pool, Azure Disk or DRA.
 
 The default `scaleup` suite registers 29 specs: 22 active intents from the
 Azure autoscaler inventory, one public Azure Disk intent and six
