@@ -149,6 +149,18 @@ load it. It then checks that the rollout finished, that the Deployment didn't
 change during the next minute, and that each new sidecar logged the new
 values.
 
+Some subscriptions don't allow federated identity credentials. There, set
+`CLUSTER_AUTOSCALER_IDENTITY=kubelet`. Then the script waits only for the ASO
+`ManagedCluster` and gives the AKS kubelet identity Contributor on the node
+resource group. It also installs the chart with
+`azureUseManagedIdentityExtension` and that identity's client ID, so the
+autoscaler gets tokens from IMDS on the System pool. The Azure credentials
+must be allowed to create that role assignment. In this mode, remove the
+`UserAssignedIdentity`, `FederatedIdentityCredential` and `RoleAssignment`
+resources from the template, and run CAPZ and ASO with a user-assigned
+managed identity: `AZWI_ENABLED=false` for the kind cluster and
+`ASO_CREDENTIAL_SECRET_MODE=podidentity` for the ASO Secret.
+
 The upstream suite installs the chart from Go in `BeforeSuite`. This suite
 keeps the install in `hack/ci-e2e.sh`, so that the Go runner never installs
 or changes the controller. The Prow host needs Docker, Azure CLI, `kubectl`,
