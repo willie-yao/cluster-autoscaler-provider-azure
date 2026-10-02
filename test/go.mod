@@ -1,4 +1,4 @@
-module k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure/test
+module github.com/Azure/cluster-autoscaler-provider-azure/test
 
 go 1.24.0
 

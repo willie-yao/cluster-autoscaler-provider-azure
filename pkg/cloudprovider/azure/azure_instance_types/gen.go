@@ -28,7 +28,7 @@ import (
 	"strconv"
 	"strings"
 
-	"k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure"
+	"github.com/Azure/cluster-autoscaler-provider-azure/pkg/cloudprovider/azure"
 	klog "k8s.io/klog/v2"
 	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider"
 )

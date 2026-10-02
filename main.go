@@ -27,6 +27,7 @@ import (
 
 	"github.com/spf13/pflag"
 
+	"github.com/Azure/cluster-autoscaler-provider-azure/pkg/version"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,7 +36,6 @@ import (
 	"k8s.io/apiserver/pkg/server/routes"
 	utilfeature "k8s.io/apiserver/pkg/util/feature"
 	cqv1beta1 "k8s.io/autoscaler/cluster-autoscaler/apis/capacityquota/autoscaling.x-k8s.io/v1beta1"
-	"k8s.io/autoscaler/cluster-autoscaler/version"
 	"k8s.io/client-go/informers"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	autoscalerbuilder "sigs.k8s.io/cluster-autoscaler/pkg/builder"
@@ -52,7 +52,7 @@ import (
 	// by including or excluding these blank imports. This is particularly useful for
 	// external forks that want to avoid unnecessary dependencies.
 	// The router package is used to provide support for custom build tags (e.g. -tags aws).
-	_ "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/router"
+	_ "github.com/Azure/cluster-autoscaler-provider-azure/pkg/cloudprovider/router"
 
 	"k8s.io/client-go/tools/leaderelection"
 	"k8s.io/client-go/tools/leaderelection/resourcelock"

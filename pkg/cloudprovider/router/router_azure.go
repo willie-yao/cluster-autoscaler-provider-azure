@@ -22,5 +22,5 @@ package router
 import (
 	// Blank import to register a cloudprovider outside main or test package.
 	// This is by design.
-	_ "k8s.io/autoscaler/cluster-autoscaler/cloudprovider/azure"
+	_ "github.com/Azure/cluster-autoscaler-provider-azure/pkg/cloudprovider/azure"
 )

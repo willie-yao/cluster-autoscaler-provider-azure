@@ -103,7 +103,7 @@ cluster_autoscaler:update_deps() {
   popd
 }
 
-# k8s.io/autoscaler/cluster-autoscaler/go.mod
+# github.com/Azure/cluster-autoscaler-provider-azure/go.mod
 mods=($(cluster_autoscaler:list_mods "${VERSION}"))
 cluster_autoscaler:update_deps "./cluster-autoscaler" "${VERSION}" "${mods[@]}"
 
