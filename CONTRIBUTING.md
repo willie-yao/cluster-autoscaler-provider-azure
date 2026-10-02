@@ -1,50 +1,42 @@
-# Contributing guidelines
+# Contributing
 
-## How to become a contributor and submit your own code
+The project welcomes contributions and suggestions. Most contributions require a Contributor License Agreement (CLA) that gives us the right to use your contribution. See [Microsoft's CLA](https://cla.microsoft.com) for details.
 
-### Signing Contributor License Agreements(CLA)
+For pull requests to the Azure organization, the CLA bot checks whether you need to sign and provides instructions. You only need to sign once across repositories that use the Microsoft CLA.
 
-We'd love to accept your patches! Before we can take them, we have to jump a couple of legal hurdles.
- 
- Please fill out either the individual or corporate Contributor License Agreement
- (CLA).
- 
-   * If you are an individual writing original source code and you're sure you
-     own the intellectual property, then you'll need to sign an
-     [individual CLA](https://identity.linuxfoundation.org/node/285/node/285/individual-signup).
-   * If you work for a company that wants to allow you to contribute your work,
-     then you'll need to sign a
-     [corporate CLA](https://identity.linuxfoundation.org/?destination=node/285/organization-signup).
+The project follows the [Microsoft Open Source Code of Conduct](CODE_OF_CONDUCT.md). See the [FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with questions. Report vulnerabilities through the [security policy](SECURITY.md), not public issues.
 
-### Contributing A Patch
- * Sign a Contributor License Agreement, if you haven't already done so(see details above).
- * Fork the desired repo, develop and test your code changes.
- * Submit a pull request.
+## Development
 
-All changes must be code reviewed. Coding conventions and standards are explained in the official 
-[developer docs](https://github.com/kubernetes/community/tree/master/contributors/devel). Expect 
-reviewers to request that you avoid common [go style mistakes](https://go.dev/wiki/CodeReviewComments)
-in your PRs.
+Use Go 1.26 or later, Git, Make and a C toolchain for race tests. Chart checks need Helm, and image builds need Docker.
 
-### Merge Approval
+Start from current `main` and keep changes focused. Reproduce the problem and add a test near the affected code. Follow nearby Go conventions and the [Go review guidance](https://go.dev/wiki/CodeReviewComments). Preserve license headers and source attribution.
 
-Autoscaler collaborators may add "LGTM" (Looks Good To Me) or an equivalent comment to indicate 
-that a PR is acceptable. Any change requires at least one LGTM. No pull requests can be merged 
-until at least one Autoscaler collaborator signs off with an LGTM.
+Read `docs/architecture.md` before changing discovery, node templates, scaling or module boundaries. Keep dependency pins unless the change needs a dependency update. The autoscaling core belongs in [kubernetes-sigs/cluster-autoscaler](https://github.com/kubernetes-sigs/cluster-autoscaler). The published API module remains in [kubernetes/autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/apis).
 
-### Deprecation Policy
+From the repository root:
 
-This repository follows the [Kubernetes Deprecation Policy](https://kubernetes.io/docs/reference/using-api/deprecation-policy/#deprecating-a-flag-or-cli).
-When planning to deprecate a Kubernetes resource API, command line flag or CLI behavior, or
-a feature, please review the deprecation policy to ensure that functionality has not been removed before the
-appropriate signals have been broadcast and the proper amount of deprecation time has been observed.
+```sh
+make format
+hack/verify-boilerplate.sh
+hack/verify-spelling.sh
+make test-ci
+make test-chart
+git diff --check
+```
 
-### Support Channels
+Start with a focused test, then run the checks that apply before requesting review. The `docs/testing.md` guide explains the targets and spelling tool. A root `go test ./...` does not enter the separate E2E module.
 
-Whether you are a user or contributor, official support channels include:
+## Chart and E2E changes
 
- * GitHub issues: https://github.com/kubernetes/autoscaler/issues
- * Slack: Sig-autoscaling room in the [Kubernetes Slack](https://kubernetes.slack.com/?redir=%2Fmessages%2Fsig-autoscaling)
- * Email: kubernetes-users [mailing list](https://groups.google.com/forum/#!forum/kubernetes-sig-autoscaling)
+Chart changes must pass `make test-chart`. Keep the `charts/testdata/azure-compatibility/README.md` as the comparison baseline. Do not regenerate them from the chart under test. If you change chart values or the README template, regenerate the chart README as described in the [chart development guide](charts/README.md).
 
-For further information, please refer to [Kubernetes Contributor Guide](https://github.com/kubernetes/community/blob/master/contributors/guide/README.md)
+The chart workflow also checks version increments and installation in kind. A local render check does not replace either check. Chart and application versions are separate release decisions.
+
+Use `make test-e2e-local` without cloud credentials. Live E2Es need permission to use Azure, a disposable cluster and a cleanup plan. Follow the `test/README.md`, not the legacy AKS development targets. Keep credentials, kubeconfigs and private test artifacts out of commits.
+
+## Pull requests
+
+Use the issue and pull request templates. Describe the problem, the change and any compatibility impact. Include checks and results, and say what was not tested. Update affected docs and tests.
+
+For live E2E results, record the test commit, the image's source commit and its digest. Results from another commit do not validate new code.
