@@ -29,7 +29,7 @@ Start with a focused test, then run the checks that apply before requesting revi
 
 ## Chart and E2E changes
 
-Chart changes must pass `make test-chart`. Keep the `charts/testdata/azure-compatibility/README.md` as the comparison baseline. Do not regenerate them from the chart under test. If you change chart values or the README template, regenerate the chart README as described in the [chart development guide](charts/README.md).
+Chart changes must pass `make test-chart`. Keep the [saved upstream renders](charts/testdata/azure-compatibility/README.md) as the comparison baseline. Do not regenerate them from the chart under test. If you change chart values or the README template, regenerate the chart README as described in the [chart development guide](charts/README.md).
 
 The chart workflow also checks version increments and installation in kind. A local render check does not replace either check. Chart and application versions are separate release decisions.
 

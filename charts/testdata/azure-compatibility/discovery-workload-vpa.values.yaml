@@ -1,0 +1,24 @@
+autoDiscovery:
+  clusterName: test-cluster
+azureUseWorkloadIdentityExtension: true
+secretKeyRefNameOverride: existing-azure-config
+podLabels:
+  azure.workload.identity/use: "true"
+rbac:
+  serviceAccount:
+    annotations:
+      azure.workload.identity/client-id: test-workload-client
+vpa:
+  enabled: true
+  updateMode: "Off"
+  recommender: test-recommender
+  containerPolicy:
+    controlledResources:
+      - cpu
+      - memory
+    minAllowed:
+      cpu: 100m
+      memory: 128Mi
+    maxAllowed:
+      cpu: "1"
+      memory: 1Gi
