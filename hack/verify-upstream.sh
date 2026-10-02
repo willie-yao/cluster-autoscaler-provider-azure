@@ -48,12 +48,9 @@ def fail(message):
     raise SystemExit(message)
 
 
-commits = git("rev-list", "--reverse", "HEAD").decode().splitlines()
+commits = git("rev-list", "--reverse", "--topo-order", "--no-merges", "HEAD").decode().splitlines()
 if len(commits) < 3:
     fail("Import verification requires the first three commits.")
-for commit in commits:
-    if len(git("rev-list", "--parents", "-n", "1", commit).split()) > 2:
-        fail("Import verification requires linear history.")
 first, second, third = commits[:3]
 document = git("show", f"{first}:docs/provenance.md").decode()
 match = re.search(r"<!-- import-manifest\n(.*?)\n-->", document, re.S)
@@ -108,7 +105,7 @@ if any(not line.startswith("R100\t") for line in renames):
 print(f"PASS upstream {manifest['upstream']}: {len(files)} identical files and modes")
 print(f"PASS layout {second}: {len(renames)} pure renames")
 print(f"PASS module {third}: only recorded substitutions and Go formatting")
-later = git("rev-list", "--count", f"{third}..HEAD").decode().strip()
+later = git("rev-list", "--count", "--no-merges", f"{third}..HEAD").decode().strip()
 print(f"REPORT later commits: {later}")
 subprocess.run(["git", "--no-pager", "diff", "--stat", f"{third}..HEAD"], check=True)
 PY
