@@ -39,4 +39,4 @@ The root [Makefile](../Makefile) uses the same linker version for binaries and i
 
 [`version_test.go`](../pkg/version/version_test.go) checks version settings in temporary Git repositories.
 
-See [source provenance](provenance.md) for attribution and the [provider guide](../pkg/cloudprovider/azure/README.md) for configuration.
+See [testing](testing.md) for commands, [source provenance](provenance.md) for attribution and the [provider guide](../pkg/cloudprovider/azure/README.md) for configuration.

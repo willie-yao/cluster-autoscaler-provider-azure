@@ -25,7 +25,7 @@ make test-chart
 git diff --check
 ```
 
-Start with a focused test, then run the checks that apply before requesting review. The `docs/testing.md` guide explains the targets and spelling tool. A root `go test ./...` does not enter the separate E2E module.
+Start with a focused test, then run the checks that apply before requesting review. The [testing guide](docs/testing.md) explains the targets and spelling tool. A root `go test ./...` does not enter the separate E2E module.
 
 ## Chart and E2E changes
 

@@ -19,6 +19,8 @@ The provider uses upstream Azure Delete operations. AKS compatibility work and d
 
 Azure-only registration, image placeholders and the managed-identity existing-Secret correction are intentional differences from the upstream application. The [saved renders README](../charts/testdata/azure-compatibility/README.md) records the chart comparison and attribution.
 
+For local checks and validation boundaries, see [testing](testing.md).
+
 ## Import verification
 
 Run `hack/verify-upstream.sh` with Git, Python 3, Go 1.26 and network access. Use a full-history checkout of the working branch. Routine CI skips this check. It checks the first three non-merge commits against the pinned upstream files, path map and allowed module substitutions. It reports later changes separately.
