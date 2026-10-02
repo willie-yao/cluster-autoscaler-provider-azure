@@ -33,7 +33,7 @@ ifeq ($(origin VERSION),undefined)
   endif
 endif
 
-VERSION_PKG := k8s.io/autoscaler/cluster-autoscaler/version
+VERSION_PKG := github.com/Azure/cluster-autoscaler-provider-azure/pkg/version
 VERSION_LDFLAG := -X $(VERSION_PKG).ClusterAutoscalerVersion=$(VERSION)
 LDFLAGS_VALUE := $(strip $(LDFLAGS) $(VERSION_LDFLAG))
 

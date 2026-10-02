@@ -1,4 +1,4 @@
-module k8s.io/autoscaler/cluster-autoscaler
+module github.com/Azure/cluster-autoscaler-provider-azure
 
 go 1.26.0
 
