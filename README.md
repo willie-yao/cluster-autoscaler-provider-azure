@@ -18,7 +18,7 @@ make test-ci
 make test-chart
 ```
 
-The build writes `cluster-autoscaler-<arch>` for Linux by default. Use `make build GOOS=darwin` for macOS or set `GOARCH` for another architecture. Local tests do not need Azure credentials. See `docs/testing.md` for focused checks and `docs/architecture.md` for version settings.
+The build writes `cluster-autoscaler-<arch>` for Linux by default. Use `make build GOOS=darwin` for macOS or set `GOARCH` for another architecture. Local tests do not need Azure credentials. See [testing](docs/testing.md) for focused checks and [build metadata](docs/architecture.md#build-metadata) for version settings.
 
 With Docker running, build an image locally:
 
@@ -69,7 +69,7 @@ The shared core moved from [kubernetes/autoscaler](https://github.com/kubernetes
 | [test](test) | Separate E2E module |
 | [hack](hack) and [docs](docs) | Development scripts and guides |
 
-Read `docs/architecture.md`, `docs/testing.md` and [source provenance](docs/provenance.md) for details. The `test/README.md` covers live tests. The [legacy development guide](deploy/dev/README.md) describes the limits of the older AKS setup.
+Read [architecture](docs/architecture.md), [testing](docs/testing.md) and [source provenance](docs/provenance.md) for details. The `test/README.md` covers live tests. The [legacy development guide](deploy/dev/README.md) describes the limits of the older AKS setup.
 
 ## Contribute and get help
 

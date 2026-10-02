@@ -1,0 +1,7 @@
+autoscalingGroups:
+  - name: standard-pool
+    minSize: 1
+    maxSize: 5
+  - name: zero-pool
+    minSize: 0
+    maxSize: 3

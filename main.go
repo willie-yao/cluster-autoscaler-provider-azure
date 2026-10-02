@@ -51,7 +51,7 @@ import (
 	// The registration pattern allows for customizing the set of supported cloud providers
 	// by including or excluding these blank imports. This is particularly useful for
 	// external forks that want to avoid unnecessary dependencies.
-	// The router package is used to provide support for custom build tags (e.g. -tags aws).
+	// The router package registers the Azure provider, which is the only provider in this repository.
 	_ "github.com/Azure/cluster-autoscaler-provider-azure/pkg/cloudprovider/router"
 
 	"k8s.io/client-go/tools/leaderelection"

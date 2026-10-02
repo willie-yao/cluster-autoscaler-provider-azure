@@ -12,7 +12,7 @@ Use Go 1.26 or later, Git, Make and a C toolchain for race tests. Chart checks n
 
 Start from current `main` and keep changes focused. Reproduce the problem and add a test near the affected code. Follow nearby Go conventions and the [Go review guidance](https://go.dev/wiki/CodeReviewComments). Preserve license headers and source attribution.
 
-Read `docs/architecture.md` before changing discovery, node templates, scaling or module boundaries. Keep dependency pins unless the change needs a dependency update. The autoscaling core belongs in [kubernetes-sigs/cluster-autoscaler](https://github.com/kubernetes-sigs/cluster-autoscaler). The published API module remains in [kubernetes/autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/apis).
+Read the [architecture guide](docs/architecture.md) before changing discovery, node templates, scaling or module boundaries. Keep dependency pins unless the change needs a dependency update. The autoscaling core belongs in [kubernetes-sigs/cluster-autoscaler](https://github.com/kubernetes-sigs/cluster-autoscaler). The published API module remains in [kubernetes/autoscaler](https://github.com/kubernetes/autoscaler/tree/master/cluster-autoscaler/apis).
 
 From the repository root:
 
@@ -25,11 +25,11 @@ make test-chart
 git diff --check
 ```
 
-Start with a focused test, then run the checks that apply before requesting review. The `docs/testing.md` guide explains the targets and spelling tool. A root `go test ./...` does not enter the separate E2E module.
+Start with a focused test, then run the checks that apply before requesting review. The [testing guide](docs/testing.md) explains the targets and spelling tool. A root `go test ./...` does not enter the separate E2E module.
 
 ## Chart and E2E changes
 
-Chart changes must pass `make test-chart`. Keep the `charts/testdata/azure-compatibility/README.md` as the comparison baseline. Do not regenerate them from the chart under test. If you change chart values or the README template, regenerate the chart README as described in the [chart development guide](charts/README.md).
+Chart changes must pass `make test-chart`. Keep the [saved upstream renders](charts/testdata/azure-compatibility/README.md) as the comparison baseline. Do not regenerate them from the chart under test. If you change chart values or the README template, regenerate the chart README as described in the [chart development guide](charts/README.md).
 
 The chart workflow also checks version increments and installation in kind. A local render check does not replace either check. Chart and application versions are separate release decisions.
 

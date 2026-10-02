@@ -1,12 +1,29 @@
-# Source provenance
+# Source provenance and compatibility scope
 
-Imported selected files unchanged from `kubernetes/autoscaler@7df904eabeef796b63ca845b7d5e7f6d9a300f44`.
-The first commit preserves upstream paths and modes. The second only moves files.
-The third changes only the module and owned package paths, with Go formatting.
+## Source identity
 
-Run `hack/verify-upstream.sh` with Git, Python 3, Go 1.26 and network access.
-It verifies the first three commits and reports later commits separately.
-It does not claim later application changes are identical to upstream.
+| Component | Source |
+| --- | --- |
+| Upstream application and chart | [`kubernetes/autoscaler@7df904eabeef796b63ca845b7d5e7f6d9a300f44`](https://github.com/kubernetes/autoscaler/tree/7df904eabeef796b63ca845b7d5e7f6d9a300f44) |
+| Extracted autoscaling core | [`kubernetes-sigs/cluster-autoscaler@v0.0.0-k8s.v1.37.0`](https://github.com/kubernetes-sigs/cluster-autoscaler/tree/v0.0.0-k8s.v1.37.0), module `sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0` |
+| Go module dependency versions | [`kubernetes/autoscaler@9c6b587bbf54825ec8253caaae77db612a75ef61`](https://github.com/kubernetes/autoscaler/blob/9c6b587bbf54825ec8253caaae77db612a75ef61/cluster-autoscaler/go.mod), which adopted the core's Kubernetes 1.37.0 release |
+| Autoscaler APIs | [`kubernetes/autoscaler@eec9bc4dc1d2`](https://github.com/kubernetes/autoscaler/tree/eec9bc4dc1d2/cluster-autoscaler/apis), module `k8s.io/autoscaler/cluster-autoscaler/apis v0.0.0-20260717085528-eec9bc4dc1d2`, the version required by the extracted core |
+
+The application uses the `github.com/Azure/cluster-autoscaler-provider-azure` module path. Its shared core moved out of `kubernetes/autoscaler`, while the published API module stays at the version the core requires.
+
+The repository has fresh history, with 130 upstream files imported without content changes before the layout and module rename. Dependency versions follow `9c6b587b`. Source licenses and copyrights are retained.
+
+## Compatibility scope
+
+The provider uses upstream Azure Delete operations. AKS compatibility work and deallocate mode are not included. It does not match all behavior in the [`Azure/autoscaler` fork](https://github.com/Azure/autoscaler). Kubernetes 1.37.0 is a library pin, not a cluster support claim.
+
+Azure-only registration, image placeholders and the managed-identity existing-Secret correction are intentional differences from the upstream application. The [saved renders README](../charts/testdata/azure-compatibility/README.md) records the chart comparison and attribution.
+
+For local checks and validation boundaries, see [testing](testing.md).
+
+## Import verification
+
+Run `hack/verify-upstream.sh` with Git, Python 3, Go 1.26 and network access. Use a full-history checkout of the working branch. Routine CI skips this check. It checks the first three non-merge commits against the pinned upstream files, path map and allowed module substitutions. It reports later changes separately.
 
 <!-- import-manifest
 {
