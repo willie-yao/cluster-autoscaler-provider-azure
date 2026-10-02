@@ -1,23 +1,16 @@
-## Overview:
+# Legacy AKS development setup
 
-This document, and directory are focused on the ability to deploy and test a working version of autoscaler from a development branch onto an AKS cluster for testing out a set of changes.
+The files in this directory came from upstream's AKS development setup. They are separate from the E2E module in `test/`. The old `azure/autoscaler` Codespaces instructions do not apply to this repository.
 
-## Steps:
+| File | Purpose |
+| --- | --- |
+| [aks-dev.bicep](aks-dev.bicep) | Creates AKS, ACR and a workload identity |
+| [aks-dev-deploy.sh](aks-dev-deploy.sh) | Creates resources and writes local deployment settings |
+| [skaffold.yaml](skaffold.yaml) | Builds the root application and deploys it with a sample workload |
+| [cluster-autoscaler-vmss-wi-dynamic.yaml.tpl](cluster-autoscaler-vmss-wi-dynamic.yaml.tpl) | Template for the generated workload identity manifest |
 
-1. Create a codespace using one of the devcontainer setups from the `devcontainers` branch of https://github.com/azure/autoscaler
+The setup requires Azure credentials, permission to create resources and role assignments, and a disposable subscription or resource group. It creates billable resources and does not clean them up.
 
-2. In the codespace switch to whatever branch you want to test
-    - Note: for testing an upstream branch use: `git checkout upstream/<branch-name>`
-        - This might require a `git fetch upstream`
+The manifest template currently has whitespace before the VMSS name in its `--nodes` argument. The setup script also assumes the Azure CLI returns JSON for the deployment result. Review and correct those issues before using the legacy workflow. Do not use `make -C test setup-cluster` or the legacy deployment targets as E2E preparation.
 
-5. run `cd cluster-autoscaler/cloudprovider/azure/examples/dev`
-
-6. run `az login`
-
-7. run `./aks-dev-deploy.sh`
-
-8. run `cd ../../../../`
-
-9. run `skaffold run --filename cloudprovider/azure/examples/dev/skaffold.yaml`
-
-10. inspect the cluster with `kubectl`, and scale the `inflate` deployment for testing as desired.
+For a manual installation, use the [root chart guide](../../README.md#install). The project is pre-release, with no general AKS compatibility claim.

@@ -8,7 +8,7 @@ build:
     ko: {}
 manifests:
   rawYaml:
-  - "cloudprovider/azure/examples/dev/cluster-autoscaler-vmss-wi-dynamic.yaml"
+  - "deploy/dev/cluster-autoscaler-vmss-wi-dynamic.yaml"
   # include workload here to have it deployed _and removed_ with CAS;
   # comment out if this does not fit your workflow
-  - "cloudprovider/azure/examples/workloads/inflate.yaml"
+  - "deploy/workloads/inflate.yaml"
