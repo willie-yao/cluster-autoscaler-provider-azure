@@ -117,6 +117,11 @@ type Config struct {
 	// VMSS PUTs so concurrent modifications are rejected with 412 instead of overwritten.
 	// Disabled by default; set to true to opt in.
 	EnableVMSSEtag bool `json:"enableVMSSEtag,omitempty" yaml:"enableVMSSEtag,omitempty"`
+
+	// Deallocate parks VMs and retains their Nodes in supported VMSS groups.
+	Deallocate bool `json:"deallocate,omitempty" yaml:"deallocate,omitempty"`
+	// MaxActiveNodes limits active and upcoming nodes; zero adds no limit.
+	MaxActiveNodes int64 `json:"maxActiveNodes,omitempty" yaml:"maxActiveNodes,omitempty"`
 }
 
 // These are only here for backward compabitility. Their equivalent exists in providerazure.Config with a different name.
@@ -292,6 +297,12 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableVMSSEtag, "AZURE_ENABLE_VMSS_ETAG"); err != nil {
 		return nil, err
 	}
+	if _, err = assignBoolFromEnvIfExists(&cfg.Deallocate, "AZURE_DEALLOCATE"); err != nil {
+		return nil, err
+	}
+	if _, err = assignInt64FromEnvIfExists(&cfg.MaxActiveNodes, "AZURE_MAX_ACTIVE_NODES"); err != nil {
+		return nil, err
+	}
 	if _, err = assignBoolFromEnvIfExists(&cfg.EnableDynamicInstanceList, "AZURE_ENABLE_DYNAMIC_INSTANCE_LIST"); err != nil {
 		return nil, err
 	}
@@ -380,6 +391,9 @@ func BuildAzureConfig(configReader io.Reader) (*Config, error) {
 }
 
 func (cfg *Config) validate() error {
+	if cfg.MaxActiveNodes < 0 {
+		return fmt.Errorf("maxActiveNodes must be nonnegative")
+	}
 	if cfg.ResourceGroup == "" {
 		return fmt.Errorf("resource group not set")
 	}

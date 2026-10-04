@@ -217,6 +217,8 @@ func BuildAzure(opts *coreoptions.AutoscalerOptions, do cloudprovider.NodeGroupD
 	if err != nil {
 		klog.Fatalf("Failed to create Azure Manager: %v", err)
 	}
+	manager.kubeClient = opts.KubeClient
+	manager.cordonNodeBeforeTerminate = opts.CordonNodeBeforeTerminate
 	provider, err := BuildAzureCloudProvider(manager, rl)
 	if err != nil {
 		klog.Fatalf("Failed to create Azure cloud provider: %v", err)

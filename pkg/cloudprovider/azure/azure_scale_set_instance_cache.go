@@ -200,6 +200,9 @@ func (scaleSet *ScaleSet) setInstanceStatusByProviderID(providerID string, statu
 // instanceStatusFromVM converts the VM provisioning state to cloudprovider.InstanceStatus.
 // Suggestion: reunify this with instanceStatusFromProvisioningStateAndPowerState() in azure_scale_set.go
 func (scaleSet *ScaleSet) instanceStatusFromVM(vm *armcompute.VirtualMachineScaleSetVM) *cloudprovider.InstanceStatus {
+	if scaleSet.suspendsParkedNodes() {
+		return scaleSet.suspendedInstanceStatus(vm)
+	}
 	// Prefer the proactive cache view of the instance state if we aren't in a terminal state
 	// This is because the power state may be taking longer to update and we don't want
 	// an unfortunate VM update (TTL 5 min) to reset that state to running.
