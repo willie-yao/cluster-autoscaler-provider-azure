@@ -12,17 +12,6 @@ metadata:
 {{ include "cluster-autoscaler.labels" . | indent 4 }}
   name: {{ template "cluster-autoscaler.fullname" . }}
 rules:
-{{- if (eq .Values.cloudProvider "coreweave") }}
-  - apiGroups:
-    - "compute.coreweave.com"
-    resources:
-    - nodepools
-    verbs:
-    - get
-    - list
-    - patch
-    - update
-{{- end }}
   - apiGroups:
       - ""
     resources:
@@ -61,12 +50,6 @@ rules:
     - list
     - get
     - update
-{{- if (eq .Values.cloudProvider "kwok") }}
-    - create
-{{- end }}
-{{- if or (eq .Values.cloudProvider "kwok") (eq .Values.cloudProvider "huaweicloud") }}
-    - delete
-{{- end }}
   - apiGroups:
       - ""
     resources:
@@ -192,29 +175,6 @@ rules:
     - {{ template "cluster-autoscaler.fullname" . }}
     verbs:
     - use
-{{- end -}}
-{{- if and ( and ( eq .Values.cloudProvider "clusterapi" ) ( .Values.rbac.clusterScoped ) ( or ( eq .Values.clusterAPIMode "incluster-incluster" ) ( eq .Values.clusterAPIMode "kubeconfig-incluster" ) ))}}
-  - apiGroups:
-    - cluster.x-k8s.io
-    resources:
-    - machinedeployments
-    - machinepools
-    - machines
-    - machinesets
-    verbs:
-    - get
-    - list
-    - update
-    - watch
-  - apiGroups:
-    - cluster.x-k8s.io
-    resources:
-    - machinedeployments/scale
-    - machinepools/scale
-    verbs:
-    - get
-    - patch
-    - update
 {{- end }}
   - apiGroups:
     - autoscaling.x-k8s.io

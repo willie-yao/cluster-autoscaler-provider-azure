@@ -143,7 +143,7 @@ skipped_names = [
     "hack/scripts/break_mig.py",
     "hack/scripts/ca_metrics_parser.py",
     "cluster-autoscaler/update_toc.py",
-    "cluster-autoscaler/hack/list-owners.py",
+    "hack/list-owners.py",
     "cluster-autoscaler/expander/grpcplugin/protos",
     "cluster-autoscaler/cloudprovider/huaweicloud/huaweicloud-sdk-go-v3",
     "cluster-autoscaler/cloudprovider/bizflycloud/gobizfly",
@@ -159,7 +159,7 @@ skipped_names = [
     "cluster-autoscaler/cloudprovider/oci",
     "cluster-autoscaler/cloudprovider/volcengine/volcengine-go-sdk",
     "cluster-autoscaler/cloudprovider/aws/ec2_instance_types/gen.go",
-    "cluster-autoscaler/cloudprovider/azure/azure_instance_types/gen.go",
+    "pkg/cloudprovider/azure/azure_instance_types/gen.go",
     "vertical-pod-autoscaler/hack/emit-metrics.py",
 ]
 

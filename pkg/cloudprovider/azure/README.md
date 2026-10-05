@@ -4,15 +4,11 @@ The cluster autoscaler on Azure dynamically scales Kubernetes worker nodes. It r
 
 This README will help you get cluster autoscaler running on your Azure Kubernetes cluster.
 
-## Kubernetes Version
+The provider in this repository is pre-release. AKS compatibility work and deallocate mode are not included. The inherited configuration examples below are not a statement of AKS or Kubernetes version support. Commands that create credentials or deploy resources require Azure access and a configured cluster.
 
-Kubernetes v1.10.x or later is required to use cluster autoscaler on Azure. See the "[Releases][]" section in the README for more information.
+## Version and image selection
 
-## CA Version
-
-Cluster autoscaler v1.2.x or later is required for Azure. See the "[Releases][]" section in the README for more information.
-
-> **_NOTE_**: In the deployment manifests referenced below, be sure to replace the `{{ ca_version }}` placeholder with an actual release, such as `v1.14.2`.
+Build a local image from the root-level source tree with `make make-image TAG=dev`. The default image reference is `localhost/cluster-autoscaler-<arch>:dev`. Make an image built from your intended source available to the cluster before deploying it. In the deployment manifests referenced below, replace `REPLACE_WITH_YOUR_REGISTRY/cluster-autoscaler:{{ ca_version }}` with that image reference. This source tree does not define an official image registry or release channel. See the [root build guide](../../../README.md#build-and-test).
 
 ## Permissions
 
@@ -78,9 +74,9 @@ k8s.io_cluster-autoscaler_node-template_autoscaling-options_scaledownunreadytime
 
 ## Deployment manifests
 
-Cluster autoscaler supports four Kubernetes cluster options on Azure:
+The provider has two Azure backend options:
 
-- [**vmss**](#vmss-deployment): Autoscale VMSS instances by setting the Azure cloud provider's `vmType` parameter to `vmss` or to an empty string. This supports clusters deployed with [aks-engine][].
+- [**vmss**](#vmss-deployment): Autoscale VMSS instances by setting `vmType` to `vmss`, which is the default when the field is omitted. An explicit empty string in the cloud config is invalid. This backend supports clusters deployed with [aks-engine][].
 - [**standard**](#standard-deployment): Autoscale VMAS (Virtual Machine Availability Set) VMs by setting the Azure cloud provider's `vmType` parameter to `standard`. This supports clusters deployed with [aks-engine][].
 
 > **_NOTE_**: only the `vmss` option supports scaling down to zero nodes.
@@ -94,7 +90,7 @@ Prerequisites:
 - Get Azure credentials from the [**Permissions**](#permissions) step above.
 - Get the name of the VM scale set associated with the cluster's node pool. You can find this in the [Azure Portal][] or with the `az vmss list` command.
 
-Make a copy of [cluster-autoscaler-vmss.yaml](examples/cluster-autoscaler-vmss.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
+Make a copy of [cluster-autoscaler-vmss.yaml](../../../deploy/cluster-autoscaler-vmss.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
 
 - ClientID: `<base64-encoded-client-id>`
 - ClientSecret: `<base64-encoded-client-secret>`
@@ -102,9 +98,9 @@ Make a copy of [cluster-autoscaler-vmss.yaml](examples/cluster-autoscaler-vmss.y
 - SubscriptionID: `<base64-encoded-subscription-id>`
 - TenantID: `<base64-encoded-tenant-id>`
 
-> **_NOTE_**: Use a command such as `echo $CLIENT_ID | base64` to encode each of the fields above.
+> **_NOTE_**: Use a command such as `printf '%s' "$CLIENT_ID" | base64` to encode each field without a trailing newline.
 
-In the `cluster-autoscaler` spec, find the `image:` field and replace `{{ ca_version }}` with a specific cluster autoscaler release.
+In the `cluster-autoscaler` spec, replace the full image placeholder with the image you built.
 
 #### Auto-Discovery Setup
 
@@ -117,8 +113,10 @@ Note that:
 * There are no `--nodes` flags passed to cluster-autoscaler because the node groups are automatically discovered by tags
 * No min/max values are provided when using Auto-Discovery, cluster-autoscaler will detect the "min" and "max" tags on the VMSS resource in Azure, adjusting the desired number of nodes within these limits.
 
+Make a copy of [cluster-autoscaler-autodiscover.yaml](../../../deploy/cluster-autoscaler-autodiscover.yaml), fill in its credentials, discovery tags and image, then apply your configured copy:
+
 ```
-kubectl apply -f examples/cluster-autoscaler-autodiscover.yaml
+kubectl apply -f cluster-autoscaler-autodiscover.yaml
 ```
 
 #### Explicit setup
@@ -146,7 +144,7 @@ To allow scaling similar node pools simultaneously, or when using separate node 
         - --balance-similar-node-groups=true
 ```
 
-See the [FAQ](https://github.com/kubernetes/autoscaler/blob/master/cluster-autoscaler/FAQ.md#im-running-cluster-with-nodes-in-multiple-zones-for-ha-purposes-is-that-supported-by-cluster-autoscaler) for more details.
+See the [FAQ](https://github.com/kubernetes-sigs/cluster-autoscaler/blob/v0.0.0-k8s.v1.37.0/pkg/FAQ.md#im-running-cluster-with-nodes-in-multiple-zones-for-ha-purposes-is-that-supported-by-cluster-autoscaler) for more details.
 
 Save the updated deployment manifest, then deploy cluster-autoscaler by running:
 
@@ -155,9 +153,9 @@ kubectl create -f cluster-autoscaler-vmss.yaml
 ```
 
 <!--TODO: Remove "previously referred to as master" references from this doc once this terminology is fully removed from k8s-->
-To run a cluster autoscaler pod on a control plane (previously referred to as master) node, the deployment should tolerate the `master` taint, and `nodeSelector` should be used to schedule pods. Use [cluster-autoscaler-vmss-control-plane.yaml](examples/cluster-autoscaler-vmss-control-plane.yaml) in this case.
+To run a cluster autoscaler pod on a control plane (previously referred to as master) node, the deployment should tolerate the `master` taint, and `nodeSelector` should be used to schedule pods. Use [cluster-autoscaler-vmss-control-plane.yaml](../../../deploy/cluster-autoscaler-vmss-control-plane.yaml) in this case.
 
-To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-vmss-msi.yaml](examples/cluster-autoscaler-vmss-msi.yaml) instead.
+To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-vmss-msi.yaml](../../../deploy/cluster-autoscaler-vmss-msi.yaml) instead.
 
 #### Azure API Throttling
 Azure has hard limits on the number of read and write requests against Azure APIs *per subscription, per region*. Running lots of clusters in a single subscription, or running a single large, dynamic cluster in a subscription can produce side effects that exceed the number of calls permitted within a given time window for a particular category of requests. See the following documents for more detail on Azure API throttling in general:
@@ -167,11 +165,7 @@ Azure has hard limits on the number of read and write requests against Azure API
 
 Given the dynamic nature of cluster autoscaler, it can be a trigger for hitting those rate limits on the subscriptions. This in turn can affect other components running in the cluster that depend on Azure APIs such as kube-controller-manager.
 
-When using K8s versions older than v1.18, we recommend using at least **v.1.17.5, v1.16.9, v1.15.12** which include various improvements on the cloud-provider side that have an impact on the number of API calls during scale down operations.
-
-As for CA versions older than 1.18, we recommend using at least **v.1.17.2, v1.16.5, v1.15.6**.
-
-In addition, cluster-autoscaler exposes a `AZURE_VMSS_CACHE_TTL` environment variable which controls the rate of `GetVMScaleSet` being made. By default, this is 15 seconds but setting this to a higher value such as 60 seconds can protect against API throttling. The caches used are proactively incremented and decremented with the scale up and down operations and this higher value doesn't have any noticeable impact on performance. **Note that the value is in seconds**
+Cluster autoscaler exposes a `AZURE_VMSS_CACHE_TTL` environment variable which controls how often it refreshes VMSS metadata. The default is 60 seconds. Higher values can reduce API calls but delay discovery of external changes.
 
 | Config Name | Default | Environment Variable | Cloud Config File |
 | ----------- | ------- | -------------------- | ----------------- |
@@ -210,9 +204,9 @@ When using K8s 1.18 or higher, it is also recommended to configure backoff and r
 Prerequisites:
 
 - Get Azure credentials from the [**Permissions**](#permissions) step above.
-- Get the name of the initial Azure deployment resource for the cluster. You can find this in the [Azure Portal](https://portal.azure.com) or with the `az deployment list` command. If there are multiple deployments, get the name of the first one.
+- Get the name of the initial Azure deployment resource for the cluster. You can find this in the [Azure Portal](https://portal.azure.com) or with `az deployment group list --resource-group YOUR_RESOURCE_GROUP --output table`. If there are multiple deployments, get the name of the first one.
 
-Make a copy of [cluster-autoscaler-standard-control-plane.yaml](examples/cluster-autoscaler-standard-control-plane.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
+Make a copy of [cluster-autoscaler-standard-control-plane.yaml](../../../deploy/cluster-autoscaler-standard-control-plane.yaml). Fill in the placeholder values for the `cluster-autoscaler-azure` secret data by base64-encoding each of your Azure credential fields.
 
 - ClientID: `<base64-encoded-client-id>`
 - ClientSecret: `<base64-encoded-client-secret>`
@@ -221,9 +215,9 @@ Make a copy of [cluster-autoscaler-standard-control-plane.yaml](examples/cluster
 - TenantID: `<base64-encoded-tenant-id>`
 - Deployment: `<base64-encoded-azure-initial-deployment-name>`
 
-> **_NOTE_**: Use a command such as `echo $CLIENT_ID | base64` to encode each of the fields above.
+> **_NOTE_**: Use a command such as `printf '%s' "$CLIENT_ID" | base64` to encode each field without a trailing newline.
 
-In the `cluster-autoscaler` spec, find the `image:` field and replace `{{ ca_version }}` with a specific cluster autoscaler release.
+In the `cluster-autoscaler` spec, replace the image placeholder with an image you have built and published.
 
 Below that, in the `command:` section, update the `--nodes=` arguments to reference your node limits and node pool name (tips: node pool name is NOT availability set name, e.g., the corresponding node pool name of the availability set
 `agentpool1-availabilitySet-xxxxxxxx` would be `agentpool1`). For example, if node pool "k8s-nodepool-1" should scale from 1 to 10 nodes:
@@ -251,26 +245,13 @@ Then deploy cluster-autoscaler by running:
 kubectl create -f cluster-autoscaler-standard-control-plane.yaml
 ```
 
-To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-standard-msi.yaml](examples/cluster-autoscaler-standard-msi.yaml) instead.
+To run a cluster autoscaler pod with Azure managed service identity (MSI), use [cluster-autoscaler-standard-msi.yaml](../../../deploy/cluster-autoscaler-standard-msi.yaml) instead.
 
 > **_WARNING_**: Cluster autoscaler depends on user-provided deployment parameters to provision new nodes. After upgrading your Kubernetes cluster, cluster autoscaler must also be redeployed with new parameters to prevent provisioning nodes with an old version.
 
 ## AKS Autoscaler
 
-Node Pool Autoscaling is a first class feature of your AKS cluster. The option to enable cluster autoscaler is available in the [Azure Portal][] or with the [Azure CLI][]:
-
-```sh
-az aks create \
-  --resource-group myResourceGroup \
-  --name myAKSCluster \
-  --kubernetes-version 1.25.11 \
-  --node-count 1 \
-  --enable-cluster-autoscaler \
-  --min-count 1 \
-  --max-count 3
-```
-
-Please see the [AKS autoscaler documentation][] for details.
+AKS has a separate managed autoscaler. Enabling it does not install the application from this repository. See the [AKS autoscaler documentation][]. Do not run the managed autoscaler and this provider against the same pools.
 
 ## Rate limit and back-off retries
 
@@ -295,7 +276,6 @@ The new version of [Azure client][] supports rate limit and back-off retries whe
 [aks-engine]: https://github.com/Azure/aks-engine
 [Azure CLI]: https://docs.microsoft.com/cli/azure/install-azure-cli
 [Azure Portal]: https://portal.azure.com
-[Releases]: ../../README.md#releases
 [service principal]: https://docs.microsoft.com/azure/active-directory/develop/app-objects-and-service-principals
 [helm installation tutorial]: https://github.com/helm/charts/tree/master/stable/cluster-autoscaler#azure-aks
 [Azure client]: https://github.com/kubernetes-sigs/cloud-provider-azure/tree/master/pkg/azureclients
