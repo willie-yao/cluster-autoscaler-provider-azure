@@ -7,7 +7,7 @@ cluster-autoscaler-*
 
 # Ignore test files
 *_test.go
-e2e/
+test/
 
 # Ignore documentation and other non-build files
 *.md
@@ -16,7 +16,7 @@ OWNERS
 OWNERS_ALIASES
 CONTRIBUTING.md
 SECURITY_CONTACTS
-code-of-conduct.md
+CODE_OF_CONDUCT.md
 cloudbuild.yaml
 Makefile
 push_image.sh

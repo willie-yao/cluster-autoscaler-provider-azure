@@ -1,6 +1,6 @@
 ---
 name: Bug report
-about: Create a bug report for one of the autoscaler components
+about: Create a bug report
 title: ''
 labels: 'kind/bug'
 assignees: ''
@@ -9,19 +9,6 @@ assignees: ''
 
 <!--
 Please answer these questions before submitting your bug report. Thanks!
--->
-
-**Which component are you using?**:
-
-<!--
-Which autoscaling component hosted in this repository (cluster-autoscaler, vertical-pod-autoscaler, addon-resizer, helm charts) is the bug in?
-
-Add one of the following areas:
-/area addon-resizer
-/area balancer
-/area cluster-autoscaler
-/area helm-charts
-/area vertical-pod-autoscaler
 -->
 
 **What version of the component are you using?**:

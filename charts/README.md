@@ -1,34 +1,29 @@
-# charts
+# Helm chart
 
-The Helm chart for the Cluster Autoscaler project resides within this folder. If making changes to the Helm charts, make sure you follow the instructions below for the pre-commit checks.
+The [cluster-autoscaler chart](cluster-autoscaler/README.md) installs the Azure provider from this repository. It is based on the upstream Cluster Autoscaler chart and supports only Azure. It is not a published chart repository.
 
-## Pre-commit hooks
+There is no official image yet. Set `image.repository` and `image.tag`, configure Azure authentication and select worker pools. See the [installation guide](../README.md#install) and [chart values](cluster-autoscaler/values.yaml).
 
-This Helm repository has pre-commit hooks for Helm specific needs:
+## Development checks
 
-* Makes sure all charts pass a `helm lint` check.
-* Updates the `README.md` file of all charts based on comments in that chart's `values.yaml` file.
+From the repository root, with Helm and chart-testing available:
 
-### Install `pre-commit` binary
-
-The binary for `pre-commit` can be installed via Homebrew:
-
-```shell
-$ brew install pre-commit
+```sh
+helm lint --strict charts/cluster-autoscaler
+ct lint --chart-dirs charts --target-branch main --validate-maintainers=false
 ```
 
-For those without Homebrew, Pre-commit has [other installation methods available](https://pre-commit.com/#install).
+The [chart workflow](../.github/workflows/pr.yaml) runs chart-testing lint, checks version increments and installs changed charts in kind. It also checks the generated README with helm-docs.
 
-### Install git hooks
+## Generate the README
 
-After the `pre-commit` binary is installed, go to this repository's directory, and run the following command to install the git hook:
+Edit [README.md.gotmpl](cluster-autoscaler/README.md.gotmpl) or the comments in `values.yaml`, not the generated chart README.
 
-```shell
-$ pre-commit install
+The chart workflow uses helm-docs v1.14.2 and fails if generation changes tracked files. From the repository root:
+
+```sh
+go run github.com/norwoodj/helm-docs/cmd/helm-docs@v1.14.2
+git diff -- charts/cluster-autoscaler/README.md
 ```
 
-### Install hook dependencies
-
-The pre-commit hooks themselves call binaries under the hood; they can be installed via the [instructions found here](https://github.com/norwoodj/helm-docs#installation).
-
-Note: You should ensure that whichever installation method you are using you either install the same version of helm-docs as used in the PR workflow to ensure your PR passes CI checks or update the version used by the workflow to match.
+Commit the generated README with its source changes. The legacy pre-commit configuration pins an older helm-docs version, so use the CI version above.

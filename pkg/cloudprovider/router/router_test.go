@@ -1,6 +1,3 @@
-//go:build azure
-// +build azure
-
 /*
 Copyright The Kubernetes Authors.
 
@@ -20,7 +17,13 @@ limitations under the License.
 package router
 
 import (
-	// Blank import to register a cloudprovider outside main or test package.
-	// This is by design.
-	_ "github.com/Azure/cluster-autoscaler-provider-azure/pkg/cloudprovider/azure"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"sigs.k8s.io/cluster-autoscaler/pkg/cloudprovider/builder"
 )
+
+func TestAzureIsTheOnlyAndDefaultProvider(t *testing.T) {
+	assert.Equal(t, []string{"azure"}, builder.AvailableCloudProviders())
+	assert.Equal(t, "azure", builder.DefaultCloudProvider())
+}
