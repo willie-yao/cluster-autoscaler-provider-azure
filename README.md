@@ -10,23 +10,24 @@ AKS compatibility work and deallocate mode are not included yet. The E2E suite u
 
 ## Build and test
 
-Use Go 1.26 or later, Git and Make. Race tests also need a C toolchain. Helm is needed for chart tests.
+Use Go 1.26 or later, Git and Make. Race tests also need a C toolchain. Helm is needed for chart checks.
 
 ```sh
 make build
 make test-ci
-make test-chart
 ```
 
-The build writes `cluster-autoscaler-<arch>` for Linux by default. Use `make build GOOS=darwin` for macOS or set `GOARCH` for another architecture. Local tests do not need Azure credentials. See `docs/testing.md` for focused checks and `docs/architecture.md` for version settings.
+The build writes `cluster-autoscaler-<arch>` for Linux by default. Use `make build GOOS=darwin` for macOS or set `GOARCH` for another architecture. Local tests do not need Azure credentials. See [testing](docs/testing.md) for focused checks and [build metadata](docs/architecture.md#build-metadata) for version settings.
+
+For chart changes, run the lint and helm-docs checks in the [chart development guide](charts/README.md#development-checks).
 
 With Docker running, build an image locally:
 
 ```sh
-make image IMAGE=cluster-autoscaler-azure TAG=dev
+make make-image TAG=dev
 ```
 
-The command does not publish the image. Make your image available to the cluster before installing the chart.
+The command builds `localhost/cluster-autoscaler-<arch>:dev` and does not publish it. Override `REGISTRY` or `IMAGE` as needed, and make your image available to the cluster before installing the chart.
 
 ## Install
 
@@ -38,7 +39,7 @@ Create an `azure-values.yaml` file with your subscription, the resource group th
 helm template cluster-autoscaler charts/cluster-autoscaler \
   --namespace kube-system \
   -f azure-values.yaml \
-  --set-string image.repository=YOUR_REGISTRY/cluster-autoscaler-azure \
+  --set-string image.repository=YOUR_REGISTRY/cluster-autoscaler \
   --set-string image.tag=YOUR_TAG
 ```
 
@@ -48,7 +49,7 @@ Review the rendered resources, then install on your Azure cluster:
 helm upgrade --install cluster-autoscaler charts/cluster-autoscaler \
   --namespace kube-system \
   -f azure-values.yaml \
-  --set-string image.repository=YOUR_REGISTRY/cluster-autoscaler-azure \
+  --set-string image.repository=YOUR_REGISTRY/cluster-autoscaler \
   --set-string image.tag=YOUR_TAG \
   --wait
 ```
@@ -57,7 +58,7 @@ Replace `YOUR_REGISTRY` and `YOUR_TAG` in both commands. Optional VPA settings n
 
 ## Code and docs
 
-The shared core moved from [kubernetes/autoscaler](https://github.com/kubernetes/autoscaler) to [kubernetes-sigs/cluster-autoscaler](https://github.com/kubernetes-sigs/cluster-autoscaler). The Azure provider now lives in a separate repository, with the Go module path `github.com/Azure/cluster-autoscaler-provider-azure`. The application uses `sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0` and Kubernetes 1.37.0 libraries. The library versions are not a cluster support statement.
+The provider is derived from the Azure provider in [kubernetes/autoscaler](https://github.com/kubernetes/autoscaler). Upstream licenses and copyrights are kept. The Go module path is `github.com/Azure/cluster-autoscaler-provider-azure`. It uses the core `sigs.k8s.io/cluster-autoscaler v0.0.0-k8s.v1.37.0` and Kubernetes 1.37.0 libraries, which are not a cluster support statement.
 
 | Path | Contents |
 | --- | --- |
@@ -69,7 +70,7 @@ The shared core moved from [kubernetes/autoscaler](https://github.com/kubernetes
 | [test](test) | Separate E2E module |
 | [hack](hack) and [docs](docs) | Development scripts and guides |
 
-Read `docs/architecture.md`, `docs/testing.md` and [source provenance](docs/provenance.md) for details. The `test/README.md` covers live tests. The [legacy development guide](deploy/dev/README.md) describes the limits of the older AKS setup.
+Read [architecture](docs/architecture.md) and [testing](docs/testing.md) for details. The [legacy development guide](deploy/dev/README.md) describes the limits of the older AKS setup.
 
 ## Contribute and get help
 
