@@ -12,7 +12,7 @@ main.go
 
 [`mustBuildAutoscaler`](../main.go) passes the clients, informers and manager to the core's builder. The scheduling simulation and autoscaling loop come from `sigs.k8s.io/cluster-autoscaler`, not a local copy.
 
-[`pkg/cloudprovider/router`](../pkg/cloudprovider/router/router.go) registers only Azure. [`azure_cloud_provider.go`](../pkg/cloudprovider/azure/azure_cloud_provider.go) builds the provider, which discovers groups, creates node templates and requests scale changes. Scale-down deletes instances. AKS compatibility work and deallocate mode are not included.
+[`pkg/cloudprovider/router`](../pkg/cloudprovider/router/router.go) registers only Azure. [`azure_cloud_provider.go`](../pkg/cloudprovider/azure/azure_cloud_provider.go) builds the provider, which discovers groups, creates node templates and requests scale changes. Scale-down deletes instances by default. The opt-in [suspended-node mode](suspended-nodes.md) parks registered VMs and retains their Nodes. AKS compatibility work is not included.
 
 ## Packages and modules
 

@@ -6,7 +6,7 @@ The Azure provider runs [Cluster Autoscaler](https://github.com/kubernetes-sigs/
 
 The project is pre-release. There is no official container image yet. Build your own image and set the chart's `image.repository` and `image.tag`. The default image is a placeholder.
 
-AKS compatibility work and deallocate mode are not included yet. The E2E suite uses a limited AKS test setup with Linux VMSS Uniform pools. It does not establish general AKS or Kubernetes version support. Scale-down uses Azure Delete operations. Do not run another autoscaler against the same pools.
+Scale-down uses Azure Delete operations by default. The opt-in [suspended-node prototype](docs/suspended-nodes.md) parks supported VMSS instances and requires the proposed core resume patch. AKS compatibility work is not included. The E2E suite uses a limited AKS test setup with Linux VMSS Uniform pools. It does not establish general AKS or Kubernetes version support. Do not run another autoscaler against the same pools.
 
 ## Build and test
 
