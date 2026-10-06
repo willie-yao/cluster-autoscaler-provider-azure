@@ -46,6 +46,10 @@ args = parser.parse_args()
 verbose_out = sys.stderr if args.verbose else open("/dev/null", "w")
 
 
+KUBERNETES_COPYRIGHT = "Copyright The Kubernetes Authors."
+MICROSOFT_COPYRIGHT = "Copyright (c) Microsoft Corporation."
+
+
 def get_refs():
     refs = {}
 
@@ -111,8 +115,13 @@ def file_passes(filename, refs, regexs):
             if found != 0:
                 break
 
+    # Files written for this repository use a Microsoft copyright line instead.
+    microsoft_ref = [
+        line.replace(KUBERNETES_COPYRIGHT, MICROSOFT_COPYRIGHT) for line in ref
+    ]
+
     # if we don't match the reference at this point, fail
-    if ref != data:
+    if ref != data and microsoft_ref != data:
         print(f"Header in {filename} does not match reference, diff:", file=verbose_out)
         if args.verbose:
             print(file=verbose_out)
