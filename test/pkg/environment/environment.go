@@ -1,5 +1,3 @@
-//go:build e2e
-
 /*
 Copyright 2024 The Kubernetes Authors.
 
@@ -16,211 +14,182 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package environment provides a shared test environment for Azure CAS e2e tests.
-// The environment provides K8s and Azure clients for test assertions,
-// and optionally deploys CAS via Helm (for CI) or assumes it's already running (for local dev).
 package environment
 
 import (
 	"context"
-	"errors"
 	"fmt"
-	"os"
 	"time"
 
-	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
-	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/compute/armcompute/v5"
-	. "github.com/onsi/ginkgo/v2"
-	. "github.com/onsi/gomega"
-	"helm.sh/helm/v3/pkg/action"
-	"helm.sh/helm/v3/pkg/chart/loader"
-	"helm.sh/helm/v3/pkg/cli"
-	"helm.sh/helm/v3/pkg/storage/driver"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/tools/clientcmd"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 )
 
-const casReleaseName = "cluster-autoscaler"
-
-// HelmConfig holds optional Helm deployment configuration.
-// When populated, BeforeSuite deploys CAS via Helm (CI path).
-// When empty, tests assume CAS is already running (local dev path).
-type HelmConfig struct {
-	ChartPath             string
-	ClusterName           string
-	ClientID              string
-	CASNamespace          string
-	CASServiceAccountName string
-	CASImageRepository    string
-	CASImageTag           string
-}
-
-// IsEnabled returns true if Helm deployment is configured.
-func (h *HelmConfig) IsEnabled() bool {
-	return h != nil && h.CASImageRepository != "" && h.CASImageTag != ""
-}
-
-// Environment holds all clients and configuration for an e2e test suite.
+// Environment reads one prepared cluster and its Azure resources. It does
+// not create infrastructure or change the controller.
 type Environment struct {
-	Ctx            context.Context
-	K8s            client.Client
-	VMSS           *armcompute.VirtualMachineScaleSetsClient
-	ResourceGroup  string
-	SubscriptionID string
-	TenantID       string
-	Helm           *HelmConfig
+	Config Config
+	K8s    client.Client
+	Cloud  Cloud
 }
 
-// NewEnvironment creates a fully initialized Environment.
-func NewEnvironment(resourceGroup string, helm *HelmConfig) *Environment {
-	env := &Environment{
-		Ctx:            context.Background(),
-		ResourceGroup:  resourceGroup,
-		SubscriptionID: os.Getenv("AZURE_SUBSCRIPTION_ID"),
-		TenantID:       os.Getenv("AZURE_TENANT_ID"),
-		Helm:           helm,
+// NewEnvironment validates cfg, connects to the kubeconfig that cfg names
+// and opens a read-only Azure client. It never falls back to an in-cluster
+// or default kubeconfig.
+func NewEnvironment(cfg Config) (*Environment, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, err
 	}
-
-	azCred, err := azidentity.NewDefaultAzureCredential(nil)
-	Expect(err).NotTo(HaveOccurred())
-
-	env.VMSS, err = armcompute.NewVirtualMachineScaleSetsClient(env.SubscriptionID, azCred, nil)
-	Expect(err).NotTo(HaveOccurred())
-
-	restConfig, err := config.GetConfig()
-	Expect(err).NotTo(HaveOccurred())
-	env.K8s, err = client.New(restConfig, client.Options{})
-	Expect(err).NotTo(HaveOccurred())
-
-	return env
+	restConfig, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(
+		&clientcmd.ClientConfigLoadingRules{ExplicitPath: cfg.Kubeconfig}, &clientcmd.ConfigOverrides{},
+	).ClientConfig()
+	if err != nil {
+		return nil, fmt.Errorf("load kubeconfig: %w", err)
+	}
+	restConfig.Timeout = 30 * time.Second
+	k8s, err := client.New(restConfig, client.Options{})
+	if err != nil {
+		return nil, fmt.Errorf("create Kubernetes client: %w", err)
+	}
+	cloud, err := newCloud(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return &Environment{Config: cfg, K8s: k8s, Cloud: cloud}, nil
 }
 
-// --- Helm helpers ---
-
-// EnsureHelmRelease deploys or updates CAS via Helm if HelmConfig is enabled.
-// If Helm is not configured, this is a no-op (CAS is managed externally).
-func (env *Environment) EnsureHelmRelease(extraValues map[string]interface{}) {
-	if !env.Helm.IsEnabled() {
-		GinkgoLogr.Info("Helm not configured — assuming CAS is already deployed (e.g., via skaffold)")
-		return
+// Controller checks that the autoscaler Deployment has one replica and one
+// Ready Pod that runs the expected image, and that its status is fresh,
+// Running and lists exactly the main and zero pools.
+func (e *Environment) Controller(ctx context.Context) error {
+	c := e.Config
+	var deployment appsv1.Deployment
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: c.AutoscalerDeployment}, &deployment); err != nil {
+		return fmt.Errorf("get autoscaler Deployment: %w", err)
 	}
-
-	values := map[string]interface{}{
-		"cloudProvider":                     "azure",
-		"azureTenantID":                     env.TenantID,
-		"azureSubscriptionID":               env.SubscriptionID,
-		"azureUseWorkloadIdentityExtension": true,
-		"azureResourceGroup":                env.ResourceGroup,
-		"podLabels": map[string]interface{}{
-			"azure.workload.identity/use": "true",
-		},
-		"rbac": map[string]interface{}{
-			"serviceAccount": map[string]interface{}{
-				"name": env.Helm.CASServiceAccountName,
-				"annotations": map[string]interface{}{
-					"azure.workload.identity/tenant-id": env.TenantID,
-					"azure.workload.identity/client-id": env.Helm.ClientID,
-				},
-			},
-		},
-		"autoDiscovery": map[string]interface{}{
-			"clusterName": env.Helm.ClusterName,
-		},
-		"nodeSelector": map[string]interface{}{
-			"kubernetes.io/os": "linux",
-		},
-		"image": map[string]interface{}{
-			"repository": env.Helm.CASImageRepository,
-			"tag":        env.Helm.CASImageTag,
-			"pullPolicy": "Always",
-		},
+	if deployment.Spec.Replicas == nil || *deployment.Spec.Replicas != 1 {
+		return fmt.Errorf("autoscaler Deployment must have one replica")
 	}
-
-	// Merge extra values (e.g., extraArgs for scale-down tuning)
-	for k, v := range extraValues {
-		values[k] = v
+	selector, err := metav1.LabelSelectorAsSelector(deployment.Spec.Selector)
+	if err != nil {
+		return fmt.Errorf("parse autoscaler selector: %w", err)
 	}
-
-	helmEnv := cli.New()
-	helmCfg := new(action.Configuration)
-	Expect(helmCfg.Init(helmEnv.RESTClientGetter(), env.Helm.CASNamespace, "secret", func(format string, v ...interface{}) {
-		GinkgoLogr.Info(fmt.Sprintf(format, v...))
-	})).To(Succeed())
-
-	chart, err := loader.Load(env.Helm.ChartPath)
-	Expect(err).NotTo(HaveOccurred())
-
-	get := action.NewGet(helmCfg)
-	_, err = get.Run(casReleaseName)
-	if errors.Is(err, driver.ErrReleaseNotFound) {
-		install := action.NewInstall(helmCfg)
-		install.Timeout = 5 * time.Minute
-		install.Wait = true
-		install.CreateNamespace = true
-		install.ReleaseName = casReleaseName
-		install.Namespace = env.Helm.CASNamespace
-		_, err = install.Run(chart, values)
-		Expect(err).NotTo(HaveOccurred())
-		return
+	var pods corev1.PodList
+	if err := e.K8s.List(ctx, &pods, client.InNamespace(c.AutoscalerNamespace), client.MatchingLabelsSelector{Selector: selector}); err != nil {
+		return fmt.Errorf("list autoscaler Pods: %w", err)
 	}
-	Expect(err).NotTo(HaveOccurred())
-
-	upgrade := action.NewUpgrade(helmCfg)
-	upgrade.Timeout = 5 * time.Minute
-	upgrade.Wait = true
-	upgrade.ResetValues = true
-	_, err = upgrade.Run(casReleaseName, chart, values)
-	Expect(err).NotTo(HaveOccurred())
-}
-
-// --- VMSS helpers ---
-
-// AllVMSSStable checks that all VMSS in the resource group have Succeeded
-// provisioning state and the number of Ready K8s nodes matches total VMSS capacity.
-func (env *Environment) AllVMSSStable(g Gomega) {
-	pager := env.VMSS.NewListPager(env.ResourceGroup, nil)
-	expectedNodes := 0
-	for pager.More() {
-		page, err := pager.NextPage(env.Ctx)
-		g.Expect(err).NotTo(HaveOccurred())
-		for _, scaleset := range page.Value {
-			g.Expect(*scaleset.Properties.ProvisioningState).To(Equal("Succeeded"))
-			expectedNodes += int(*scaleset.SKU.Capacity)
+	if len(pods.Items) != 1 || !PodReady(pods.Items[0]) {
+		return fmt.Errorf("autoscaler must have one Ready Pod, got %d Pods", len(pods.Items))
+	}
+	found := false
+	for _, container := range pods.Items[0].Spec.Containers {
+		if container.Name != c.AutoscalerContainer {
+			continue
+		}
+		found = true
+		if container.Image != c.ExpectedImage {
+			return fmt.Errorf("autoscaler image %q differs from the expected %q", container.Image, c.ExpectedImage)
 		}
 	}
-
-	nodes := &corev1.NodeList{}
-	g.Expect(env.K8s.List(env.Ctx, nodes)).To(Succeed())
-	g.Expect(nodes.Items).To(SatisfyAll(
-		HaveLen(expectedNodes),
-		ContainElements(Satisfy(func(node corev1.Node) bool {
-			for _, cond := range node.Status.Conditions {
-				if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-					return true
-				}
-			}
-			return false
-		})),
-	))
+	if !found {
+		return fmt.Errorf("autoscaler container %s is missing", c.AutoscalerContainer)
+	}
+	var status corev1.ConfigMap
+	if err := e.K8s.Get(ctx, client.ObjectKey{Namespace: c.AutoscalerNamespace, Name: "cluster-autoscaler-status"}, &status); err != nil {
+		return fmt.Errorf("get autoscaler status ConfigMap: %w", err)
+	}
+	return CheckStatus(status.Data["status"], []string{c.MainPool, c.ZeroPool}, time.Now())
 }
 
-// --- K8s helpers ---
-
-// ReadyNodeCount returns the number of Ready nodes in the cluster.
-func (env *Environment) ReadyNodeCount() (int, error) {
-	readyCount := 0
-	nodes := &corev1.NodeList{}
-	if err := env.K8s.List(env.Ctx, nodes); err != nil {
-		return 0, err
+// Read returns the Azure pools and the Kubernetes Nodes. It returns an
+// ErrBounds error when a pool is above its max tag.
+func (e *Environment) Read(ctx context.Context) (Snapshot, error) {
+	result, err := e.Cloud.Read(ctx)
+	if err != nil {
+		return result, err
 	}
-	for _, node := range nodes.Items {
-		for _, cond := range node.Status.Conditions {
-			if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-				readyCount++
-				break
+	if err := result.checkMax(); err != nil {
+		return result, err
+	}
+	var nodes corev1.NodeList
+	if err := e.K8s.List(ctx, &nodes); err != nil {
+		return result, fmt.Errorf("list Nodes: %w", err)
+	}
+	result.Nodes = nodes.Items
+	return result, nil
+}
+
+// CheckWorkerIsolation returns an error if a running Pod on a main or zero
+// worker is neither a DaemonSet Pod nor a run-labeled Pod in namespace.
+func (e *Environment) CheckWorkerIsolation(ctx context.Context, snapshot Snapshot, namespace string) error {
+	workers := map[string]bool{}
+	for _, node := range WorkerNodes(snapshot.Nodes, e.Config) {
+		workers[node.Name] = true
+	}
+	var pods corev1.PodList
+	if err := e.K8s.List(ctx, &pods); err != nil {
+		return fmt.Errorf("list Pods: %w", err)
+	}
+	daemonSet := appsv1.SchemeGroupVersion.WithKind("DaemonSet")
+	for _, pod := range pods.Items {
+		if !workers[pod.Spec.NodeName] || pod.Status.Phase == corev1.PodSucceeded || pod.Status.Phase == corev1.PodFailed {
+			continue
+		}
+		if pod.Namespace == namespace && pod.Labels[RunLabel] == e.Config.RunID {
+			continue
+		}
+		if owner := metav1.GetControllerOf(&pod); owner != nil &&
+			owner.APIVersion == daemonSet.GroupVersion().String() && owner.Kind == daemonSet.Kind {
+			continue
+		}
+		return fmt.Errorf("non-DaemonSet Pod %s/%s occupies test worker %s", pod.Namespace, pod.Name, pod.Spec.NodeName)
+	}
+	return nil
+}
+
+// Deleted returns nil when exactly count instances of pool in before are
+// gone from after, and none of them still has a Node or a NIC.
+func (e *Environment) Deleted(ctx context.Context, before, after Snapshot, pool string, count int) error {
+	var deleted int
+	for id, instance := range before.Pools[pool].Instances {
+		if _, exists := after.Pools[pool].Instances[id]; exists {
+			continue
+		}
+		deleted++
+		for _, node := range after.Nodes {
+			if normalizeID(node.Spec.ProviderID) == id {
+				return fmt.Errorf("deleted instance still has Node %s", node.Name)
+			}
+		}
+		for _, nic := range instance.NICs {
+			exists, err := e.Cloud.NICExists(ctx, nic)
+			if err != nil {
+				return fmt.Errorf("check NIC %s: %w", nic, err)
+			}
+			if exists {
+				return fmt.Errorf("deleted instance still has NIC %s", nic)
 			}
 		}
 	}
-	return readyCount, nil
+	if deleted != count {
+		return fmt.Errorf("observed %d captured instance deletions, want %d", deleted, count)
+	}
+	return nil
+}
+
+// PodReady reports whether pod is Running, not being deleted and has a true
+// Ready condition.
+func PodReady(pod corev1.Pod) bool {
+	if pod.DeletionTimestamp != nil || pod.Status.Phase != corev1.PodRunning {
+		return false
+	}
+	for _, condition := range pod.Status.Conditions {
+		if condition.Type == corev1.PodReady {
+			return condition.Status == corev1.ConditionTrue
+		}
+	}
+	return false
 }

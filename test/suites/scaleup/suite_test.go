@@ -19,206 +19,174 @@ limitations under the License.
 package scaleup_test
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"testing"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
-	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/Azure/cluster-autoscaler-provider-azure/test/pkg/environment"
 )
 
-var (
-	env           *environment.Environment
-	resourceGroup string
-
-	// Helm deployment flags (CI path). When image repo+tag are set, CAS is deployed via Helm.
-	// When empty, CAS is assumed to already be running (local dev path via skaffold).
-	clusterName           string
-	clientID              string
-	casNamespace          string
-	casServiceAccountName string
-	casImageRepository    string
-	casImageTag           string
+const (
+	settleTimeout = 15 * time.Minute
+	pollInterval  = 10 * time.Second
 )
 
-func helmValuesForScaleUp() map[string]interface{} {
-	return map[string]interface{}{
-		"extraArgs": map[string]interface{}{
-			"scale-down-delay-after-add": "30m",
-			"scale-down-unneeded-time":   "30m",
-		},
-	}
-}
-
-func helmValuesForFastScaleDown() map[string]interface{} {
-	return map[string]interface{}{
-		"extraArgs": map[string]interface{}{
-			"scale-down-delay-after-add":       "10s",
-			"scale-down-unneeded-time":         "10s",
-			"scale-down-candidates-pool-ratio": "1.0",
-			"unremovable-node-recheck-timeout": "10s",
-			"skip-nodes-with-system-pods":      "false",
-			"skip-nodes-with-local-storage":    "false",
-		},
-	}
-}
-
-// withVMSSETag enables the Azure VMSS ETag optimistic-concurrency feature via the
-// chart's azureEnableVMSSEtag value (which sets AZURE_ENABLE_VMSS_ETAG on the CAS
-// container).
-func withVMSSETag(values map[string]interface{}) map[string]interface{} {
-	values["azureEnableVMSSEtag"] = true
-	return values
-}
-
-// newScaleUpDeployment returns a CPU-hungry Deployment whose pending Pods force the
-// Cluster Autoscaler to scale up node pools.
-func newScaleUpDeployment(namespace string, replicas int32) *appsv1.Deployment {
-	return &appsv1.Deployment{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "php-apache",
-			Namespace: namespace,
-		},
-		Spec: appsv1.DeploymentSpec{
-			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"run": "php-apache"},
-			},
-			Replicas: ptr.To[int32](replicas),
-			Template: corev1.PodTemplateSpec{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{"run": "php-apache"},
-				},
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "php-apache",
-							Image: "registry.k8s.io/hpa-example",
-							Resources: corev1.ResourceRequirements{
-								Limits: corev1.ResourceList{
-									corev1.ResourceCPU: resource.MustParse("500m"),
-								},
-								Requests: corev1.ResourceList{
-									corev1.ResourceCPU: resource.MustParse("200m"),
-								},
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-}
-
-// runScaleUpDownFlow deploys CAS with scaleUpValues, drives a scale-up by creating
-// pending Pods, then redeploys with scaleDownValues and removes the Pods to drive a
-// scale-down back to the original node count. It is shared by the default and
-// ETag-enabled specs so both exercise the same scaling behavior.
-func runScaleUpDownFlow(namespace string, scaleUpValues, scaleDownValues map[string]interface{}) {
-	By("Deploying Cluster Autoscaler for scale up")
-	env.EnsureHelmRelease(scaleUpValues)
-
-	nodes := &corev1.NodeList{}
-	Expect(env.K8s.List(env.Ctx, nodes)).To(Succeed())
-	nodeCountBefore := len(nodes.Items)
-
-	By("Creating 100 Pods")
-	deploy := newScaleUpDeployment(namespace, 100)
-	Expect(env.K8s.Create(env.Ctx, deploy)).To(Succeed())
-
-	By("Waiting for more Ready Nodes to exist")
-	Eventually(env.ReadyNodeCount, "10m", "10s").Should(BeNumerically(">", nodeCountBefore))
-
-	Eventually(env.AllVMSSStable, "20m", "30s").Should(Succeed())
-
-	By("Reconfiguring Cluster Autoscaler for fast scale down")
-	env.EnsureHelmRelease(scaleDownValues)
-
-	By("Deleting 100 Pods")
-	Expect(env.K8s.Delete(env.Ctx, deploy)).To(Succeed())
-
-	By("Waiting for the original number of Nodes to be Ready")
-	Eventually(func(g Gomega) {
-		nodes := &corev1.NodeList{}
-		g.Expect(env.K8s.List(env.Ctx, nodes)).To(Succeed())
-		g.Expect(nodes.Items).To(SatisfyAll(
-			HaveLen(nodeCountBefore),
-			ContainElements(Satisfy(func(node corev1.Node) bool {
-				for _, cond := range node.Status.Conditions {
-					if cond.Type == corev1.NodeReady && cond.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			})),
-		))
-	}, "20m", "10s").Should(Succeed())
-}
+var (
+	env        *environment.Environment
+	configPath string
+	namespace  *corev1.Namespace
+)
 
 func init() {
-	flag.StringVar(&resourceGroup, "resource-group", "", "resource group containing cluster-autoscaler-managed resources (the MC_ node resource group)")
-	flag.StringVar(&clusterName, "cluster-name", "", "Cluster API Cluster name (CI only)")
-	flag.StringVar(&clientID, "client-id", "", "Azure client ID for CAS workload identity (CI only)")
-	flag.StringVar(&casNamespace, "cas-namespace", "default", "Namespace for CAS Helm release (CI only)")
-	flag.StringVar(&casServiceAccountName, "cas-serviceaccount-name", "cluster-autoscaler", "CAS ServiceAccount name (CI only)")
-	flag.StringVar(&casImageRepository, "cas-image-repository", "", "CAS image repository (CI only, triggers Helm deploy)")
-	flag.StringVar(&casImageTag, "cas-image-tag", "", "CAS image tag (CI only, triggers Helm deploy)")
+	flag.StringVar(&configPath, "environment", "", "JSON binding to the prepared cluster (required)")
 }
 
 func TestScaleUp(t *testing.T) {
 	RegisterFailHandler(Fail)
-	RunSpecs(t, "Scale Up Suite")
+	RunSpecs(t, "Azure E2E suite")
 }
 
 var _ = BeforeSuite(func() {
-	var helm *environment.HelmConfig
-	if casImageRepository != "" && casImageTag != "" {
-		helm = &environment.HelmConfig{
-			// From suites/scaleup/, 3 levels up reaches the repository root where charts/ lives.
-			ChartPath:             "../../../charts/cluster-autoscaler",
-			ClusterName:           clusterName,
-			ClientID:              clientID,
-			CASNamespace:          casNamespace,
-			CASServiceAccountName: casServiceAccountName,
-			CASImageRepository:    casImageRepository,
-			CASImageTag:           casImageTag,
+	Expect(configPath).NotTo(BeEmpty(), "-environment is required")
+	config, _ := GinkgoConfiguration()
+	Expect(config.ParallelTotal).To(Equal(1), "the specs share one cluster")
+	cfg, err := environment.LoadConfig(configPath)
+	Expect(err).NotTo(HaveOccurred())
+	env, err = environment.NewEnvironment(cfg)
+	Expect(err).NotTo(HaveOccurred())
+})
+
+var _ = BeforeEach(func(ctx SpecContext) {
+	Eventually(ctx, env.Controller, time.Minute, pollInterval).Should(Succeed())
+	AddReportEntry("runtime-image", env.Config.ExpectedImage)
+	baseline := waitStable(ctx, 1, 0)
+	Expect(env.CheckWorkerIsolation(ctx, baseline, "")).To(Succeed())
+	namespace = &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{
+		GenerateName: "azure-e2e-", Labels: map[string]string{environment.RunLabel: env.Config.RunID},
+	}}
+	Expect(env.K8s.Create(ctx, namespace)).To(Succeed())
+	created := namespace.DeepCopy()
+	DeferCleanup(func(ctx SpecContext) {
+		Expect(client.IgnoreNotFound(env.K8s.Delete(ctx, created))).To(Succeed())
+		Eventually(ctx, func() error {
+			err := env.K8s.Get(ctx, client.ObjectKeyFromObject(created), &corev1.Namespace{})
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			if err != nil {
+				return err
+			}
+			return fmt.Errorf("test namespace is still terminating")
+		}, 4*time.Minute, pollInterval).Should(Succeed())
+		waitStable(ctx, 1, 0)
+	}, NodeTimeout(20*time.Minute))
+}, NodeTimeout(20*time.Minute))
+
+var _ = Describe("Azure Provider", Serial, func() {
+	It("discovers only the tagged pools and stays idle", func(ctx SpecContext) {
+		baseline, err := readSnapshot(ctx)
+		Expect(err).NotTo(HaveOccurred())
+		baselineNodes := []string{}
+		for _, node := range baseline.Nodes {
+			baselineNodes = append(baselineNodes, node.Name)
 		}
+		Consistently(ctx, func(g Gomega) {
+			g.Expect(env.Controller(ctx)).To(Succeed())
+			snapshot, err := readSnapshot(ctx)
+			g.Expect(err).NotTo(HaveOccurred())
+			for name, pool := range baseline.Pools {
+				current := snapshot.Pools[name]
+				g.Expect(current.Capacity).To(Equal(pool.Capacity))
+				g.Expect(current.Instances).To(HaveLen(len(pool.Instances)))
+				for id := range pool.Instances {
+					g.Expect(current.Instances).To(HaveKey(id))
+				}
+			}
+			currentNodes := []string{}
+			for _, node := range snapshot.Nodes {
+				currentNodes = append(currentNodes, node.Name)
+			}
+			g.Expect(currentNodes).To(ConsistOf(baselineNodes))
+		}, 2*time.Minute, pollInterval).Should(Succeed())
+	}, NodeTimeout(4*time.Minute))
+
+	It("scales up AKS node pools when pending Pods exist", func(ctx SpecContext) {
+		Expect(env.DemandFits(ctx, waitStable(ctx, 1, 0), env.Config.MainPool)).To(Succeed())
+		By("creating demand for two main workers")
+		deployment := env.Deployment(namespace.Name, "demand", env.Config.MainLabel, env.Config.DemandCPU, 2)
+		Expect(env.K8s.Create(ctx, deployment)).To(Succeed())
+		grown := waitStable(ctx, 2, 0)
+		pods := waitWorkload(ctx, deployment.Name, env.Config.MainPool, 2, 0)
+		Expect(pods[0].Spec.NodeName).NotTo(Equal(pods[1].Spec.NodeName))
+		By("removing the demand and waiting for the added worker to be deleted")
+		Expect(env.K8s.Delete(ctx, deployment)).To(Succeed())
+		waitDeleted(ctx, grown, env.Config.MainPool, 1, 1, 0)
+	}, NodeTimeout(45*time.Minute))
+
+	It("scales a pool up from zero and deletes the VM, Node and NIC when it returns to zero", func(ctx SpecContext) {
+		By("creating demand for the zero pool")
+		deployment := env.Deployment(namespace.Name, "zero", env.Config.ZeroLabel, env.Config.DemandCPU, 1)
+		Expect(env.K8s.Create(ctx, deployment)).To(Succeed())
+		grown := waitStable(ctx, 1, 1)
+		waitWorkload(ctx, deployment.Name, env.Config.ZeroPool, 1, 0)
+		By("removing the demand and waiting for the zero-pool worker to be deleted")
+		Expect(env.K8s.Delete(ctx, deployment)).To(Succeed())
+		waitDeleted(ctx, grown, env.Config.ZeroPool, 1, 1, 0)
+	}, NodeTimeout(45*time.Minute))
+})
+
+func readSnapshot(ctx context.Context) (environment.Snapshot, error) {
+	snapshot, err := env.Read(ctx)
+	if errors.Is(err, environment.ErrBounds) {
+		StopTrying("a pool exceeded its maximum").Wrap(err).Now()
 	}
-	env = environment.NewEnvironment(resourceGroup, helm)
-	env.EnsureHelmRelease(helmValuesForScaleUp())
-})
+	return snapshot, err
+}
 
-var _ = Describe("Azure Provider", func() {
-	var namespace *corev1.Namespace
-
-	BeforeEach(func() {
-		Eventually(env.AllVMSSStable, "10m", "30s").Should(Succeed())
-		namespace = &corev1.Namespace{
-			ObjectMeta: metav1.ObjectMeta{GenerateName: "azure-e2e-"},
+func waitStable(ctx context.Context, main, zero int) environment.Snapshot {
+	var snapshot environment.Snapshot
+	Eventually(ctx, func() error {
+		var err error
+		snapshot, err = readSnapshot(ctx)
+		if err != nil {
+			return err
 		}
-		Expect(env.K8s.Create(env.Ctx, namespace)).To(Succeed())
-	})
+		return snapshot.Stable(env.Config, main, zero)
+	}, settleTimeout, pollInterval).Should(Succeed())
+	AddReportEntry(fmt.Sprintf("stable-%d-%d", main, zero), snapshot)
+	return snapshot
+}
 
-	AfterEach(func() {
-		Expect(env.K8s.Delete(env.Ctx, namespace)).To(Succeed())
-		Eventually(func() bool {
-			err := env.K8s.Get(env.Ctx, client.ObjectKeyFromObject(namespace), &corev1.Namespace{})
-			return apierrors.IsNotFound(err)
-		}, "1m", "5s").Should(BeTrue(), "Namespace "+namespace.Name+" still exists")
-	})
+func waitWorkload(ctx context.Context, name, pool string, ready, pending int) []corev1.Pod {
+	pods := []corev1.Pod{}
+	Eventually(ctx, func() error {
+		var err error
+		pods, err = env.WorkloadState(ctx, namespace.Name, name, pool, ready, pending)
+		return err
+	}, settleTimeout, pollInterval).Should(Succeed())
+	return pods
+}
 
-	It("scales up AKS node pools when pending Pods exist", func() {
-		runScaleUpDownFlow(namespace.Name, helmValuesForScaleUp(), helmValuesForFastScaleDown())
-	})
-
-	It("scales up and down AKS node pools with VMSS ETag concurrency enabled", func() {
-		runScaleUpDownFlow(namespace.Name, withVMSSETag(helmValuesForScaleUp()), withVMSSETag(helmValuesForFastScaleDown()))
-	})
-})
+func waitDeleted(ctx context.Context, before environment.Snapshot, pool string, deleted, main, zero int) {
+	Eventually(ctx, func() error {
+		after, err := readSnapshot(ctx)
+		if err != nil {
+			return err
+		}
+		if err := after.Stable(env.Config, main, zero); err != nil {
+			return err
+		}
+		return env.Deleted(ctx, before, after, pool, deleted)
+	}, settleTimeout, pollInterval).Should(Succeed())
+	AddReportEntry("physical-delete", fmt.Sprintf("pool=%s removedInstances=%d; VM, Node and NIC IDs absent", pool, deleted))
+}
