@@ -1,0 +1,103 @@
+# Copyright (c) Microsoft Corporation.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+name: Azure E2E
+on:
+  workflow_call:
+    inputs:
+      suite:
+        type: string
+        default: scaleup
+      kubernetes_version:
+        type: string
+        default: "1.37.0"
+      location:
+        type: string
+        default: ""
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Suite directory
+        type: choice
+        options: [scaleup]
+        default: scaleup
+      kubernetes_version:
+        description: AKS Kubernetes version
+        type: string
+        default: "1.37.0"
+      location:
+        description: Azure location (defaults to E2E_LOCATION)
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: azure-e2e-${{ vars.E2E_SUBSCRIPTION_ID }}
+  cancel-in-progress: false
+
+jobs:
+  suite:
+    # Reusable calls retain the caller's event. Never run untrusted PR code.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ${{ fromJSON(vars.E2E_RUNS_ON) }}
+    timeout-minutes: 170
+    env:
+      AZURE_CLIENT_ID: ${{ vars.E2E_CLIENT_ID }}
+      AZURE_SUBSCRIPTION_ID: ${{ vars.E2E_SUBSCRIPTION_ID }}
+      AZURE_LOCATION: ${{ inputs.location || vars.E2E_LOCATION }}
+      KUBERNETES_VERSION: ${{ inputs.kubernetes_version }}
+      TEST_SUITE: ${{ inputs.suite }}
+      CLUSTER_NAME: ${{ vars.E2E_RESOURCE_PREFIX || 'e2ea' }}${{ github.run_id }}a${{ github.run_attempt }}
+      GOMAXPROCS: "4"
+    steps:
+      - name: Set run directories
+        run: |
+          echo "E2E_ROOT=$RUNNER_TEMP/azure-e2e-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+          echo "AZURE_CONFIG_DIR=$RUNNER_TEMP/azure-cli-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_ENV"
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Go
+        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: "1.26.7"
+          cache-dependency-path: |
+            go.sum
+            test/go.sum
+      - name: Log in with the runner identity
+        run: |
+          az login --identity --client-id "$AZURE_CLIENT_ID" --output none
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+      - name: Create the CAPZ cluster and run the suite
+        timeout-minutes: 115
+        run: bash test/hack/ci-e2e.sh run
+      - name: Collect artifacts
+        if: always()
+        timeout-minutes: 3
+        run: bash test/hack/ci-e2e.sh collect
+      - name: Delete and verify Azure resources
+        if: always()
+        timeout-minutes: 45
+        run: bash test/hack/ci-e2e.sh cleanup
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: e2e-${{ inputs.suite }}-${{ github.run_attempt }}
+          path: ${{ env.E2E_ROOT }}/artifacts
+          if-no-files-found: warn
+          retention-days: 7
