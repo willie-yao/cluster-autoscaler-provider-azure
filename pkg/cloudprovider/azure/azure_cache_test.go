@@ -17,6 +17,7 @@ limitations under the License.
 package azure
 
 import (
+	"context"
 	"testing"
 
 	providerazureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
@@ -24,8 +25,11 @@ import (
 
 	"github.com/Azure/azure-sdk-for-go/sdk/resourcemanager/containerservice/armcontainerservice/v8"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/mock/gomock"
+	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/utils/ptr"
+	"sigs.k8s.io/cluster-autoscaler/pkg/config/dynamic"
 )
 
 func TestFetchVMsPools(t *testing.T) {
@@ -72,6 +76,51 @@ func TestRegister(t *testing.T) {
 	ss1.minSize = 2
 	isSuccess = ac.Register(ss1)
 	assert.True(t, isSuccess)
+}
+
+func TestRegisterSuspendedConfiguredBounds(t *testing.T) {
+	world := &suspendedWorld{states: []string{vmPowerStateDeallocated, vmPowerStateRunning, vmPowerStateDeallocated}}
+	provider, group := newSuspendedProvider(t, world, fake.NewClientset(), 0, 3)
+	manager := provider.azureManager
+	group.recordPower("vm-0", suspendedPowerOperation{})
+	require.Equal(t, 1, group.MinSize(t.Context()))
+	require.Equal(t, 4, group.MaxSize(t.Context()))
+	next, err := NewScaleSet(&dynamic.NodeGroupSpec{Name: "pool", MinSize: 0, MaxSize: 3}, manager, 3, false)
+	require.NoError(t, err)
+	require.Equal(t, 2, next.MinSize(t.Context()))
+	require.Equal(t, 5, next.MaxSize(t.Context()))
+	require.False(t, manager.azureCache.Register(next), "dynamic differences must not replace a group")
+	require.Same(t, group, manager.getNodeGroups()[0])
+
+	set := world.vmss()
+	set.Tags["discover"], set.Tags["min"], set.Tags["max"] = ptr.To("yes"), ptr.To("0"), ptr.To("3")
+	manager.azureCache.setScaleSet("pool", set)
+	manager.explicitlyConfigured = make(map[string]bool)
+	manager.autoDiscoverySpecs, err = ParseLabelAutoDiscoverySpecs(cloudprovider.NodeGroupDiscoveryOptions{
+		NodeGroupAutoDiscoverySpecs: []string{"label:discover=yes"},
+	})
+	require.NoError(t, err)
+	for range 2 {
+		require.NoError(t, manager.fetchAutoNodeGroups())
+		require.Same(t, group, manager.getNodeGroups()[0])
+		op, pending := group.powerOperation("vm-0")
+		require.True(t, pending)
+		require.False(t, op.park)
+		require.Equal(t, 4, group.MaxSize(t.Context()))
+	}
+}
+
+func TestRegisterScaleSetModeChange(t *testing.T) {
+	provider, group := newSuspendedProvider(t, &suspendedWorld{states: []string{vmPowerStateRunning}}, fake.NewClientset(), 0, 3)
+	manager := provider.azureManager
+	manager.config.Deallocate = false
+	next, err := NewScaleSet(&dynamic.NodeGroupSpec{Name: "pool", MinSize: 0, MaxSize: 3}, manager, 1, false)
+	require.NoError(t, err)
+	require.Equal(t, group.MinSize(context.Background()), next.MinSize(context.Background()))
+	require.Equal(t, group.MaxSize(context.Background()), next.MaxSize(context.Background()))
+	require.True(t, manager.azureCache.Register(next))
+	require.Same(t, next, manager.getNodeGroups()[0])
+	require.False(t, next.suspendsParkedNodes())
 }
 
 func TestUnRegister(t *testing.T) {

@@ -19,6 +19,7 @@ limitations under the License.
 package azure
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -30,6 +31,7 @@ import (
 	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/go-autorest/autorest/azure"
 	"k8s.io/apimachinery/pkg/util/wait"
+	kubeclient "k8s.io/client-go/kubernetes"
 	kretry "k8s.io/client-go/util/retry"
 	klog "k8s.io/klog/v2"
 	providerazureconsts "sigs.k8s.io/cloud-provider-azure/pkg/consts"
@@ -83,8 +85,10 @@ type AzureManager struct {
 	// lastRefresh to force refresh on the next check.
 	lastRefresh time.Time
 
-	autoDiscoverySpecs   []labelAutoDiscoveryConfig
-	explicitlyConfigured map[string]bool
+	autoDiscoverySpecs        []labelAutoDiscoveryConfig
+	explicitlyConfigured      map[string]bool
+	kubeClient                kubeclient.Interface
+	cordonNodeBeforeTerminate bool
 }
 
 // createAzureManagerInternal allows for a custom azClient to be passed in by tests.
@@ -106,7 +110,7 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 	klog.Infof("Starting azure manager with subscription ID %q", cfg.SubscriptionID)
 
 	if azClient == nil {
-		azClient, err = newAzClient(cfg, &env)
+		azClient, err = newAzClient(cfg, &env, discoveryOpts.NodeGroupSpecs)
 		if err != nil {
 			return nil, err
 		}
@@ -141,10 +145,6 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 	}
 	manager.autoDiscoverySpecs = specs
 
-	if err := manager.fetchExplicitNodeGroups(discoveryOpts.NodeGroupSpecs); err != nil {
-		return nil, err
-	}
-
 	retryBackoff := wait.Backoff{
 		Duration: 2 * time.Minute,
 		Factor:   1.0,
@@ -153,12 +153,26 @@ func createAzureManagerInternal(configReader io.Reader, discoveryOpts cloudprovi
 		Cap:      10 * time.Minute,
 	}
 
+	if cfg.Deallocate || hasExplicitDeallocatePolicy(discoveryOpts.NodeGroupSpecs) {
+		if err := kretry.OnError(retryBackoff, isErrorRetriable, manager.azureCache.regenerate); err != nil {
+			return nil, fmt.Errorf("load inventory for Deallocate groups: %w", err)
+		}
+	}
+	if err := manager.fetchExplicitNodeGroups(discoveryOpts.NodeGroupSpecs); err != nil {
+		return nil, err
+	}
+
 	// skuCache will already be created at this step by newAzureCache()
 	err = kretry.OnError(retryBackoff, isErrorRetriable, func() (err error) {
 		return manager.forceRefresh()
 	})
 	if err != nil {
 		return nil, err
+	}
+
+	if cfg.MaxActiveNodes > 0 && !manager.suspendedModeEnabled() {
+		manager.Cleanup()
+		return nil, fmt.Errorf("maxActiveNodes requires deallocate or an explicit Deallocate node group")
 	}
 
 	return manager, nil
@@ -171,21 +185,49 @@ func CreateAzureManager(configReader io.Reader, discoveryOpts cloudprovider.Node
 
 func (m *AzureManager) fetchExplicitNodeGroups(specs []string) error {
 	changed := false
+	nodeGroups := []cloudprovider.NodeGroup{}
+	skipped := make(map[string]bool)
+	suspended := make(map[string]bool)
 	for _, spec := range specs {
 		nodeGroup, err := m.buildNodeGroupFromSpec(spec)
 		if err != nil {
+			var unsupported *unsupportedDeallocateError
+			if errors.As(err, &unsupported) {
+				klog.Error(unsupported)
+				id := strings.ToLower(unsupported.name)
+				skipped[id] = true
+				m.explicitlyConfigured[id] = true
+				continue
+			}
 			return fmt.Errorf("failed to parse node group spec: %v", err)
+		}
+		nodeGroups = append(nodeGroups, nodeGroup)
+		if group, ok := nodeGroup.(*ScaleSet); ok && group.suspendsParkedNodes() {
+			suspended[strings.ToLower(group.Id())] = true
+		}
+	}
+	for _, nodeGroup := range nodeGroups {
+		id := strings.ToLower(nodeGroup.Id())
+		if skipped[id] {
+			continue
+		}
+		if group, ok := nodeGroup.(*ScaleSet); ok && suspended[id] && !group.suspendsParkedNodes() {
+			continue
 		}
 		if m.RegisterNodeGroup(nodeGroup) {
 			changed = true
 		}
-		m.explicitlyConfigured[nodeGroup.Id()] = true
+		m.explicitlyConfigured[strings.ToLower(nodeGroup.Id())] = true
 	}
 
 	if changed {
 		m.invalidateCache()
 	}
 	return nil
+}
+
+func (m *AzureManager) isExplicitlyConfigured(id string) bool {
+	return m.explicitlyConfigured[id] || m.explicitlyConfigured[strings.ToLower(id)]
 }
 
 // parseSKUAndVMsAgentpoolNameFromSpecName parses the spec name for a mixed-SKU VMs pool.
@@ -210,7 +252,7 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	if strings.EqualFold(m.config.VMType, providerazureconsts.VMTypeVMSS) {
 		scaleToZeroSupported = scaleToZeroSupportedVMSS
 	}
-	s, err := dynamic.SpecFromString(spec, scaleToZeroSupported)
+	s, err := parseAzureNodeGroupSpec(spec, scaleToZeroSupported)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse node group spec: %v", err)
 	}
@@ -219,15 +261,38 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 	// Therefore, we cannot solely rely on the VMType to determine the node group type.
 	// Instead, we need to check the cache to determine if the agent pool is a VMs pool.
 	isVMsPool, agentPoolName, sku := m.parseSKUAndVMsAgentpoolNameFromSpecName(s.Name)
+	deallocate := s.policy == scaleDownPolicyDeallocate || m.config.Deallocate
 	if isVMsPool {
-		return NewVMPool(s, m, agentPoolName, sku)
+		if deallocate {
+			return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("VMs pools are not supported")}
+		}
+		return NewVMPool(s.NodeGroupSpec, m, agentPoolName, sku)
 	}
 
 	switch m.config.VMType {
 	case providerazureconsts.VMTypeStandard:
-		return NewAgentPool(s, m)
+		if deallocate {
+			return nil, &unsupportedDeallocateError{name: s.Name, reason: fmt.Errorf("standard pools are not supported")}
+		}
+		return NewAgentPool(s.NodeGroupSpec, m)
 	case providerazureconsts.VMTypeVMSS:
-		return NewScaleSet(s, m, -1, false)
+		group, err := NewScaleSet(s.NodeGroupSpec, m, -1, false)
+		if err != nil {
+			return nil, err
+		}
+		if deallocate && !group.suspendsParkedNodes() {
+			if err := group.validateSuspendedMode(); err != nil {
+				return nil, &unsupportedDeallocateError{name: s.Name, reason: err}
+			}
+			group.deallocate = true
+			if group.suspendedVMSSState == nil {
+				group.suspendedVMSSState = &suspendedVMSSState{}
+			}
+			if _, err := group.suspendedInventory(context.Background(), true); err != nil {
+				return nil, err
+			}
+		}
+		return group, nil
 	default:
 		return nil, fmt.Errorf("vmtype %s not supported", m.config.VMType)
 	}
@@ -236,15 +301,20 @@ func (m *AzureManager) buildNodeGroupFromSpec(spec string) (cloudprovider.NodeGr
 // Refresh is called before every main loop and can be used to dynamically update cloud provider state.
 // In particular the list of node groups returned by NodeGroups can change as a result of CloudProvider.Refresh().
 func (m *AzureManager) Refresh() error {
-	if m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
-		return nil
+	if !m.lastRefresh.Add(m.azureCache.refreshInterval).After(time.Now()) {
+		if err := m.forceRefresh(); err != nil {
+			return err
+		}
 	}
-	return m.forceRefresh()
+	return m.reconcileSuspendedNodes()
 }
 
 func (m *AzureManager) forceRefresh() error {
 	if err := m.fetchAutoNodeGroups(); err != nil {
 		klog.Errorf("Failed to fetch autodiscovered nodegroups: %v", err)
+		if m.config.Deallocate {
+			return err
+		}
 	}
 	if err := m.azureCache.regenerate(); err != nil {
 		klog.Errorf("Failed to regenerate Azure cache: %v", err)
@@ -275,7 +345,7 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 	for _, group := range groups {
 		id := group.Id()
 		exists[id] = true
-		if m.explicitlyConfigured[id] {
+		if m.isExplicitlyConfigured(id) {
 			// This NodeGroup was explicitly configured, but would also be
 			// autodiscovered. We want the explicitly configured min and max
 			// nodes to take precedence.
@@ -290,7 +360,7 @@ func (m *AzureManager) fetchAutoNodeGroups() error {
 
 	for _, nodeGroup := range m.getNodeGroups() {
 		nodeGroupID := nodeGroup.Id()
-		if !exists[nodeGroupID] && !m.explicitlyConfigured[nodeGroupID] {
+		if !exists[nodeGroupID] && !m.isExplicitlyConfigured(nodeGroupID) {
 			m.UnregisterNodeGroup(nodeGroup)
 			changed = true
 		}
@@ -429,6 +499,10 @@ func (m *AzureManager) getFilteredScaleSets(filter []labelAutoDiscoveryConfig) (
 
 		vmss, err := NewScaleSet(spec, m, curSize, dedicatedHost)
 		if err != nil {
+			var unsupported *unsupportedDeallocateError
+			if m.config.Deallocate && !errors.As(err, &unsupported) {
+				return nil, err
+			}
 			klog.Warningf("ignoring vmss %q %s", *scaleSet.Name, err)
 			continue
 		}

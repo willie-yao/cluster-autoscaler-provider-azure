@@ -387,9 +387,22 @@ func (m *azureCache) Register(nodeGroup cloudprovider.NodeGroup) bool {
 
 	for i := range m.registeredNodeGroups {
 		if existing := m.registeredNodeGroups[i]; strings.EqualFold(existing.Id(), nodeGroup.Id()) {
-			if existing.MinSize(context.TODO()) == nodeGroup.MinSize(context.TODO()) && existing.MaxSize(context.TODO()) == nodeGroup.MaxSize(context.TODO()) {
+			previous, previousIsScaleSet := existing.(*ScaleSet)
+			next, nextIsScaleSet := nodeGroup.(*ScaleSet)
+			var unchanged bool
+			if previousIsScaleSet && nextIsScaleSet {
+				unchanged = previous.minSize == next.minSize && previous.maxSize == next.maxSize &&
+					previous.deallocate == next.deallocate
+			} else {
+				unchanged = existing.MinSize(context.TODO()) == nodeGroup.MinSize(context.TODO()) &&
+					existing.MaxSize(context.TODO()) == nodeGroup.MaxSize(context.TODO())
+			}
+			if unchanged {
 				// Node group is already registered and min/max size haven't changed, no action required.
 				return false
+			}
+			if previousIsScaleSet && nextIsScaleSet && previous.deallocate && next.deallocate {
+				next.suspendedVMSSState = previous.suspendedVMSSState
 			}
 			m.registeredNodeGroups[i] = nodeGroup
 			klog.V(4).Infof("Node group %q updated", nodeGroup.Id())

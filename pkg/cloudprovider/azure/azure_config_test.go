@@ -33,6 +33,44 @@ func TestCloudProviderAzureConsts(t *testing.T) {
 	assert.Equal(t, "standard", providerazureconsts.VMTypeStandard)
 }
 
+func TestBuildAzureSuspendedConfig(t *testing.T) {
+	originalEnv := saveAndClearEnv()
+	t.Cleanup(func() { loadEnv(originalEnv) })
+	for _, tc := range []struct {
+		name, fields, wantError string
+		env                     map[string]string
+		wantGlobal              bool
+		wantCap                 int64
+	}{
+		{name: "disabled"},
+		{name: "global", fields: `"deallocate":true,`, wantGlobal: true},
+		{name: "per-group cap validated by manager", fields: `"maxActiveNodes":3,`, wantCap: 3},
+		{name: "negative cap", fields: `"maxActiveNodes":-1,`, wantError: "nonnegative"},
+		{name: "environment overrides file", fields: `"deallocate":false,"maxActiveNodes":1,`,
+			env:        map[string]string{"AZURE_DEALLOCATE": "true", "AZURE_MAX_ACTIVE_NODES": "4"},
+			wantGlobal: true, wantCap: 4},
+		{name: "environment disables global mode", fields: `"deallocate":true,`,
+			env: map[string]string{"AZURE_DEALLOCATE": "false"}},
+		{name: "invalid boolean", env: map[string]string{"AZURE_DEALLOCATE": "bad"}, wantError: "AZURE_DEALLOCATE"},
+		{name: "invalid cap", env: map[string]string{"AZURE_MAX_ACTIVE_NODES": "bad"}, wantError: "AZURE_MAX_ACTIVE_NODES"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for key, value := range tc.env {
+				t.Setenv(key, value)
+			}
+			body := strings.Replace(validAzureCfg, "{", "{"+tc.fields, 1)
+			cfg, err := BuildAzureConfig(strings.NewReader(body))
+			if tc.wantError != "" {
+				require.ErrorContains(t, err, tc.wantError)
+				return
+			}
+			require.NoError(t, err)
+			require.Equal(t, tc.wantGlobal, cfg.Deallocate)
+			require.Equal(t, tc.wantCap, cfg.MaxActiveNodes)
+		})
+	}
+}
+
 // Note: The previous tests for InitializeCloudProviderRateLimitConfig were removed
 // because that function no longer exists in cloud-provider-azure v1.32.0+.
 // The rate limit configuration has been restructured to use
